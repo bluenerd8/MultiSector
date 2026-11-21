@@ -70,17 +70,20 @@ function Invoke-Build {
     Write-Host "Built $jar"
 }
 
+# Process command lines are often unreadable (processes started with other
+# permissions show a blank one), so match window titles, which always work:
+# the game's window is "Starsector 0.98..." (its launcher window "Starsector"),
+# the MultiSector launcher's is "MultiSector".
+function Get-JavaWindows {
+    Get-Process -Name java, javaw -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle }
+}
+
 function Test-GameRunning {
-    $procs = Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "StarfarerLauncher" }
-    return [bool]$procs
+    return [bool](Get-JavaWindows | Where-Object { $_.MainWindowTitle -match "^Starsector" })
 }
 
 function Test-LauncherRunning {
-    # Only the installed copy reads the installed jar; "dev launcher" runs from build/classes.
-    $procs = Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "multisector\.launcher" -and $_.CommandLine -match "MultiSector\.jar" }
-    return [bool]$procs
+    return [bool](Get-JavaWindows | Where-Object { $_.MainWindowTitle -match "^MultiSector" })
 }
 
 function Invoke-Install {
