@@ -18,13 +18,13 @@ try {
     if ($Action -eq "remove") {
         Write-Host "Removed MultiSector firewall rules."
     } else {
-        # Game: TCP + UDP on $Port. Launcher (save sharing): TCP on $Port + 1.
+        # Game: TCP + UDP on $Port. Launcher (save sharing): TCP + UDP on $Port + 1.
         $lobby = $Port + 1
         New-NetFirewallRule -Group "MultiSector" -DisplayName "MultiSector (TCP $Port-$lobby)" -Direction Inbound `
             -Protocol TCP -LocalPort "$Port-$lobby" -Action Allow -Profile Any | Out-Null
-        New-NetFirewallRule -Group "MultiSector" -DisplayName "MultiSector (UDP $Port)" -Direction Inbound `
-            -Protocol UDP -LocalPort $Port -Action Allow -Profile Any | Out-Null
-        Write-Host "Opened TCP $Port-$lobby and UDP $Port on all network types (Private, Public, Domain)."
+        New-NetFirewallRule -Group "MultiSector" -DisplayName "MultiSector (UDP $Port-$lobby)" -Direction Inbound `
+            -Protocol UDP -LocalPort "$Port-$lobby" -Action Allow -Profile Any | Out-Null
+        Write-Host "Opened TCP and UDP $Port-$lobby on all network types (Private, Public, Domain)."
 
         if ($Java -eq "") { $Java = Join-Path $PSScriptRoot "..\..\..\jre\bin\java.exe" }
         $javaw = Join-Path (Split-Path $Java) "javaw.exe"   # the launcher window runs on javaw

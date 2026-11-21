@@ -403,9 +403,9 @@ public final class Launcher {
                                 log("You already have this exact save, so nothing was downloaded.");
                             } else {
                                 progress.setString("Done");
-                                log(String.format(Locale.ROOT, "Downloaded %s in %.1f s (%s).",
+                                log(String.format(Locale.ROOT, "Downloaded %s in %.1f s (%s) over %s.",
                                         GameInstall.megabytes(info.zipBytes), elapsed / 1000.0,
-                                        speed(info.zipBytes, elapsed)));
+                                        speed(info.zipBytes, elapsed), LobbyClient.lastMethod));
                             }
                             log("In the game's Load list it's \"" + label + "\". Click Launch Starsector, then "
                                     + "Continue (or Load it).");

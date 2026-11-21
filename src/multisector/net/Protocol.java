@@ -43,6 +43,22 @@ public final class Protocol {
     /** host -> client: offset(long), length(int); then exactly length raw bytes of the zipped save */
     public static final byte LOBBY_RANGE = 23;
 
+    // UDP, launcher lobby (port + 1): the save in small pieces, so it fits through
+    // links that silently drop full-size TCP packets (Hamachi "MTU black hole")
+    /** client -> host: saveKey(long), count(int), chunk indices(int)... */
+    public static final byte XFER_GET = 24;
+    /** host -> client: saveKey(long), index(int), length(int), bytes */
+    public static final byte XFER_DATA = 25;
+    /** Payload per piece: with headers, well under every tunnel's packet limit. */
+    public static final int XFER_CHUNK = 1024;
+    /** Most indices one XFER_GET may carry (fits in one datagram). */
+    public static final int XFER_MAX_REQUEST = 256;
+
+    /** The save's short id for UDP packets: the first 16 hex digits of its SHA-256. */
+    public static long saveKey(String sha256Hex) {
+        return Long.parseUnsignedLong(sha256Hex.substring(0, 16), 16);
+    }
+
     // UDP
     /** client -> host: seq, sentNanos. Host echoes it back as PONG. */
     public static final byte PING = 10;

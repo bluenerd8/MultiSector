@@ -9,6 +9,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
@@ -16,6 +18,8 @@ import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.List;
 import java.util.Locale;
 import java.util.zip.ZipEntry;
@@ -45,6 +49,7 @@ final class LobbyServer {
     private final int gamePort;
     private final Listener listener;
     private volatile ServerSocket server;
+    private volatile DatagramSocket udp;
 
     // The zipped save, rebuilt when the files change.
     private byte[] blob;
@@ -72,6 +77,19 @@ final class LobbyServer {
             throw new IOException("Port " + port + " is already in use. Is another MultiSector launcher open?");
         }
         server = s;
+        // UDP on the same port number: the save in small pieces (see Protocol.XFER_GET).
+        try {
+            DatagramSocket u = new DatagramSocket(NetConfig.listenAddress(port));
+            u.setSendBufferSize(BUFFER);
+            udp = u;
+            background("lobby-udp", new Runnable() {
+                public void run() {
+                    udpLoop();
+                }
+            });
+        } catch (IOException e) {
+            listener.log("UDP port " + port + " is busy; friends will download over the slower TCP method.");
+        }
         // Zip now, so the first friend doesn't wait for it.
         background("lobby-prepare", new Runnable() {
             public void run() {
@@ -96,6 +114,51 @@ final class LobbyServer {
             try {
                 s.close();
             } catch (IOException ignored) {
+            }
+        }
+        DatagramSocket u = udp;
+        udp = null;
+        if (u != null) u.close();
+    }
+
+    /**
+     * Answers piece requests: for each requested index, send that 1 KB piece of
+     * the zipped save. Stateless, so lost requests or replies just get asked again.
+     */
+    private void udpLoop() {
+        byte[] in = new byte[2048];
+        Set<String> started = new HashSet<String>();
+        while (udp != null) {
+            DatagramSocket u = udp;
+            try {
+                DatagramPacket p = new DatagramPacket(in, in.length);
+                u.receive(p);
+                ByteBuffer bb = ByteBuffer.wrap(in, 0, p.getLength());
+                if (Protocol.readHeader(bb, null) != Protocol.XFER_GET) continue;
+                long key = bb.getLong();
+                int count = Math.min(bb.getInt(), Protocol.XFER_MAX_REQUEST);
+                Snapshot snap = ensureBlob();
+                if (Protocol.saveKey(snap.hash) != key) continue; // an older save: the friend will re-check
+                int pieces = (snap.data.length + Protocol.XFER_CHUNK - 1) / Protocol.XFER_CHUNK;
+                if (started.add(p.getAddress().getHostAddress() + "/" + snap.hash)) {
+                    listener.log(p.getAddress().getHostAddress() + " is downloading the save ("
+                            + GameInstall.megabytes(snap.data.length) + " compressed, in small UDP pieces)...");
+                }
+                byte[] out = new byte[Protocol.HEADER + 16 + Protocol.XFER_CHUNK];
+                for (int i = 0; i < count && bb.remaining() >= 4; i++) {
+                    int idx = bb.getInt();
+                    if (idx < 0 || idx >= pieces) continue;
+                    int off = idx * Protocol.XFER_CHUNK;
+                    int len = Math.min(Protocol.XFER_CHUNK, snap.data.length - off);
+                    ByteBuffer ob = ByteBuffer.wrap(out);
+                    ob.putInt(NetConfig.MAGIC).putShort(NetConfig.PROTOCOL_VERSION).put(Protocol.XFER_DATA);
+                    ob.putLong(key).putInt(idx).putInt(len).put(snap.data, off, len);
+                    u.send(new DatagramPacket(out, ob.position(), p.getSocketAddress()));
+                }
+            } catch (IOException e) {
+                if (udp == null) return; // stopped
+            } catch (RuntimeException e) {
+                // malformed request; ignore
             }
         }
     }

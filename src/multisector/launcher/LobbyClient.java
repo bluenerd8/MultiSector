@@ -128,57 +128,25 @@ final class LobbyClient {
                 return new Result(target, true);
             }
 
-            // Split into parts, one per connection.
             final long total = info.zipBytes;
             if (total > Integer.MAX_VALUE) throw new IOException("save too large");
-            int streams = (int) Math.max(1, Math.min(MAX_STREAMS, total / MIN_PART));
             final byte[] data = new byte[(int) total];
-            final AtomicLong done = new AtomicLong();
-            final AtomicReference<IOException> failure = new AtomicReference<IOException>();
-            List<Thread> workers = new ArrayList<Thread>();
-            long partSize = (total + streams - 1) / streams;
-            final String addr = address;
-            final String me = myName;
-            for (int i = 0; i < streams; i++) {
-                final boolean reuseFirst = i == 0;
-                final long off = i * partSize;
-                final int len = (int) Math.max(0, Math.min(partSize, total - off));
-                // Each worker opens its own connection, all at the same time, so the
-                // extra connections cost one round trip in total rather than one each.
-                Thread t = new Thread(new Runnable() {
-                    public void run() {
-                        try {
-                            Socket s;
-                            if (reuseFirst) {
-                                s = sockets.get(0);
-                            } else {
-                                s = connect(addr);
-                                synchronized (sockets) {
-                                    sockets.add(s);
-                                }
-                                hello(s, addr, me);
-                            }
-                            fetchRange(s, info.zipHash, off, len, data, done, progress, total);
-                        } catch (IOException e) {
-                            failure.compareAndSet(null, e);
-                            synchronized (sockets) {
-                                for (Socket other : sockets) closeQuietly(other); // stop the others too
-                            }
-                        }
-                    }
-                }, "lobby-download-" + i);
-                t.setDaemon(true);
-                workers.add(t);
-                t.start();
-            }
-            for (Thread t : workers) {
+
+            // First choice: small UDP pieces, which get through links that drop
+            // full-size TCP packets. Falls back to TCP if UDP is blocked.
+            boolean viaUdp = false;
+            if (!Boolean.getBoolean("multisector.noUdp")) {
+                String[] hp = splitAddress(address);
                 try {
-                    t.join();
-                } catch (InterruptedException e) {
-                    throw new IOException("interrupted");
+                    UdpTransfer.download(new InetSocketAddress(hp[0], NetConfig.lobbyPort(Integer.parseInt(hp[1]))),
+                            info.zipHash, data, progress);
+                    viaUdp = true;
+                } catch (UdpTransfer.Blocked e) {
+                    lastMethod = "TCP (UDP got no reply; the host may need to run tools\firewall.cmd again)";
                 }
             }
-            if (failure.get() != null) throw failure.get();
+            if (viaUdp) lastMethod = "UDP";
+            if (!viaUdp) tcpDownload(info, address, myName, data, sockets, progress);
             if (!LobbyServer.sha256(data).equals(info.zipHash)) {
                 throw new IOException("The download was corrupted on the way. Try again.");
             }
@@ -199,6 +167,62 @@ final class LobbyClient {
                 for (Socket s : sockets) closeQuietly(s);
             }
         }
+    }
+
+    /** Which method the last download used, for the launcher's log. */
+    static volatile String lastMethod = "";
+
+    /** Fallback: byte ranges over several parallel TCP connections. */
+    private static void tcpDownload(final Info info, String address, String myName, final byte[] data,
+                                    final List<Socket> sockets, final Progress progress) throws IOException {
+        final long total = data.length;
+        int streams = (int) Math.max(1, Math.min(MAX_STREAMS, total / MIN_PART));
+        final AtomicLong done = new AtomicLong();
+        final AtomicReference<IOException> failure = new AtomicReference<IOException>();
+        List<Thread> workers = new ArrayList<Thread>();
+        long partSize = (total + streams - 1) / streams;
+        final String addr = address;
+        final String me = myName;
+        for (int i = 0; i < streams; i++) {
+            final boolean reuseFirst = i == 0;
+            final long off = i * partSize;
+            final int len = (int) Math.max(0, Math.min(partSize, total - off));
+            // Each worker opens its own connection, all at the same time, so the
+            // extra connections cost one round trip in total rather than one each.
+            Thread t = new Thread(new Runnable() {
+                public void run() {
+                    try {
+                        Socket s;
+                        if (reuseFirst) {
+                            s = sockets.get(0);
+                        } else {
+                            s = connect(addr);
+                            synchronized (sockets) {
+                                sockets.add(s);
+                            }
+                            hello(s, addr, me);
+                        }
+                        fetchRange(s, info.zipHash, off, len, data, done, progress, total);
+                    } catch (IOException e) {
+                        failure.compareAndSet(null, e);
+                        synchronized (sockets) {
+                            for (Socket other : sockets) closeQuietly(other); // stop the others too
+                        }
+                    }
+                }
+            }, "lobby-download-" + i);
+            t.setDaemon(true);
+            workers.add(t);
+            t.start();
+        }
+        for (Thread t : workers) {
+            try {
+                t.join();
+            } catch (InterruptedException e) {
+                throw new IOException("interrupted");
+            }
+        }
+        if (failure.get() != null) throw failure.get();
     }
 
     private static void fetchRange(Socket s, String hash, long offset, int length, byte[] into,
