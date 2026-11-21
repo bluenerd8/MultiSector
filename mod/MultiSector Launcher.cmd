@@ -8,4 +8,5 @@ if not exist "%JAVAW%" (
     pause
     exit /b 1
 )
-start "" "%JAVAW%" -cp "%~dp0jars\MultiSector.jar" multisector.launcher.Launcher
+rem json.jar is the JSON library that ships with the game.
+start "" "%JAVAW%" -cp "%~dp0jars\MultiSector.jar;%~dp0..\..\starsector-core\json.jar" multisector.launcher.Launcher

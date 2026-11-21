@@ -136,7 +136,8 @@ function Invoke-Launcher {
     # Runs from build/classes against the real game folder; the shipped
     # "MultiSector Launcher.cmd" finds the game from the jar's location instead.
     Start-Process -FilePath (Join-Path $jdkBin "javaw.exe") -ArgumentList @(
-        "-Dmultisector.gameDir=`"$GameDir`"", "-cp", "`"$(Join-Path $root 'build\classes')`"",
+        "-Dmultisector.gameDir=`"$GameDir`"", "-cp",
+        "`"$(Join-Path $root 'build\classes');$(Join-Path $core 'json.jar')`"",
         "multisector.launcher.Launcher")
     Write-Host "Launcher started."
 }

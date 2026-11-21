@@ -75,6 +75,8 @@ public final class Launcher {
     private final JProgressBar progress = new JProgressBar(0, 1000);
     private LobbyClient.Info checkedInfo;
 
+    private CharacterTab characterTab;
+
     public static void main(String[] args) {
         try {
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
@@ -107,7 +109,20 @@ public final class Launcher {
         JPanel top = row(new JLabel("Your name:"), nameField,
                 Box.createHorizontalStrut(20), new JLabel("Starsector: " + game.root));
 
+        characterTab = new CharacterTab(game, new CharacterTab.Host() {
+            public String currentName() {
+                return myName();
+            }
+
+            public void log(String line) {
+                Launcher.this.log(line);
+            }
+        });
+        String profileName = characterTab.savedName();
+        if (profileName != null && !profileName.isEmpty()) nameField.setText(profileName);
+
         JTabbedPane tabs = new JTabbedPane();
+        tabs.addTab("Character", characterTab);
         tabs.addTab("Host a game", hostTab());
         tabs.addTab("Join a game", joinTab());
 
@@ -144,7 +159,7 @@ public final class Launcher {
                 System.exit(0);
             }
         });
-        frame.setMinimumSize(new Dimension(720, 600));
+        frame.setMinimumSize(new Dimension(760, 720));
         frame.pack();
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
