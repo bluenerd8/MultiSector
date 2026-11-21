@@ -7,6 +7,7 @@ import com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotAPI;
 import com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotsAPI;
 import multisector.net.AddressFinder;
 import multisector.probe.SandboxProbe;
+import multisector.ui.AutoConnect;
 import multisector.ui.MultiSectorConfig;
 import multisector.ui.MultiplayerAbility;
 import multisector.ui.MultiplayerHotkey;
@@ -43,6 +44,11 @@ public class MultiSectorModPlugin extends BaseModPlugin {
             ensureAbilityOnBar();
         } catch (Exception e) {
             Global.getLogger(MultiSectorModPlugin.class).warn("[MultiSector] couldn't add the Multiplayer button", e);
+        }
+        try {
+            AutoConnect.onGameLoad();
+        } catch (Exception e) {
+            Global.getLogger(MultiSectorModPlugin.class).warn("[MultiSector] auto-connect failed", e);
         }
     }
 

@@ -30,6 +30,16 @@ public final class Protocol {
     /** client -> host: my current round-trip ms */
     public static final byte PING_REPORT = 6;
 
+    // TCP, launcher lobby (port + 1)
+    /** client -> host: name */
+    public static final byte LOBBY_HELLO = 20;
+    /** host -> client: hostName, characterName, saveDate, gameVersion, saveBytes(long), gamePort(int), modCount(int), modIds... */
+    public static final byte LOBBY_INFO = 21;
+    /** client -> host: send me the save */
+    public static final byte LOBBY_GET_SAVE = 22;
+    /** host -> client: totalBytes(long), fileCount(int); a raw zip stream of the save folder follows */
+    public static final byte LOBBY_SAVE_BEGIN = 23;
+
     // UDP
     /** client -> host: seq, sentNanos. Host echoes it back as PONG. */
     public static final byte PING = 10;

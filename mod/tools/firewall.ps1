@@ -18,16 +18,20 @@ try {
     if ($Action -eq "remove") {
         Write-Host "Removed MultiSector firewall rules."
     } else {
-        New-NetFirewallRule -Group "MultiSector" -DisplayName "MultiSector (TCP $Port)" -Direction Inbound `
-            -Protocol TCP -LocalPort $Port -Action Allow -Profile Any | Out-Null
+        # Game: TCP + UDP on $Port. Launcher (save sharing): TCP on $Port + 1.
+        $lobby = $Port + 1
+        New-NetFirewallRule -Group "MultiSector" -DisplayName "MultiSector (TCP $Port-$lobby)" -Direction Inbound `
+            -Protocol TCP -LocalPort "$Port-$lobby" -Action Allow -Profile Any | Out-Null
         New-NetFirewallRule -Group "MultiSector" -DisplayName "MultiSector (UDP $Port)" -Direction Inbound `
             -Protocol UDP -LocalPort $Port -Action Allow -Profile Any | Out-Null
-        Write-Host "Opened TCP and UDP port $Port on all network types (Private, Public, Domain)."
+        Write-Host "Opened TCP $Port-$lobby and UDP $Port on all network types (Private, Public, Domain)."
 
         if ($Java -eq "") { $Java = Join-Path $PSScriptRoot "..\..\..\jre\bin\java.exe" }
-        if (Test-Path $Java) {
-            $Java = (Resolve-Path $Java).Path
-            $blocks = Get-NetFirewallApplicationFilter -Program $Java -ErrorAction SilentlyContinue |
+        $javaw = Join-Path (Split-Path $Java) "javaw.exe"   # the launcher window runs on javaw
+        foreach ($exe in @($Java, $javaw)) {
+            if (-not (Test-Path $exe)) { continue }
+            $exe = (Resolve-Path $exe).Path
+            $blocks = Get-NetFirewallApplicationFilter -Program $exe -ErrorAction SilentlyContinue |
                 Get-NetFirewallRule | Where-Object { $_.Action -eq "Block" -and $_.Direction -eq "Inbound" }
             foreach ($b in $blocks) {
                 Write-Host "Removed a block rule for the game's Java: $($b.DisplayName)"

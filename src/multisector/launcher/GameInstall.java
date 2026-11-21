@@ -1,0 +1,231 @@
+package multisector.launcher;
+
+import java.io.File;
+import java.io.IOException;
+import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.TimeZone;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Everything the launcher needs to know about the Starsector install: where
+ * it is, its saves, its enabled mods, and how to start it.
+ *
+ * Runs outside the game, so the mod sandbox doesn't apply and normal file
+ * access is fine.
+ */
+final class GameInstall {
+
+    final File root;
+    final File saves;
+    final File common;
+    final File mods;
+
+    private GameInstall(File root) {
+        this.root = root;
+        this.saves = new File(root, "saves");
+        this.common = new File(saves, "common");
+        this.mods = new File(root, "mods");
+    }
+
+    /**
+     * Finds the game folder: the multisector.gameDir property if set (used by
+     * "dev launcher"), otherwise three levels up from the jar
+     * (game/mods/MultiSector/jars/MultiSector.jar).
+     */
+    static GameInstall locate() throws IOException {
+        String prop = System.getProperty("multisector.gameDir");
+        if (prop != null && !prop.isEmpty()) return check(new File(prop));
+        try {
+            File jar = new File(GameInstall.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+            File guess = jar.getParentFile().getParentFile().getParentFile().getParentFile();
+            return check(guess);
+        } catch (URISyntaxException | NullPointerException e) {
+            throw new IOException("Can't work out where Starsector is installed.");
+        }
+    }
+
+    private static GameInstall check(File dir) throws IOException {
+        if (!new File(dir, "starsector-core").isDirectory()) {
+            throw new IOException("\"" + dir + "\" doesn't look like a Starsector folder. "
+                    + "The launcher must stay in Starsector\\mods\\MultiSector.");
+        }
+        return new GameInstall(dir.getCanonicalFile());
+    }
+
+    // ------------------------------------------------------------------ saves
+
+    static final class SaveInfo {
+        final File folder;
+        final String characterName;
+        final String saveDate;
+        final String gameVersion;
+        final long sizeBytes;
+
+        SaveInfo(File folder, String characterName, String saveDate, String gameVersion, long sizeBytes) {
+            this.folder = folder;
+            this.characterName = characterName;
+            this.saveDate = saveDate;
+            this.gameVersion = gameVersion;
+            this.sizeBytes = sizeBytes;
+        }
+
+        @Override
+        public String toString() {
+            return characterName + "   -   saved " + saveDate + "   (" + megabytes(sizeBytes) + ")";
+        }
+    }
+
+    /** Saves with a descriptor, newest first. */
+    List<SaveInfo> listSaves() {
+        List<SaveInfo> out = new ArrayList<SaveInfo>();
+        File[] dirs = saves.listFiles();
+        if (dirs == null) return out;
+        Arrays.sort(dirs, new Comparator<File>() {
+            public int compare(File a, File b) {
+                return Long.compare(descriptorTime(b), descriptorTime(a));
+            }
+        });
+        for (File d : dirs) {
+            SaveInfo info = readSave(d);
+            if (info != null) out.add(info);
+        }
+        return out;
+    }
+
+    static SaveInfo readSave(File dir) {
+        File desc = new File(dir, "descriptor.xml");
+        if (!dir.isDirectory() || !desc.isFile()) return null;
+        try {
+            String xml = new String(Files.readAllBytes(desc.toPath()), StandardCharsets.UTF_8);
+            long size = 0;
+            File[] files = dir.listFiles();
+            if (files != null) for (File f : files) if (f.isFile()) size += f.length();
+            return new SaveInfo(dir, orDefault(tag(xml, "characterName"), dir.getName()),
+                    localTime(tag(xml, "saveDate")), orDefault(tag(xml, "gameVersion"), "?"), size);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** "2026-11-21 16:32:26.559 UTC" -> "2026-11-22 00:32" in this PC's time zone. */
+    static String localTime(String utc) {
+        if (utc == null) return "?";
+        try {
+            SimpleDateFormat in = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS 'UTC'", Locale.ROOT);
+            in.setTimeZone(TimeZone.getTimeZone("UTC"));
+            return new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.ROOT).format(in.parse(utc.trim()));
+        } catch (java.text.ParseException e) {
+            return utc;
+        }
+    }
+
+    private static long descriptorTime(File dir) {
+        return new File(dir, "descriptor.xml").lastModified();
+    }
+
+    /** Text of the first &lt;name ...&gt;text&lt;/name&gt;, or null. */
+    static String tag(String xml, String name) {
+        Matcher m = Pattern.compile("<" + name + "(?:\\s[^>]*)?>([^<]*)</" + name + ">").matcher(xml);
+        return m.find() ? m.group(1).trim() : null;
+    }
+
+    /**
+     * Rewrites the descriptor's save date to now, so the downloaded save is
+     * the newest one and the main menu's Continue button loads it.
+     */
+    static void touchSaveDate(File saveDir) throws IOException {
+        File desc = new File(saveDir, "descriptor.xml");
+        String xml = new String(Files.readAllBytes(desc.toPath()), StandardCharsets.UTF_8);
+        SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS 'UTC'", Locale.ROOT);
+        f.setTimeZone(TimeZone.getTimeZone("UTC"));
+        String now = f.format(new Date());
+        xml = xml.replaceFirst("(<saveDate(?:\\s[^>]*)?>)[^<]*(</saveDate>)", "$1" + Matcher.quoteReplacement(now) + "$2");
+        Files.write(desc.toPath(), xml.getBytes(StandardCharsets.UTF_8));
+        long t = System.currentTimeMillis();
+        File[] files = saveDir.listFiles();
+        if (files != null) for (File file : files) file.setLastModified(t);
+        saveDir.setLastModified(t);
+    }
+
+    // ------------------------------------------------------------------- mods
+
+    /** Mod ids from mods/enabled_mods.json. */
+    List<String> enabledMods() {
+        List<String> out = new ArrayList<String>();
+        File f = new File(mods, "enabled_mods.json");
+        if (!f.isFile()) return out;
+        try {
+            String json = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+            Matcher arr = Pattern.compile("\\[(.*?)\\]", Pattern.DOTALL).matcher(json);
+            if (arr.find()) {
+                Matcher s = Pattern.compile("\"([^\"]+)\"").matcher(arr.group(1));
+                while (s.find()) out.add(s.group(1));
+            }
+        } catch (IOException ignored) {
+        }
+        return out;
+    }
+
+    // ---------------------------------------------------------- common files
+
+    /** Writes saves/common/&lt;name&gt;.data, which the mod reads with readTextFileFromCommon(name). */
+    void writeCommon(String name, String text) throws IOException {
+        if (!common.isDirectory() && !common.mkdirs()) throw new IOException("Can't create " + common);
+        Files.write(new File(common, name + ".data").toPath(), text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    String readCommon(String name) {
+        File f = new File(common, name + ".data");
+        try {
+            return f.isFile() ? new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8) : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    // ---------------------------------------------------------------- launch
+
+    boolean isGameRunning() {
+        try {
+            Process p = new ProcessBuilder("tasklist", "/FI", "IMAGENAME eq java.exe", "/V", "/FO", "CSV").start();
+            String out = new String(readAll(p.getInputStream()), StandardCharsets.UTF_8);
+            return out.toLowerCase(Locale.ROOT).contains("starsector");
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    void launchGame() throws IOException {
+        File exe = new File(root, "starsector.exe");
+        if (!exe.isFile()) throw new IOException("Can't find " + exe);
+        new ProcessBuilder(exe.getAbsolutePath()).directory(root).start();
+    }
+
+    // ---------------------------------------------------------------- utils
+
+    static String megabytes(long bytes) {
+        return String.format(Locale.ROOT, "%.1f MB", bytes / (1024.0 * 1024.0));
+    }
+
+    static String orDefault(String s, String d) {
+        return s == null || s.isEmpty() ? d : s;
+    }
+
+    private static byte[] readAll(java.io.InputStream in) throws IOException {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+        return bos.toByteArray();
+    }
+}

@@ -9,17 +9,33 @@ INSTALL
   Enable "MultiSector" in the launcher's Mods list.
 
 PLAYING OVER HAMACHI
-  1. Everyone joins the same Hamachi network.
-  2. HOST ONLY, once: double-click  tools\firewall.cmd  and allow admin.
-     Without it, Windows usually blocks friends from connecting, because
-     it treats Hamachi as a "Public" network.
-  3. Host: in the campaign press F8 (or click the Multiplayer button on
-     the ability bar) and click "Host game". Copy the 25.x.x.x address
-     it shows and send it to your friends.
-  4. Friends: press F8, paste the host's address, click "Join".
+  Everyone joins the same Hamachi network first.
 
-  Right now players can connect and see each other with ping. The game
-  itself isn't synced yet, so everyone still plays their own campaign.
+  HOST ONLY, once: double-click  tools\firewall.cmd  and allow admin.
+  Without it, Windows usually blocks friends from connecting, because it
+  treats Hamachi as a "Public" network.
+
+  Then use the launcher: double-click  "MultiSector Launcher.cmd"
+  (keep a shortcut to it on your desktop).
+
+  Host:
+    1. In the game, save. Then in the launcher, "Host a game" tab:
+       pick that save and click "Start hosting".
+    2. Send friends the address the launcher shows (25.x.x.x).
+    3. Click "Launch Starsector" and load that save. The game starts
+       hosting by itself. Keep the launcher open while friends download.
+
+  Friends:
+    1. "Join a game" tab: type the host's address, click "Check host".
+       It warns you if your mods don't match the host's.
+    2. Click "Download save", then "Launch Starsector", then Continue on
+       the main menu. The game joins the host by itself.
+
+  In the game, F8 (or the Multiplayer button on the ability bar) shows
+  the connection and players, and lets you host or join by hand.
+
+  Right now everyone loads the same world and sees each other connected
+  with ping. Fleets and events aren't synced live yet.
 
 IF JOINING FAILS
   Double-click  tools\connection-test.cmd  on both PCs. The host presses

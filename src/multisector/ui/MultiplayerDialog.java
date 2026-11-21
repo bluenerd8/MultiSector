@@ -60,6 +60,11 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate {
 
     private final Plugin plugin = new Plugin();
 
+    /** Pre-fills the Join box, e.g. from the launcher session. */
+    public static void setLastJoinAddress(String address) {
+        lastJoinAddress = address == null ? "" : address;
+    }
+
     /** The invisible interaction dialog hosting this window; dismissed together with it. */
     private InteractionDialogAPI host;
 

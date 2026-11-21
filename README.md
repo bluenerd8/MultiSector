@@ -11,6 +11,16 @@ Get the latest zip from [Releases](https://github.com/bluenerd8/MultiSector/rele
 - `firewall.cmd`: the host runs it once so friends can connect
 - `connection-test.cmd`: checks the connection between two players
 
+## The launcher
+
+`MultiSector Launcher.cmd` in the mod folder opens a window outside the game that handles everything before playing:
+
+- **Host:** pick a save and share it, and see your Hamachi address with a copy button
+- **Join:** type the host's address, check your mods match theirs, download their save
+- **Launch Starsector.** When the save loads, the mod hosts or joins by itself.
+
+The host's save is the shared world, so the map never has to be synced piece by piece. The launcher shares it on port 7778, next to the game's 7777. Developers can open it with `dev launcher`.
+
 ## In the game
 
 Press **F8** in the campaign, or click the **Multiplayer** button the mod adds to your ability bar. The window lets you:
@@ -78,7 +88,8 @@ src/multisector/        Java sources
   MultiSectorModPlugin.java   mod entry point
   probe/                      sandbox probe
   net/                        networking: session (host/join), protocol, address detection, tester
-  ui/                         Multiplayer window, hotkey, ability button, join/leave messages
+  ui/                         Multiplayer window, hotkey, ability button, auto-connect, messages
+  launcher/                   the external launcher window (runs outside the game)
 docs/
   design.md             architecture and design notes
   networking.md         how players connect

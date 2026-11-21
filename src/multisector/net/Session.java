@@ -101,6 +101,11 @@ public final class Session {
     public int getMyId() { return myId; }
     public boolean isActive() { return state != State.IDLE; }
 
+    /** Queues a message for the game to show, next to the session's own ones. */
+    public void notice(String text) {
+        notices.add(text);
+    }
+
     /** Next "X joined"-style message for the game to show, or null. */
     public String pollNotice() {
         return notices.poll();

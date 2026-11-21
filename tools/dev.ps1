@@ -10,7 +10,8 @@
 #   dev ip                       show this PC's addresses (finds your Hamachi IP)
 #   dev nettest host [port]      run a connection test host
 #   dev nettest join <ip> [port] test the connection to a host
-#   dev firewall [port]          open the port in Windows Firewall (asks for admin)
+#   dev launcher                 open the MultiSector launcher window
+#   dev firewall [port]          open the ports in Windows Firewall (asks for admin)
 #   dev firewall remove          remove those firewall rules again
 #
 # The game folder defaults to D:\Starsector. Override it with the
@@ -130,6 +131,16 @@ function Invoke-NetTest([string[]]$NetArgs) {
     exit $LASTEXITCODE
 }
 
+function Invoke-Launcher {
+    Invoke-Build | Out-Null
+    # Runs from build/classes against the real game folder; the shipped
+    # "MultiSector Launcher.cmd" finds the game from the jar's location instead.
+    Start-Process -FilePath (Join-Path $jdkBin "javaw.exe") -ArgumentList @(
+        "-Dmultisector.gameDir=`"$GameDir`"", "-cp", "`"$(Join-Path $root 'build\classes')`"",
+        "multisector.launcher.Launcher")
+    Write-Host "Launcher started."
+}
+
 function Invoke-Firewall([string[]]$FwArgs) {
     $remove = $FwArgs.Count -gt 0 -and $FwArgs[0] -eq "remove"
     $port = $DefaultPort
@@ -163,6 +174,7 @@ switch ($Task.ToLower()) {
     "ip"      { Invoke-NetTest @("ip") }
     "nettest" { Invoke-NetTest $Rest }
     "firewall" { Invoke-Firewall $Rest }
+    "launcher" { Invoke-Launcher }
     default {
         Write-Host @"
 Usage: dev <task>
@@ -177,7 +189,8 @@ Usage: dev <task>
   ip                        show this PC's addresses (finds your Hamachi IP)
   nettest host [port]       run a connection test host
   nettest join <ip> [port]  test the connection to a host
-  firewall [port]           open port $DefaultPort in Windows Firewall (asks for admin)
+  launcher                  open the MultiSector launcher window
+  firewall [port]           open ports $DefaultPort-$($DefaultPort+1) in Windows Firewall (asks for admin)
   firewall remove           remove those firewall rules
 
 Game folder: $GameDir  (set STARSECTOR_DIR to change it)
