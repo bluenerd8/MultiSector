@@ -14,7 +14,7 @@ import java.nio.ByteBuffer;
 import java.util.List;
 
 /**
- * Standalone connection tester, run outside the game (see "dev nettest").
+ * Standalone connection tester, run outside the game (see "dev nettest", or tools/connection-test.cmd in the mod folder).
  * Uses the same protocol as the mod, so "join" works against both
  * "nettest host" and a host running inside the game.
  *
@@ -76,7 +76,8 @@ public final class NetTest {
             System.exit(1);
         }
         System.out.println("Hosting on port " + port + " (TCP + UDP, all adapters). Press Ctrl+C to stop.");
-        System.out.println("Friend runs:  dev nettest join <your address>" + (port != NetConfig.DEFAULT_PORT ? " " + port : ""));
+        System.out.println("Your friend runs tools\\connection-test.cmd and types your address"
+                + (port != NetConfig.DEFAULT_PORT ? " (port " + port + ")" : "") + ".");
         System.out.println("If Windows asks whether to allow Java, tick BOTH private and public networks.");
         System.out.println();
         while (session.isActive()) {
@@ -139,7 +140,7 @@ public final class NetTest {
         } catch (ConnectException e) {
             System.out.println("[FAIL] TCP: connection refused.");
             System.out.println("  Reached the host's PC, but nothing is listening on port " + port + ".");
-            System.out.println("  - Is the host hosting (in game, or \"dev nettest host\")? Same port number?");
+            System.out.println("  - Is the host hosting (in game, or the connection test)? Same port number?");
             return false;
         } catch (SocketTimeoutException e) {
             System.out.println("[FAIL] TCP: no answer within " + NetConfig.CONNECT_TIMEOUT_MS / 1000 + " s.");
@@ -164,10 +165,10 @@ public final class NetTest {
     private static void printUnreachableHints() {
         System.out.println("  Most likely causes, in order:");
         System.out.println("  - Windows Firewall on the host. Hamachi counts as a Public network, which blocks");
-        System.out.println("    incoming connections. The host runs \"dev firewall\" once (asks for admin).");
+        System.out.println("    incoming connections. The host double-clicks tools\\firewall.cmd once.");
         System.out.println("  - Not on the same Hamachi network, or someone is offline. In the Hamachi window");
         System.out.println("    both of you need a green dot. Yellow means the peers can't reach each other.");
-        System.out.println("  - Wrong address. Use the host's 25.x.x.x address from \"dev ip\" on their PC.");
+        System.out.println("  - Wrong address. Use the host's 25.x.x.x address shown in their Multiplayer window (F8).");
     }
 
     private static boolean udpPings(InetSocketAddress target) throws IOException {
@@ -209,7 +210,7 @@ public final class NetTest {
             if (received == 0) {
                 System.out.println("[FAIL] UDP: 0/" + PING_COUNT + " pings came back.");
                 System.out.println("  TCP works but UDP doesn't, so a firewall is letting one through and not the other.");
-                System.out.println("  The host should run \"dev firewall\", which opens both TCP and UDP.");
+                System.out.println("  The host should run tools\\firewall.cmd, which opens both TCP and UDP.");
                 return false;
             }
             System.out.println((lossPct > 10 ? "[WARN]" : "[ OK ]") + " UDP: " + received + "/" + PING_COUNT

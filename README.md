@@ -4,6 +4,13 @@ Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), ai
 
 > **Status: early prototype.** Players can host and join from inside the game and see each other in a player list with ping. Game state isn't synced yet, so everyone still plays their own campaign.
 
+## Download
+
+Get the latest zip from [Releases](https://github.com/bluenerd8/MultiSector/releases) and unzip it into `Starsector\mods`, so you end up with `Starsector\mods\MultiSector`. The zip includes `README.txt` with setup steps, plus two double-click tools in `tools\`:
+
+- `firewall.cmd`: the host runs it once so friends can connect
+- `connection-test.cmd`: checks the connection between two players
+
 ## In the game
 
 Press **F8** in the campaign, or click the **Multiplayer** button the mod adds to your ability bar. The window lets you:

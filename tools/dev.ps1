@@ -124,29 +124,13 @@ function Invoke-Firewall([string[]]$FwArgs) {
     $port = $DefaultPort
     if (-not $remove -and $FwArgs.Count -gt 0) { $port = [int]$FwArgs[0] }
     $java = Join-Path $jdkBin "java.exe"
+    # Same script players get in the release zip (mod/tools/firewall.ps1).
+    $fwScript = Join-Path $modDir "tools\firewall.ps1"
+    $action = if ($remove) { "remove" } else { "open" }
 
-    # Runs elevated. Port rules work on every network profile, including
-    # Public, which is what Windows usually assigns to the Hamachi adapter.
-    # Clicking "Cancel" on Windows' "allow Java?" prompt creates Block rules
-    # for java.exe, and Block beats Allow, so those are removed too.
-    $script = @"
-`$ErrorActionPreference = 'Stop'
-Get-NetFirewallRule -Group 'MultiSector' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-if ('$remove' -eq 'True') {
-    Write-Host 'Removed MultiSector firewall rules.'
-} else {
-    New-NetFirewallRule -Group 'MultiSector' -DisplayName 'MultiSector (TCP $port)' -Direction Inbound -Protocol TCP -LocalPort $port -Action Allow -Profile Any | Out-Null
-    New-NetFirewallRule -Group 'MultiSector' -DisplayName 'MultiSector (UDP $port)' -Direction Inbound -Protocol UDP -LocalPort $port -Action Allow -Profile Any | Out-Null
-    Write-Host 'Opened TCP and UDP port $port on all network types (Private, Public, Domain).'
-    `$blocks = Get-NetFirewallApplicationFilter -Program '$java' -ErrorAction SilentlyContinue | Get-NetFirewallRule | Where-Object { `$_.Action -eq 'Block' -and `$_.Direction -eq 'Inbound' }
-    foreach (`$b in `$blocks) { Write-Host ('Removed block rule for the game''s Java: ' + `$b.DisplayName); `$b | Remove-NetFirewallRule }
-}
-Write-Host ''
-Read-Host 'Press Enter to close'
-"@
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
     Write-Host "Asking Windows for admin rights to change firewall rules..."
-    $p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encoded
+    $p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", "`"$fwScript`"", "-Action", $action, "-Port", $port, "-Java", "`"$java`""
     if ($p.ExitCode -ne 0) { throw "firewall update failed (exit $($p.ExitCode))" }
     Write-Host "Done."
 }

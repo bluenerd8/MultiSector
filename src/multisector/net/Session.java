@@ -124,7 +124,7 @@ public final class Session {
             closeQuietly(s);
             if (u != null) u.close();
             throw new IOException("Port " + port + " is already in use. Is another copy of the game or "
-                    + "\"dev nettest host\" running?", e);
+                    + "the connection test running?", e);
         }
         server = s;
         hostUdp = u;
@@ -417,7 +417,7 @@ public final class Session {
     private static String unreachableHelp() {
         return "No answer from the host. Check: (1) you're both online in the same Hamachi network "
                 + "with a green dot, (2) you typed the host's 25.x.x.x address, (3) the host ran "
-                + "\"dev firewall\" once, since Windows blocks Hamachi by default.";
+                + "tools\\firewall.cmd once, since Windows blocks Hamachi by default.";
     }
 
     private static List<Player> readPlayerList(ByteBuffer bb) {
