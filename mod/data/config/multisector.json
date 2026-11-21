@@ -1,0 +1,11 @@
+{
+	# Key that opens the Multiplayer window in the campaign.
+	# Uses LWJGL key names: F1-F12, A-Z, NUMPAD0, HOME, INSERT, etc.
+	"hotkey":"F8",
+
+	# Port for hosting and the default port for joining (TCP and UDP).
+	"port":7777,
+
+	# Show "press F8 to open Multiplayer" when a save loads.
+	"showHintOnLoad":true,
+}

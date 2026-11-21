@@ -1,0 +1,2 @@
+name,id,type,tags,activationDays,activationCooldown,durationDays,deactivationDays,deactivationCooldown,unlockedAtStart,defaultForAIFleet,musicSuppression,uiOn,uiOff,uiLoop,worldOn,worldOff,worldLoop,icon,plugin,ai,desc,sortOrder
+Multiplayer,multisector_multiplayer,DURATION,,,,,,,FALSE,,,,,,,,,graphics/icons/abilities/multisector_multiplayer.png,multisector.ui.MultiplayerAbility,,Host or join a MultiSector multiplayer game.,5000

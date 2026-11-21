@@ -2,7 +2,17 @@
 
 Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), aimed at small friend groups (2–8 players). One player hosts and runs the real game; everyone else connects to them.
 
-> **Status: early prototype.** The mod currently only runs a sandbox probe that checks which Java APIs Starsector lets mods use. There's no multiplayer yet.
+> **Status: early prototype.** Players can host and join from inside the game and see each other in a player list with ping. Game state isn't synced yet, so everyone still plays their own campaign.
+
+## In the game
+
+Press **F8** in the campaign, or click the **Multiplayer** button the mod adds to your ability bar. The window lets you:
+
+- **Host game:** shows your Hamachi address, with a button to copy it
+- **Join:** type or paste the host's address, then click Join
+- see the **player list** with each player's ping
+
+Change the hotkey or port in `mods/MultiSector/data/config/multisector.json`.
 
 - **Game version:** Starsector 0.98.5a-RC8 (Java 17)
 - **Dependencies:** none yet. LazyLib will be added later.
@@ -41,8 +51,10 @@ The host's game listens on port 7777, and other players connect to the host's IP
 Quick version for Hamachi:
 
 1. Everyone joins the same Hamachi network.
-2. Host: `dev firewall` (once), then `dev ip` to get their `25.x.x.x` address.
-3. Check the connection before playing. The host runs `dev nettest host`, and the friend runs `dev nettest join 25.x.x.x`.
+2. Host: run `dev firewall` once, then press F8 in the game and click **Host game**. The window shows the `25.x.x.x` address to give friends.
+3. Friends: press F8, paste the host's address, and click **Join**.
+
+If joining fails, `dev nettest join 25.x.x.x` gives a more detailed diagnosis. It works against a host in the game too.
 
 Full guide and troubleshooting: [docs/networking.md](docs/networking.md).
 
@@ -51,11 +63,15 @@ Full guide and troubleshooting: [docs/networking.md](docs/networking.md).
 ```
 dev.cmd                 task runner entry point
 tools/dev.ps1           task implementations
-mod/                    the mod folder exactly as it ships (mod_info.json, data, jars/)
+tools/make_icon.py      draws the ability-bar icon
+mod/                    the mod folder exactly as it ships
+  data/config/multisector.json   hotkey and port settings
+  data/campaign/abilities.csv    the Multiplayer ability-bar button
 src/multisector/        Java sources
   MultiSectorModPlugin.java   mod entry point
   probe/                      sandbox probe
-  net/                        networking: config, address detection, framing, connection tester
+  net/                        networking: session (host/join), protocol, address detection, tester
+  ui/                         Multiplayer window, hotkey, ability button, join/leave messages
 docs/
   design.md             architecture and design notes
   networking.md         how players connect

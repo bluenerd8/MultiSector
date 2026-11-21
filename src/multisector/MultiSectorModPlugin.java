@@ -2,22 +2,87 @@ package multisector;
 
 import com.fs.starfarer.api.BaseModPlugin;
 import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotAPI;
+import com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotsAPI;
 import multisector.net.AddressFinder;
 import multisector.probe.SandboxProbe;
+import multisector.ui.MultiSectorConfig;
+import multisector.ui.MultiplayerAbility;
+import multisector.ui.MultiplayerHotkey;
+import multisector.ui.SessionNoticeScript;
 import org.apache.log4j.Logger;
 
 import java.util.List;
 
 /**
- * Mod entry point. For now it runs the sandbox probe and logs this PC's
- * network addresses (so a Hamachi host can find theirs in the log).
+ * Mod entry point.
+ *
+ * At startup: runs the sandbox probe, loads the config and logs this PC's
+ * addresses. On every save load: registers the hotkey, puts the Multiplayer
+ * button on the ability bar (first time only), and starts the script that
+ * shows join/leave messages.
  */
 public class MultiSectorModPlugin extends BaseModPlugin {
+
+    /** Set once the button has been placed in this save, so removing it from the bar sticks. */
+    private static final String PLACED_FLAG = "$multisector_abilityPlaced";
 
     @Override
     public void onApplicationLoad() throws Exception {
         SandboxProbe.runAll();
+        MultiSectorConfig.load();
         logAddresses();
+    }
+
+    @Override
+    public void onGameLoad(boolean newGame) {
+        Global.getSector().getListenerManager().addListener(new MultiplayerHotkey(), true);
+        Global.getSector().addTransientScript(new SessionNoticeScript(MultiSectorConfig.isShowHintOnLoad()));
+        try {
+            ensureAbilityOnBar();
+        } catch (Exception e) {
+            Global.getLogger(MultiSectorModPlugin.class).warn("[MultiSector] couldn't add the Multiplayer button", e);
+        }
+    }
+
+    /** Gives the player the Multiplayer ability and puts it in the first free ability-bar slot. */
+    private static void ensureAbilityOnBar() {
+        CampaignFleetAPI fleet = Global.getSector().getPlayerFleet();
+        if (fleet == null) return;
+        String id = MultiplayerAbility.ID;
+        if (!fleet.hasAbility(id)) Global.getSector().getCharacterData().addAbility(id);
+
+        if (Global.getSector().getMemoryWithoutUpdate().getBoolean(PLACED_FLAG)) return;
+        AbilitySlotsAPI slots = Global.getSector().getUIData().getAbilitySlotsAPI();
+        int curr = slots.getCurrBarIndex();
+        boolean placed = false;
+        try {
+            // Already on some bar? Then nothing to do.
+            for (int bar = 0; bar < 5 && !placed; bar++) {
+                slots.setCurrBarIndex(bar);
+                for (AbilitySlotAPI slot : slots.getCurrSlotsCopy()) {
+                    if (id.equals(slot.getAbilityId())) {
+                        placed = true;
+                        break;
+                    }
+                }
+            }
+            // Otherwise the first empty slot, searching the current bar first.
+            for (int i = 0; i < 5 && !placed; i++) {
+                slots.setCurrBarIndex((curr + i) % 5);
+                for (AbilitySlotAPI slot : slots.getCurrSlotsCopy()) {
+                    if (slot.getAbilityId() == null) {
+                        slot.setAbilityId(id);
+                        placed = true;
+                        break;
+                    }
+                }
+            }
+        } finally {
+            slots.setCurrBarIndex(curr);
+        }
+        if (placed) Global.getSector().getMemoryWithoutUpdate().set(PLACED_FLAG, true);
     }
 
     private static void logAddresses() {

@@ -4,39 +4,27 @@ import java.io.IOException;
 import java.net.ConnectException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NoRouteToHostException;
-import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketAddress;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Standalone connection tester, run outside the game (see "dev nettest").
- * Lets two players check that Hamachi, another virtual LAN, or port
- * forwarding works before the real multiplayer code exists. It uses the same
- * port, framing and packet size limits the mod will use.
+ * Uses the same protocol as the mod, so "join" works against both
+ * "nettest host" and a host running inside the game.
  *
  *   ip                    list this PC's addresses
- *   host [port]           listen for testers
- *   join <ip> [port]      connect to a host: TCP handshake, then 20 UDP pings
+ *   host [port]           host a session (the same code the mod runs)
+ *   join <ip> [port]      TCP handshake, then 20 full-size UDP pings
  */
 public final class NetTest {
 
-    private static final byte HELLO = 1;
-    private static final byte WELCOME = 2;
-    private static final byte REJECT = 3;
-    private static final byte PING = 10;
-    private static final byte PONG = 11;
-
     private static final int PING_COUNT = 20;
-    /** magic(4) + version(2) + type(1) + seq(4) + sentNanos(8) */
-    private static final int PING_HEADER = 19;
 
     private NetTest() {
     }
@@ -58,7 +46,7 @@ public final class NetTest {
 
     // ------------------------------------------------------------------ ip
 
-    private static List<AddressFinder.Candidate> printAddresses() {
+    private static void printAddresses() {
         List<AddressFinder.Candidate> all = AddressFinder.find();
         System.out.println("This PC's addresses:");
         if (all.isEmpty()) System.out.println("  (none found)");
@@ -73,7 +61,6 @@ public final class NetTest {
             AddressFinder.Candidate best = AddressFinder.preferred(all);
             if (best != null) System.out.println("Best other address: " + best);
         }
-        return all;
     }
 
     // ---------------------------------------------------------------- host
@@ -81,96 +68,23 @@ public final class NetTest {
     private static void host(int port) throws Exception {
         printAddresses();
         System.out.println();
-
-        ServerSocket tcp = new ServerSocket();
-        tcp.setReuseAddress(true);
-        tcp.bind(NetConfig.listenAddress(port));
-        final DatagramSocket udp = new DatagramSocket(NetConfig.listenAddress(port));
-
+        Session session = Session.get();
+        try {
+            session.host(port, "nettest host");
+        } catch (IOException e) {
+            System.out.println(e.getMessage());
+            System.exit(1);
+        }
         System.out.println("Hosting on port " + port + " (TCP + UDP, all adapters). Press Ctrl+C to stop.");
         System.out.println("Friend runs:  dev nettest join <your address>" + (port != NetConfig.DEFAULT_PORT ? " " + port : ""));
         System.out.println("If Windows asks whether to allow Java, tick BOTH private and public networks.");
         System.out.println();
-
-        Thread echo = new Thread(new Runnable() {
-            public void run() {
-                udpEcho(udp);
-            }
-        }, "nettest-udp");
-        echo.setDaemon(true);
-        echo.start();
-
-        while (true) {
-            final Socket s = tcp.accept();
-            Thread t = new Thread(new Runnable() {
-                public void run() {
-                    handleTcpClient(s);
-                }
-            }, "nettest-tcp");
-            t.setDaemon(true);
-            t.start();
+        while (session.isActive()) {
+            String n;
+            while ((n = session.pollNotice()) != null) log(n);
+            Thread.sleep(100);
         }
-    }
-
-    private static void udpEcho(DatagramSocket udp) {
-        byte[] buf = new byte[2048];
-        Set<String> seen = new HashSet<String>();
-        while (true) {
-            try {
-                DatagramPacket p = new DatagramPacket(buf, buf.length);
-                udp.receive(p);
-                if (p.getLength() < PING_HEADER) continue;
-                ByteBuffer bb = ByteBuffer.wrap(buf, 0, p.getLength());
-                if (bb.getInt() != NetConfig.MAGIC) continue;
-                bb.getShort();
-                if (bb.get() != PING) continue;
-                buf[6] = PONG; // same packet back, type flipped
-                udp.send(new DatagramPacket(buf, p.getLength(), p.getSocketAddress()));
-                String from = p.getSocketAddress().toString();
-                if (seen.add(from)) log("UDP pings arriving from " + from + " (" + p.getLength() + " bytes each)");
-            } catch (IOException e) {
-                log("UDP error: " + e);
-            }
-        }
-    }
-
-    private static void handleTcpClient(Socket s) {
-        SocketAddress from = s.getRemoteSocketAddress();
-        try {
-            s.setSoTimeout(NetConfig.CONNECT_TIMEOUT_MS);
-            ByteBuffer hello = Frames.read(s.getInputStream());
-            if (hello == null || hello.remaining() < 7 || hello.getInt() != NetConfig.MAGIC) {
-                log("TCP " + from + " sent something that isn't MultiSector, closed");
-                return;
-            }
-            short version = hello.getShort();
-            byte type = hello.get();
-            if (type != HELLO) {
-                log("TCP " + from + " sent unexpected message type " + type);
-                return;
-            }
-            boolean ok = version == NetConfig.PROTOCOL_VERSION;
-            ByteBuffer reply = ByteBuffer.allocate(7);
-            reply.putInt(NetConfig.MAGIC).putShort(NetConfig.PROTOCOL_VERSION).put(ok ? WELCOME : REJECT).flip();
-            Frames.write(s.getOutputStream(), reply);
-            if (!ok) {
-                log("TCP " + from + " rejected: protocol " + version + ", host has " + NetConfig.PROTOCOL_VERSION);
-                return;
-            }
-            log("TCP " + from + " connected");
-            s.setSoTimeout(0);
-            while (Frames.read(s.getInputStream()) != null) {
-                // Tester sends nothing else; wait for it to hang up.
-            }
-            log("TCP " + from + " disconnected");
-        } catch (IOException e) {
-            log("TCP " + from + " dropped: " + e.getMessage());
-        } finally {
-            try {
-                s.close();
-            } catch (IOException ignored) {
-            }
-        }
+        System.out.println("Stopped: " + session.getLastError());
     }
 
     // ---------------------------------------------------------------- join
@@ -178,7 +92,7 @@ public final class NetTest {
     private static boolean join(String host, int port) {
         InetSocketAddress target;
         try {
-            target = new InetSocketAddress(java.net.InetAddress.getByName(host), port);
+            target = new InetSocketAddress(InetAddress.getByName(host), port);
         } catch (UnknownHostException e) {
             System.out.println("Can't understand address \"" + host + "\". Use the host's IP, e.g. 25.12.34.56.");
             return false;
@@ -192,33 +106,40 @@ public final class NetTest {
 
         Socket tcp = new Socket();
         try {
-            // 1. TCP handshake
+            // 1. TCP handshake, exactly as the mod does it
             long t0 = System.nanoTime();
             tcp.connect(target, NetConfig.CONNECT_TIMEOUT_MS);
             tcp.setSoTimeout(NetConfig.CONNECT_TIMEOUT_MS);
-            ByteBuffer hello = ByteBuffer.allocate(7);
-            hello.putInt(NetConfig.MAGIC).putShort(NetConfig.PROTOCOL_VERSION).put(HELLO).flip();
+            ByteBuffer hello = Protocol.begin(Protocol.HELLO, Protocol.stringSize("nettest"));
+            Protocol.putString(hello, "nettest");
+            hello.flip();
             Frames.write(tcp.getOutputStream(), hello);
             ByteBuffer reply = Frames.read(tcp.getInputStream());
             long tcpMs = (System.nanoTime() - t0) / 1000000L;
-            if (reply == null || reply.remaining() < 7 || reply.getInt() != NetConfig.MAGIC) {
+            int type = reply == null ? -1 : Protocol.readHeader(reply, null);
+            if (type == Protocol.REJECT) {
+                System.out.println("[FAIL] TCP: host refused: " + Protocol.getString(reply));
+                return false;
+            }
+            if (type != Protocol.WELCOME) {
                 System.out.println("[FAIL] TCP: something answered on port " + port + ", but it isn't a MultiSector host.");
                 return false;
             }
-            short hostVersion = reply.getShort();
-            if (reply.get() != WELCOME) {
-                System.out.println("[FAIL] TCP: host rejected us. Host protocol " + hostVersion
-                        + ", ours " + NetConfig.PROTOCOL_VERSION + ". Both of you need the same MultiSector version.");
-                return false;
-            }
-            System.out.println("[ OK ] TCP handshake in " + tcpMs + " ms");
+            reply.getInt();
+            System.out.println("[ OK ] TCP handshake with \"" + Protocol.getString(reply) + "\" in " + tcpMs + " ms");
 
-            // 2. UDP pings at the full packet size the mod will use
-            return udpPings(target);
+            // 2. UDP pings at the full packet size the mod may use
+            boolean ok = udpPings(target);
+
+            ByteBuffer bye = Protocol.begin(Protocol.BYE, Protocol.stringSize("test done"));
+            Protocol.putString(bye, "test done");
+            bye.flip();
+            Frames.write(tcp.getOutputStream(), bye);
+            return ok;
         } catch (ConnectException e) {
             System.out.println("[FAIL] TCP: connection refused.");
             System.out.println("  Reached the host's PC, but nothing is listening on port " + port + ".");
-            System.out.println("  - Is the host running \"dev nettest host\"? Same port number?");
+            System.out.println("  - Is the host hosting (in game, or \"dev nettest host\")? Same port number?");
             return false;
         } catch (SocketTimeoutException e) {
             System.out.println("[FAIL] TCP: no answer within " + NetConfig.CONNECT_TIMEOUT_MS / 1000 + " s.");
@@ -260,7 +181,8 @@ public final class NetTest {
 
             for (int seq = 0; seq < PING_COUNT; seq++) {
                 ByteBuffer bb = ByteBuffer.wrap(out);
-                bb.putInt(NetConfig.MAGIC).putShort(NetConfig.PROTOCOL_VERSION).put(PING).putInt(seq).putLong(System.nanoTime());
+                bb.putInt(NetConfig.MAGIC).putShort(NetConfig.PROTOCOL_VERSION).put(Protocol.PING)
+                        .putInt(seq).putLong(System.nanoTime());
                 udp.send(new DatagramPacket(out, out.length, target));
 
                 long deadline = System.currentTimeMillis() + 1000;
@@ -271,11 +193,9 @@ public final class NetTest {
                     } catch (SocketTimeoutException e) {
                         break;
                     }
-                    if (p.getLength() < PING_HEADER) continue;
                     ByteBuffer r = ByteBuffer.wrap(in, 0, p.getLength());
-                    if (r.getInt() != NetConfig.MAGIC) continue;
-                    r.getShort();
-                    if (r.get() != PONG || r.getInt() != seq) continue; // late reply to an earlier ping
+                    if (p.getLength() < Protocol.PING_SIZE || Protocol.readHeader(r, null) != Protocol.PONG) continue;
+                    if (r.getInt() != seq) continue; // late reply to an earlier ping
                     long rtt = (System.nanoTime() - r.getLong()) / 1000000L;
                     received++;
                     sum += rtt;
@@ -324,7 +244,6 @@ public final class NetTest {
     }
 
     private static void log(String msg) {
-        long t = System.currentTimeMillis();
-        System.out.println(String.format("[%tT] %s", t, msg));
+        System.out.println(String.format("[%tT] %s", System.currentTimeMillis(), msg));
     }
 }
