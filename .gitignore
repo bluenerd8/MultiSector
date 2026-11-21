@@ -1,0 +1,10 @@
+# build output
+build/
+dist/
+mod/jars/
+*.class
+
+# editors
+.idea/
+.vscode/
+*.iml
