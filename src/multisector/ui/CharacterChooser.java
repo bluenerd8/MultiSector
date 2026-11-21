@@ -8,7 +8,6 @@ import com.fs.starfarer.api.campaign.CustomUIPanelPlugin;
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.characters.FullName.Gender;
 import com.fs.starfarer.api.combat.ShipHullSpecAPI;
-import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.ui.ButtonAPI;
 import com.fs.starfarer.api.ui.CustomPanelAPI;
 import com.fs.starfarer.api.ui.TextFieldAPI;
@@ -56,6 +55,14 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
         autoShown = false;
     }
 
+    /** Called once a character has been set up. */
+    static void clearPending() {
+        pendingDownloadId = null;
+        pendingHost = null;
+        pendingPort = 0;
+        pendingName = null;
+    }
+
     public static boolean isPending() {
         return pendingHost != null;
     }
@@ -84,12 +91,10 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
     private TextFieldAPI nameField;
 
     private final JSONObject export = ProfileApplier.readExport();
-    private final List<JSONObject> starts = ProfileApplier.listStarts();
     private boolean importMode = export != null;
     private String nameText;
     private Gender gender = Gender.MALE;
     private int portraitIndex = 0;
-    private int startIndex = 0;
     private String error;
 
     private final Plugin plugin = new Plugin();
@@ -117,7 +122,7 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
 
     @Override
     public String getConfirmText() {
-        return "Start playing";
+        return "Continue";
     }
 
     @Override
@@ -159,28 +164,31 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
         } else if (id.equals("prev") || id.equals("next")) {
             int n = portraits().size();
             if (n > 0) portraitIndex = (portraitIndex + (id.equals("next") ? 1 : n - 1)) % n;
-        } else if (id.startsWith("start_")) {
-            startIndex = Integer.parseInt(id.substring(6));
         }
         build();
     }
 
-    /** "Start playing" */
+    /** "Continue" */
     @Override
     public void customDialogConfirm() {
         rememberName();
         String name = nameText.trim();
         if (name.isEmpty()) name = pendingName == null || pendingName.isEmpty() ? "Captain" : pendingName;
+
+        if (!importMode || export == null) {
+            // New character: next comes the game's own starting-options dialog.
+            List<String> p = portraits();
+            String portrait = p.isEmpty() ? null : p.get(Math.min(portraitIndex, p.size() - 1));
+            StartOptionsDialog.openSoon(new StartOptionsDialog(name, gender, portrait, pendingDownloadId,
+                    pendingHost, pendingPort));
+            autoShown = true; // don't reopen this window while the start options are up
+            if (holder != null) holder.dismiss();
+            return;
+        }
+
         String msg;
         try {
-            if (importMode && export != null) {
-                msg = ProfileApplier.applyImport(export, name, pendingDownloadId);
-            } else {
-                List<String> p = portraits();
-                String portrait = p.isEmpty() ? null : p.get(Math.min(portraitIndex, p.size() - 1));
-                String startId = starts.isEmpty() ? "" : starts.get(Math.min(startIndex, starts.size() - 1)).optString("id");
-                msg = ProfileApplier.applyNew(name, gender, portrait, startId, pendingDownloadId);
-            }
+            msg = ProfileApplier.applyImport(export, name, pendingDownloadId);
         } catch (Exception e) {
             Global.getLogger(CharacterChooser.class).warn("[MultiSector] character setup failed", e);
             Session.get().notice("couldn't set up your character: " + e.getMessage()
@@ -194,8 +202,7 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
         // Now connect, under the chosen name.
         String host = pendingHost;
         int port = pendingPort;
-        setPending(null, null, 0, null);
-        pendingHost = null;
+        clearPending();
         Session s = Session.get();
         if (host != null && !s.isActive()) {
             s.join(host, port, name);
@@ -312,35 +319,16 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
         }
         add(left, 0f, HEADER_H);
 
-        // Right: starting fleet
+        // Right: what happens next
         float rightW = WIDTH - LEFT_W - 20f;
-        TooltipMakerAPI right = panel.createUIElement(rightW, HEIGHT - HEADER_H - 10f, true);
-        right.addPara("Starting fleet", hl, 0f);
-        if (starts.isEmpty()) {
-            right.addPara("No starting fleets found (data/config/multisector/starts.csv).", gray, 8f);
-        }
-        for (int i = 0; i < starts.size(); i++) {
-            checkbox(right, starts.get(i).optString("name"), "start_" + i, rightW - 10f, i == startIndex, 4f);
-        }
-        if (!starts.isEmpty()) {
-            JSONObject s = starts.get(Math.min(startIndex, starts.size() - 1));
-            if (!s.optString("description").isEmpty()) right.addPara(s.optString("description"), 10f);
-            StringBuilder ships = new StringBuilder();
-            JSONArray arr = s.optJSONArray("ships");
-            for (int i = 0; arr != null && i < arr.length(); i++) {
-                String label = arr.optString(i);
-                try {
-                    ShipVariantAPI v = Global.getSettings().getVariant(label);
-                    label = v.getHullSpec().getHullName() + " " + v.getHullSpec().getDesignation().toLowerCase();
-                } catch (Exception ignored) {
-                }
-                if (ships.length() > 0) ships.append('\n');
-                ships.append("  - ").append(label);
-            }
-            right.addPara(ships.toString(), 6f);
-            right.addPara("Credits: %s", 6f, hl, String.format("%,d", s.optInt("credits", 0)));
-            if (s.optBoolean("officer")) right.addPara("Includes an officer.", 4f);
-        }
+        TooltipMakerAPI right = panel.createUIElement(rightW, HEIGHT - HEADER_H - 10f, false);
+        right.addPara("Next: your starting fleet", hl, 0f);
+        right.addPara("Click Continue to choose your background and starting ships with the game's own "
+                + "new-game options, including any starts your mods add.", 8f);
+        right.addPara("Only your character and fleet are set up. The host's world isn't changed: there's no "
+                + "difficulty or tutorial choice, and no world generation.", gray, 10f);
+        right.addPara("Randomised starts aren't available here, since their ships are rolled during world setup.",
+                gray, 10f);
         add(right, LEFT_W + 20f, HEADER_H);
     }
 

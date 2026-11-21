@@ -37,6 +37,7 @@ public class SessionNoticeScript implements EveryFrameScript {
                     Misc.getTextColor(), key, "Multiplayer", Misc.getHighlightColor(), Misc.getHighlightColor());
         }
         CharacterChooser.openIfPending();
+        StartOptionsDialog.openIfPending();
         String n;
         while ((n = Session.get().pollNotice()) != null) {
             ui.addMessage("MultiSector: " + n, Misc.getHighlightColor());
