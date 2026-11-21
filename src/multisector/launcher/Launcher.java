@@ -1,5 +1,6 @@
 package multisector.launcher;
 
+import multisector.BuildInfo;
 import multisector.net.AddressFinder;
 import multisector.net.NetConfig;
 
@@ -58,7 +59,7 @@ public final class Launcher {
     private static final String PREFS = "multisector_launcher.json";
 
     private final GameInstall game;
-    private final JFrame frame = new JFrame("MultiSector");
+    private final JFrame frame = new JFrame("MultiSector " + BuildInfo.VERSION);
     private final JTextField nameField = new JTextField(16);
     private final JTextArea log = new JTextArea(7, 60);
 
@@ -151,7 +152,7 @@ public final class Launcher {
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
 
-        log("Starsector folder: " + game.root);
+        log("MultiSector " + BuildInfo.VERSION + " (built " + BuildInfo.BUILT_AT + "). Starsector folder: " + game.root);
         if (game.isGameRunning()) {
             log("Starsector is already running. Pick or download the save here, then load it in the game.");
         }
@@ -324,7 +325,8 @@ public final class Launcher {
         sb.append("Save: ").append(info.characterName).append(", saved ").append(info.saveDate)
                 .append(" (").append(GameInstall.megabytes(info.saveBytes)).append(", ")
                 .append(GameInstall.megabytes(info.zipBytes)).append(" to download)\n");
-        sb.append("Game version: ").append(info.gameVersion).append('\n');
+        sb.append("Game version: ").append(info.gameVersion).append(", MultiSector ").append(info.hostVersion)
+                .append(" (same as yours)\n");
         sb.append("Your character: you choose it in the game when the save loads, either your exported "
                 + "character or a new one.\n");
         org.json.JSONObject export = loadExport();

@@ -12,6 +12,7 @@ import com.fs.starfarer.api.ui.LabelAPI;
 import com.fs.starfarer.api.ui.TextFieldAPI;
 import com.fs.starfarer.api.ui.TooltipMakerAPI;
 import com.fs.starfarer.api.util.Misc;
+import multisector.BuildInfo;
 import multisector.character.CharacterExporter;
 import multisector.net.AddressFinder;
 import multisector.net.NetConfig;
@@ -265,8 +266,8 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate implements Dialo
                 + "Colonies, reputation and story progress stay in this save.", gray, 8f);
         t.addButton("Export character", BTN_EXPORT, BUTTON_W, BUTTON_H, pad);
 
-        t.addPara("Shortcut: %s. Only connecting works so far; game sync comes next.", 18f, gray,
-                MultiSectorConfig.getHotkeyName()).setColor(gray);
+        t.addPara("MultiSector %s. Shortcut: %s. Fleets are visible to each other; more sync comes next.", 18f,
+                gray, Misc.getHighlightColor(), BuildInfo.VERSION, MultiSectorConfig.getHotkeyName());
 
         panel.addUIElement(t).inTL(0f, 0f);
         content = t;

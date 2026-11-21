@@ -1,5 +1,7 @@
 package multisector.net;
 
+import multisector.BuildInfo;
+
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.DatagramPacket;
@@ -111,8 +113,10 @@ public final class NetTest {
             long t0 = System.nanoTime();
             tcp.connect(target, NetConfig.CONNECT_TIMEOUT_MS);
             tcp.setSoTimeout(NetConfig.CONNECT_TIMEOUT_MS);
-            ByteBuffer hello = Protocol.begin(Protocol.HELLO, Protocol.stringSize("nettest"));
+            ByteBuffer hello = Protocol.begin(Protocol.HELLO,
+                    Protocol.stringSize("nettest") + Protocol.stringSize(BuildInfo.VERSION));
             Protocol.putString(hello, "nettest");
+            Protocol.putString(hello, BuildInfo.VERSION);
             hello.flip();
             Frames.write(tcp.getOutputStream(), hello);
             ByteBuffer reply = Frames.read(tcp.getInputStream());

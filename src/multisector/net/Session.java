@@ -1,5 +1,7 @@
 package multisector.net;
 
+import multisector.BuildInfo;
+
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.DatagramPacket;
@@ -234,11 +236,14 @@ public final class Session {
             short[] ver = new short[1];
             if (Protocol.readHeader(hello, ver) != Protocol.HELLO) return; // not us: drop silently
             String name = Protocol.cleanName(hello.remaining() >= 2 ? Protocol.getString(hello) : "Player");
+            String theirBuild = ver[0] == NetConfig.PROTOCOL_VERSION && hello.remaining() >= 2
+                    ? Protocol.getString(hello) : "an older build";
 
-            if (ver[0] != NetConfig.PROTOCOL_VERSION) {
-                reject(s, "Version mismatch: host uses protocol " + NetConfig.PROTOCOL_VERSION
-                        + ", you use " + ver[0] + ". Both players need the same MultiSector version.");
-                notices.add(name + " couldn't join: different MultiSector version");
+            if (ver[0] != NetConfig.PROTOCOL_VERSION || !BuildInfo.VERSION.equals(theirBuild)) {
+                reject(s, "Different MultiSector builds: the host has " + BuildInfo.VERSION + ", you have "
+                        + theirBuild + ". You both need the same build.");
+                notices.add(name + " couldn't join: they have MultiSector " + theirBuild + ", you have "
+                        + BuildInfo.VERSION);
                 return;
             }
             int id;
@@ -452,8 +457,10 @@ public final class Session {
             s.setSoTimeout(NetConfig.CONNECT_TIMEOUT_MS);
 
             Conn conn = new Conn(s, HOST_ID, host);
-            ByteBuffer hello = Protocol.begin(Protocol.HELLO, Protocol.stringSize(localName));
+            ByteBuffer hello = Protocol.begin(Protocol.HELLO,
+                    Protocol.stringSize(localName) + Protocol.stringSize(BuildInfo.VERSION));
             Protocol.putString(hello, localName);
+            Protocol.putString(hello, BuildInfo.VERSION);
             hello.flip();
             conn.send(hello);
 

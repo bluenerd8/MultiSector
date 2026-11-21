@@ -33,6 +33,8 @@ public class MultiSectorModPlugin extends BaseModPlugin {
 
     @Override
     public void onApplicationLoad() throws Exception {
+        Global.getLogger(MultiSectorModPlugin.class).info("[MultiSector] version " + BuildInfo.VERSION
+                + " (built " + BuildInfo.BUILT_AT + ")");
         SandboxProbe.runAll();
         MultiSectorConfig.load();
         logAddresses();

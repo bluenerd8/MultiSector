@@ -1,5 +1,6 @@
 package multisector.launcher;
 
+import multisector.BuildInfo;
 import multisector.net.Frames;
 import multisector.net.NetConfig;
 import multisector.net.Protocol;
@@ -218,7 +219,7 @@ final class LobbyServer {
     private ByteBuffer info(Snapshot snap) {
         int size = Protocol.stringSize(hostName) + Protocol.stringSize(save.characterName)
                 + Protocol.stringSize(save.saveDate) + Protocol.stringSize(save.gameVersion) + 8 + 4 + 4
-                + 8 + Protocol.stringSize(snap.hash);
+                + 8 + Protocol.stringSize(snap.hash) + Protocol.stringSize(BuildInfo.VERSION);
         for (String m : mods) size += Protocol.stringSize(m);
         ByteBuffer bb = Protocol.begin(Protocol.LOBBY_INFO, size);
         Protocol.putString(bb, hostName);
@@ -231,6 +232,7 @@ final class LobbyServer {
         for (String m : mods) Protocol.putString(bb, m);
         bb.putLong(snap.data.length);
         Protocol.putString(bb, snap.hash);
+        Protocol.putString(bb, BuildInfo.VERSION);
         bb.flip();
         return bb;
     }

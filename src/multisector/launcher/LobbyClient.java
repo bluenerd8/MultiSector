@@ -1,5 +1,6 @@
 package multisector.launcher;
 
+import multisector.BuildInfo;
 import multisector.net.Frames;
 import multisector.net.NetConfig;
 import multisector.net.Protocol;
@@ -46,6 +47,7 @@ final class LobbyClient {
         long saveBytes;
         long zipBytes;
         String zipHash;
+        String hostVersion;
         List<String> mods = new ArrayList<String>();
     }
 
@@ -323,8 +325,10 @@ final class LobbyClient {
     }
 
     private static Info hello(Socket s, String address, String myName) throws IOException {
-        ByteBuffer hello = Protocol.begin(Protocol.LOBBY_HELLO, Protocol.stringSize(myName));
+        ByteBuffer hello = Protocol.begin(Protocol.LOBBY_HELLO,
+                Protocol.stringSize(myName) + Protocol.stringSize(BuildInfo.VERSION));
         Protocol.putString(hello, myName);
+        Protocol.putString(hello, BuildInfo.VERSION);
         hello.flip();
         Frames.write(s.getOutputStream(), hello);
         ByteBuffer bb = Frames.read(s.getInputStream());
@@ -332,7 +336,8 @@ final class LobbyClient {
         if (bb == null) throw new IOException("The host closed the connection. Their launcher may be a different MultiSector version.");
         int type = Protocol.readHeader(bb, ver);
         if (ver[0] != NetConfig.PROTOCOL_VERSION) {
-            throw new IOException("The host has a different MultiSector version. Both of you need the same release.");
+            throw new IOException("The host has a different MultiSector build (you have " + BuildInfo.VERSION
+                    + "). You both need the same build.");
         }
         if (type != Protocol.LOBBY_INFO) throw new IOException("Something answered, but it isn't a MultiSector launcher.");
         Info info = new Info();
@@ -347,6 +352,11 @@ final class LobbyClient {
         for (int i = 0; i < n; i++) info.mods.add(Protocol.getString(bb));
         info.zipBytes = bb.getLong();
         info.zipHash = Protocol.getString(bb);
+        info.hostVersion = bb.remaining() >= 2 ? Protocol.getString(bb) : "?";
+        if (!BuildInfo.VERSION.equals(info.hostVersion)) {
+            throw new IOException("Different MultiSector builds: the host has " + info.hostVersion + ", you have "
+                    + BuildInfo.VERSION + ". You both need the same build.");
+        }
         return info;
     }
 
