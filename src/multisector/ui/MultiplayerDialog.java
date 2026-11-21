@@ -3,12 +3,8 @@ package multisector.ui;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.BaseCustomDialogDelegate;
 import com.fs.starfarer.api.campaign.BaseCustomUIPanelPlugin;
-import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.CustomUIPanelPlugin;
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
-import com.fs.starfarer.api.campaign.InteractionDialogPlugin;
-import com.fs.starfarer.api.campaign.rules.MemoryAPI;
-import com.fs.starfarer.api.combat.EngagementResultAPI;
 import com.fs.starfarer.api.ui.Alignment;
 import com.fs.starfarer.api.ui.ButtonAPI;
 import com.fs.starfarer.api.ui.CustomPanelAPI;
@@ -33,7 +29,7 @@ import java.util.Map;
  * list). Ping numbers change constantly, so those update labels in place
  * instead of rebuilding, which would steal focus from the address box.
  */
-public class MultiplayerDialog extends BaseCustomDialogDelegate {
+public class MultiplayerDialog extends BaseCustomDialogDelegate implements DialogHost.Window {
 
     private static final float WIDTH = 520f;
     private static final float HEIGHT = 640f;
@@ -45,6 +41,7 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate {
     private static final String BTN_JOIN = "join";
     private static final String BTN_COPY = "copy";
     private static final String BTN_EXPORT = "export";
+    private static final String BTN_CHOOSE = "choose";
 
     /** Last address typed into Join, for this game session. Also saved per save file. */
     private static String lastJoinAddress = "";
@@ -70,46 +67,13 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate {
     /** The invisible interaction dialog hosting this window; dismissed together with it. */
     private InteractionDialogAPI host;
 
-    /**
-     * Opens the window unless another dialog or menu is already up.
-     * The campaign UI can only show custom windows from inside an interaction
-     * dialog, so this opens an empty one (text and picture hidden) to hold it.
-     */
+    /** Opens the window unless another dialog or menu is already up. */
     public static void open() {
-        CampaignUIAPI ui = Global.getSector().getCampaignUI();
-        if (ui == null || ui.isShowingDialog() || ui.isShowingMenu()) return;
-        ui.showInteractionDialog(new Holder(), Global.getSector().getPlayerFleet());
+        DialogHost.show(new MultiplayerDialog(), WIDTH, HEIGHT);
     }
 
-    private static final class Holder implements InteractionDialogPlugin {
-        public void init(InteractionDialogAPI dialog) {
-            dialog.hideTextPanel();
-            dialog.hideVisualPanel();
-            dialog.setPromptText("");
-            MultiplayerDialog window = new MultiplayerDialog();
-            window.host = dialog;
-            dialog.showCustomDialog(WIDTH, HEIGHT, window);
-        }
-
-        public void optionSelected(String optionText, Object optionData) {
-        }
-
-        public void optionMousedOver(String optionText, Object optionData) {
-        }
-
-        public void advance(float amount) {
-        }
-
-        public void backFromEngagement(EngagementResultAPI battleResult) {
-        }
-
-        public Object getContext() {
-            return null;
-        }
-
-        public Map<String, MemoryAPI> getMemoryMap() {
-            return null;
-        }
+    public void setHolder(InteractionDialogAPI holder) {
+        this.host = holder;
     }
 
     // ---------------------------------------------------------- dialog hooks
@@ -204,10 +168,14 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate {
                     s.join(address, MultiSectorConfig.getPort(), playerName());
                 }
             }
+        } else if (BTN_CHOOSE.equals(id)) {
+            close();
+            CharacterChooser.openSoon(); // once this window has finished closing
+            return;
         } else if (BTN_EXPORT.equals(id)) {
             try {
-                localInfo = "Exported " + CharacterExporter.export() + ". In the MultiSector launcher's Character tab, "
-                        + "choose \"Use my exported character\".";
+                localInfo = "Exported " + CharacterExporter.export() + ". When you load a friend's MultiSector "
+                        + "world, choose \"Use my exported character\".";
             } catch (Exception e) {
                 localError = "Export failed: " + e.getMessage();
             }
@@ -287,9 +255,13 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate {
         t.addSectionHeading("Players", Alignment.MID, 18f);
         playersLabel = t.addPara(playersText(), 8f);
 
-        // Character export
+        // Character
         t.addSectionHeading("Your character", Alignment.MID, 18f);
-        t.addPara("Take this character, fleet, officers and cargo into a friend's MultiSector world. "
+        if (CharacterChooser.isPending()) {
+            t.addPara("You haven't chosen your character for this world yet.", hl, 8f);
+            t.addButton("Choose your character", BTN_CHOOSE, BUTTON_W + 40f, BUTTON_H, pad);
+        }
+        t.addPara("Export takes this character, fleet, officers and cargo into a friend's MultiSector world. "
                 + "Colonies, reputation and story progress stay in this save.", gray, 8f);
         t.addButton("Export character", BTN_EXPORT, BUTTON_W, BUTTON_H, pad);
 

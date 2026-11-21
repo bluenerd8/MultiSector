@@ -9,16 +9,20 @@ import com.fs.starfarer.api.characters.FullName.Gender;
 import com.fs.starfarer.api.characters.MutableCharacterStatsAPI;
 import com.fs.starfarer.api.characters.OfficerDataAPI;
 import com.fs.starfarer.api.characters.PersonAPI;
+import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Commodities;
 import com.fs.starfarer.api.impl.campaign.ids.Personalities;
 import com.fs.starfarer.api.impl.campaign.ids.Ranks;
 import com.fs.starfarer.api.impl.campaign.ids.Skills;
-import multisector.catalog.CatalogExporter;
 import org.apache.log4j.Logger;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Random;
 
 /**
@@ -26,76 +30,62 @@ import java.util.Random;
  * copy of the host's save. The world (map, factions, markets) stays exactly
  * as the host has it; only the player character and their fleet change.
  *
- * Applied once per downloaded save. The marker lives in the save, so loading
- * a copy you've saved yourself doesn't reset your character again.
+ * Either a new character (name, gender, portrait, starting fleet) or one
+ * exported from the player's own save. Chosen in the game, in
+ * {@link multisector.ui.CharacterChooser}.
  */
 public final class ProfileApplier {
 
-    public static final String PROFILE_FILE = "multisector_profile.json";
+    /** Starting fleets: other mods can add rows to their own copy of this file. */
+    public static final String STARTS_CSV = "data/config/multisector/starts.csv";
     private static final String APPLIED_KEY = "multisector_profileAppliedFor";
 
     private ProfileApplier() {
     }
 
-    /**
-     * Applies the launcher profile unless this download already got it.
-     * Returns a message for the player, or null if nothing was done.
-     */
-    public static String applyIfNeeded(String downloadId) {
-        Logger log = Global.getLogger(ProfileApplier.class);
+    /** True if this download already had a character chosen (the marker is saved in the save). */
+    public static boolean isApplied(String downloadId) {
         Object done = Global.getSector().getPersistentData().get(APPLIED_KEY);
-        if (downloadId != null && downloadId.equals(done)) return null;
+        return done != null && (downloadId == null || downloadId.isEmpty() || downloadId.equals(done));
+    }
 
-        JSONObject profile;
+    private static void markApplied(String downloadId) {
+        Global.getSector().getPersistentData().put(APPLIED_KEY,
+                downloadId == null || downloadId.isEmpty() ? "unknown" : downloadId);
+    }
+
+    /** The exported character (F8, Export character), or null if there's none. */
+    public static JSONObject readExport() {
         try {
-            String text = Global.getSettings().readTextFileFromCommon(PROFILE_FILE);
-            if (text == null || text.trim().isEmpty()) return "no character saved in the launcher, so you're playing as the host's character.";
-            profile = new JSONObject(text);
+            String text = Global.getSettings().readTextFileFromCommon(CharacterExporter.EXPORT_FILE);
+            return text == null || text.trim().isEmpty() ? null : new JSONObject(text);
         } catch (Exception e) {
-            return "couldn't read your launcher character (" + e.getMessage() + "), so you're playing as the host's character.";
-        }
-
-        if ("import".equals(profile.optString("mode"))) {
-            try {
-                String text = Global.getSettings().readTextFileFromCommon(CharacterExporter.EXPORT_FILE);
-                if (text == null || text.trim().isEmpty()) {
-                    return "your launcher character is set to an imported one, but no export was found. "
-                            + "Export it again from your own save (F8, Export character).";
-                }
-                String msg = new CharacterImporter().apply(new JSONObject(text), profile.optString("name", null));
-                Global.getSector().getPersistentData().put(APPLIED_KEY, downloadId == null ? "unknown" : downloadId);
-                return msg;
-            } catch (Exception e) {
-                log.warn("[MultiSector] couldn't import the exported character", e);
-                return "couldn't import your character: " + e.getMessage();
-            }
-        }
-
-        try {
-            applyCharacter(profile);
-            String startName = applyFleet(profile.optString("start", ""));
-            Global.getSector().getPersistentData().put(APPLIED_KEY, downloadId == null ? "unknown" : downloadId);
-            log.info("[MultiSector] applied launcher character \"" + profile.optString("name") + "\" with start " + startName);
-            return "you're now " + profile.optString("name") + ", flying the " + startName + ".";
-        } catch (Exception e) {
-            log.warn("[MultiSector] couldn't apply the launcher character", e);
-            return "couldn't set up your character: " + e.getMessage();
+            return null;
         }
     }
 
-    // ------------------------------------------------------------- character
+    // ================================================================ import
 
-    private static void applyCharacter(JSONObject profile) {
+    /** Brings in the exported character, optionally renamed. Returns a message for the player. */
+    public static String applyImport(JSONObject export, String name, String downloadId) throws Exception {
+        String msg = new CharacterImporter().apply(export, name);
+        markApplied(downloadId);
+        return msg;
+    }
+
+    // =========================================================== new captain
+
+    /** Sets up a fresh captain with the chosen start. Returns a message for the player. */
+    public static String applyNew(String name, Gender gender, String portrait, String startId, String downloadId)
+            throws Exception {
         PersonAPI person = Global.getSector().getPlayerPerson();
-        Gender gender = "female".equals(profile.optString("gender")) ? Gender.FEMALE : Gender.MALE;
-        String name = profile.optString("name", "Captain").trim();
-        int space = name.indexOf(' ');
-        String first = space > 0 ? name.substring(0, space) : name;
-        String last = space > 0 ? name.substring(space + 1).trim() : "";
+        String n = name == null || name.trim().isEmpty() ? "Captain" : name.trim();
+        int space = n.indexOf(' ');
+        String first = space > 0 ? n.substring(0, space) : n;
+        String last = space > 0 ? n.substring(space + 1).trim() : "";
         person.setName(new FullName(first, last, gender));
         person.setGender(gender);
-        String portrait = profile.optString("portrait", "");
-        if (!portrait.isEmpty()) person.setPortraitSprite(portrait);
+        if (portrait != null && !portrait.isEmpty()) person.setPortraitSprite(portrait);
 
         // A fresh captain: level 1, no XP, no skills, nothing to spend.
         MutableCharacterStatsAPI stats = Global.getSector().getPlayerStats();
@@ -105,9 +95,12 @@ public final class ProfileApplier {
         stats.setPoints(0);
         stats.setStoryPoints(0);
         stats.refreshCharacterStatsEffects();
-    }
 
-    // ----------------------------------------------------------------- fleet
+        String startName = applyFleet(startId);
+        markApplied(downloadId);
+        Global.getLogger(ProfileApplier.class).info("[MultiSector] new character \"" + n + "\" with start " + startName);
+        return "you're now " + n + ", flying the " + startName + ".";
+    }
 
     /** Replaces the player fleet's ships, officers and cargo with the chosen start. Returns its name. */
     private static String applyFleet(String startId) throws Exception {
@@ -125,8 +118,7 @@ public final class ProfileApplier {
         JSONArray ships = start.optJSONArray("ships");
         FleetMemberAPI flagship = null;
         for (int i = 0; ships != null && i < ships.length(); i++) {
-            String variant = ships.getString(i);
-            FleetMemberAPI m = data.addFleetMember(variant);
+            FleetMemberAPI m = data.addFleetMember(ships.getString(i));
             if (m == null) continue;
             m.setShipName(Global.getSector().getPlayerFaction().pickRandomShipName());
             if (flagship == null) {
@@ -180,28 +172,66 @@ public final class ProfileApplier {
         return start.optString("name", startId);
     }
 
-    /** The start row from the merged starts.csv, with ships as a list of variant ids. */
-    private static JSONObject findStart(String startId) throws Exception {
-        JSONArray rows = Global.getSettings().getMergedSpreadsheetDataForMod("id", CatalogExporter.STARTS_CSV, "multisector");
-        JSONObject fallback = null;
-        for (int i = 0; i < rows.length(); i++) {
-            JSONObject row = rows.getJSONObject(i);
-            String id = row.optString("id", "").trim();
-            if (id.isEmpty() || id.startsWith("#")) continue;
-            JSONObject s = new JSONObject();
-            s.put("name", row.optString("name", id));
-            s.put("credits", row.optInt("credits", 0));
-            s.put("cargo", row.optString("cargo", ""));
-            s.put("officer", row.optBoolean("officer", false));
-            JSONArray ships = new JSONArray();
-            for (String v : row.optString("ships", "").split(",")) {
-                if (!v.trim().isEmpty()) ships.put(v.trim());
+    // ================================================================ starts
+
+    /**
+     * Starting fleets from the merged starts.csv, in display order. Starts using
+     * a ship this game doesn't have are left out. Each has id, name,
+     * description, credits, cargo, officer, and ships (variant ids).
+     */
+    public static List<JSONObject> listStarts() {
+        Logger log = Global.getLogger(ProfileApplier.class);
+        List<JSONObject> out = new ArrayList<JSONObject>();
+        try {
+            JSONArray rows = Global.getSettings().getMergedSpreadsheetDataForMod("id", STARTS_CSV, "multisector");
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject row = rows.getJSONObject(i);
+                String id = row.optString("id", "").trim();
+                if (id.isEmpty() || id.startsWith("#")) continue;
+                JSONArray ships = new JSONArray();
+                boolean ok = true;
+                for (String v : row.optString("ships", "").split(",")) {
+                    v = v.trim();
+                    if (v.isEmpty()) continue;
+                    ShipVariantAPI variant = null;
+                    try {
+                        variant = Global.getSettings().getVariant(v);
+                    } catch (Exception ignored) {
+                    }
+                    if (variant == null) {
+                        log.warn("[MultiSector] start \"" + id + "\" uses unknown ship variant \"" + v + "\"; hiding it");
+                        ok = false;
+                        break;
+                    }
+                    ships.put(v);
+                }
+                if (!ok || ships.length() == 0) continue;
+                JSONObject s = new JSONObject();
+                s.put("id", id);
+                s.put("name", row.optString("name", id));
+                s.put("description", row.optString("description", ""));
+                s.put("credits", row.optInt("credits", 0));
+                s.put("cargo", row.optString("cargo", ""));
+                s.put("officer", row.optBoolean("officer", false));
+                s.put("order", row.optDouble("order", 1000));
+                s.put("ships", ships);
+                out.add(s);
             }
-            s.put("ships", ships);
-            if (id.equals(startId)) return s;
-            if (fallback == null) fallback = s;
+        } catch (Exception e) {
+            log.warn("[MultiSector] couldn't read " + STARTS_CSV, e);
         }
-        if (fallback == null) throw new IllegalStateException("no starting fleets found in " + CatalogExporter.STARTS_CSV);
-        return fallback;
+        Collections.sort(out, new Comparator<JSONObject>() {
+            public int compare(JSONObject a, JSONObject b) {
+                return Double.compare(a.optDouble("order", 1000), b.optDouble("order", 1000));
+            }
+        });
+        return out;
+    }
+
+    private static JSONObject findStart(String startId) {
+        List<JSONObject> starts = listStarts();
+        for (JSONObject s : starts) if (s.optString("id").equals(startId)) return s;
+        if (starts.isEmpty()) throw new IllegalStateException("no starting fleets found in " + STARTS_CSV);
+        return starts.get(0);
     }
 }

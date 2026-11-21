@@ -5,7 +5,6 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotAPI;
 import com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotsAPI;
-import multisector.catalog.CatalogExporter;
 import multisector.net.AddressFinder;
 import multisector.probe.SandboxProbe;
 import multisector.ui.AutoConnect;
@@ -34,7 +33,6 @@ public class MultiSectorModPlugin extends BaseModPlugin {
     public void onApplicationLoad() throws Exception {
         SandboxProbe.runAll();
         MultiSectorConfig.load();
-        CatalogExporter.export();
         logAddresses();
     }
 

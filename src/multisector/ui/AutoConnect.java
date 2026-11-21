@@ -74,10 +74,15 @@ public final class AutoConnect {
                 notice("Couldn't start hosting: " + e.getMessage());
             }
         } else if (mode.equals("join") && !host.isEmpty()) {
-            // First load of a fresh download: swap the host's character for ours.
-            String applied = ProfileApplier.applyIfNeeded(s.optString("downloadId", null));
-            if (applied != null) notice(applied);
             if (session.getState() == Session.State.CONNECTED || session.getState() == Session.State.CONNECTING) return;
+            // First load of a fresh download: choose your character first, then connect.
+            String downloadId = s.optString("downloadId", "");
+            if (!ProfileApplier.isApplied(downloadId)) {
+                CharacterChooser.setPending(downloadId, host, port, name);
+                MultiplayerDialog.setLastJoinAddress(host + (port != NetConfig.DEFAULT_PORT ? ":" + port : ""));
+                notice("choose your character to start playing in this world.");
+                return;
+            }
             if (session.isActive()) session.stop();
             MultiplayerDialog.setLastJoinAddress(host + (port != NetConfig.DEFAULT_PORT ? ":" + port : ""));
             session.join(host, port, name);

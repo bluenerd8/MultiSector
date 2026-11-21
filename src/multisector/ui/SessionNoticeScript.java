@@ -36,6 +36,7 @@ public class SessionNoticeScript implements EveryFrameScript {
             ui.addMessage("MultiSector: press " + key + " or use the Multiplayer button on the ability bar to host or join.",
                     Misc.getTextColor(), key, "Multiplayer", Misc.getHighlightColor(), Misc.getHighlightColor());
         }
+        CharacterChooser.openIfPending();
         String n;
         while ((n = Session.get().pollNotice()) != null) {
             ui.addMessage("MultiSector: " + n, Misc.getHighlightColor());

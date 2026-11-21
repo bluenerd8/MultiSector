@@ -76,7 +76,6 @@ public final class Launcher {
     private final JProgressBar progress = new JProgressBar(0, 1000);
     private LobbyClient.Info checkedInfo;
 
-    private CharacterTab characterTab;
 
     public static void main(String[] args) {
         try {
@@ -110,24 +109,7 @@ public final class Launcher {
         JPanel top = row(new JLabel("Your name:"), nameField,
                 Box.createHorizontalStrut(20), new JLabel("Starsector: " + game.root));
 
-        characterTab = new CharacterTab(game, new CharacterTab.Host() {
-            public String currentName() {
-                return myName();
-            }
-
-            public void setName(String name) {
-                if (name != null && !name.trim().isEmpty()) nameField.setText(name.trim());
-            }
-
-            public void log(String line) {
-                Launcher.this.log(line);
-            }
-        });
-        String profileName = characterTab.savedName();
-        if (profileName != null && !profileName.isEmpty()) nameField.setText(profileName);
-
         JTabbedPane tabs = new JTabbedPane();
-        tabs.addTab("Character", characterTab);
         tabs.addTab("Host a game", hostTab());
         tabs.addTab("Join a game", joinTab());
 
@@ -343,28 +325,20 @@ public final class Launcher {
                 .append(" (").append(GameInstall.megabytes(info.saveBytes)).append(", ")
                 .append(GameInstall.megabytes(info.zipBytes)).append(" to download)\n");
         sb.append("Game version: ").append(info.gameVersion).append('\n');
-        org.json.JSONObject profile = characterTab.loadProfile();
-        if (profile != null && "import".equals(profile.optString("mode"))) {
-            org.json.JSONObject export = characterTab.loadExport();
-            sb.append("You'll play as: ").append(profile.optString("name")).append(", imported");
-            if (export != null) sb.append(" (").append(CharacterTab.exportSummary(export)).append(")");
-            sb.append(" in ").append(info.hostName).append("'s world.\n");
-            if (export != null && export.optJSONArray("mods") != null) {
-                List<String> needs = new ArrayList<String>();
-                org.json.JSONArray m = export.optJSONArray("mods");
-                for (int i = 0; i < m.length(); i++) {
-                    if (!info.mods.contains(m.optString(i))) needs.add(m.optString(i));
-                }
-                if (!needs.isEmpty()) {
-                    sb.append("Note: your character was exported with mods the host doesn't use: ").append(needs)
-                            .append(". Ships or items from those mods will be left behind.\n");
-                }
+        sb.append("Your character: you choose it in the game when the save loads, either your exported "
+                + "character or a new one.\n");
+        org.json.JSONObject export = loadExport();
+        if (export != null) {
+            sb.append("Exported character available: ").append(exportSummary(export)).append('\n');
+            List<String> needs = new ArrayList<String>();
+            org.json.JSONArray m = export.optJSONArray("mods");
+            for (int i = 0; m != null && i < m.length(); i++) {
+                if (!info.mods.contains(m.optString(i))) needs.add(m.optString(i));
             }
-        } else if (profile != null) {
-            sb.append("You'll play as: ").append(profile.optString("name")).append(" (starting fleet: ")
-                    .append(profile.optString("start")).append(") in ").append(info.hostName).append("'s world.\n");
-        } else {
-            sb.append("No character saved yet: set one up in the Character tab first, or you'll play as the host's character.\n");
+            if (!needs.isEmpty()) {
+                sb.append("Note: it was exported with mods the host doesn't use: ").append(needs)
+                        .append(". Ships or items from those mods would be left behind.\n");
+            }
         }
 
         List<String> mine = game.enabledMods();
@@ -485,24 +459,40 @@ public final class Launcher {
     }
 
     /**
-     * Shows the downloaded save in the game's Load list under your character
-     * ("Bob - Alice's world") with your portrait, instead of the host's name.
-     * Returns the label.
+     * Shows the downloaded save in the game's Load list as "Bob - Alice's world"
+     * instead of under the host's character name. Returns the label.
      */
     private String labelDownload(File folder, String hostName) {
-        org.json.JSONObject profile = characterTab.loadProfile();
-        String me = profile == null ? null : profile.optString("name", null);
-        String portrait = profile == null ? null : profile.optString("portrait", null);
-        String label = (me == null || me.isEmpty() ? "MultiSector" : me) + " - " + hostName + "'s world";
+        String me = nameField.getText().trim();
+        String label = (me.isEmpty() ? "MultiSector" : me) + " - " + hostName + "'s world";
         try {
-            GameInstall.relabel(folder, label, portrait);
+            GameInstall.relabel(folder, label, null);
         } catch (IOException e) {
             log("Couldn't rename the save in the Load list: " + e.getMessage());
         }
-        if (profile == null) {
-            log("You haven't saved a character yet (Character tab), so you'll play as the host's character.");
-        }
         return label;
+    }
+
+    /** The character exported in the game (F8, Export character), or null. */
+    private org.json.JSONObject loadExport() {
+        String text = game.readCommon("multisector_character.json");
+        if (text == null) return null;
+        try {
+            return new org.json.JSONObject(text);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** "Jane Doe, level 7, 5 ships, 2 officers, 120,000 credits" */
+    private static String exportSummary(org.json.JSONObject export) {
+        org.json.JSONObject ch = export.optJSONObject("character");
+        org.json.JSONArray fleet = export.optJSONArray("fleet");
+        org.json.JSONArray officers = export.optJSONArray("officers");
+        String name = ch == null ? "?" : (ch.optString("first", "") + " " + ch.optString("last", "")).trim();
+        return name + ", level " + (ch == null ? "?" : ch.optInt("level", 1)) + ", "
+                + (fleet == null ? 0 : fleet.length()) + " ships, " + (officers == null ? 0 : officers.length())
+                + " officers, " + String.format("%,d", export.optLong("credits", 0)) + " credits";
     }
 
     /**

@@ -29,7 +29,17 @@ PLAYING OVER HAMACHI
     1. "Join a game" tab: type the host's address, click "Check host".
        It warns you if your mods don't match the host's.
     2. Click "Download save", then "Launch Starsector", then Continue on
-       the main menu. The game joins the host by itself.
+       the main menu.
+    3. The game asks you to choose your character: your exported one (see
+       below) or a new one (name, portrait, starting fleet). Then it joins
+       the host by itself. The host's world stays as it is; only the
+       character and fleet in your copy are yours.
+
+  BRINGING YOUR OWN CHARACTER
+    Load one of your own saves, press F8 and click "Export character".
+    Your character, ships (with their loadouts), officers and cargo are
+    saved, ready to pick when you join a world. You can rename it there.
+    Colonies, reputation and story progress stay in your own save.
 
   In the game, F8 (or the Multiplayer button on the ability bar) shows
   the connection and players, and lets you host or join by hand.
