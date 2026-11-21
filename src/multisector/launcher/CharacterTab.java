@@ -60,6 +60,9 @@ final class CharacterTab extends JPanel {
 
     interface Host {
         String currentName();
+
+        void setName(String name);
+
         void log(String line);
     }
 
@@ -72,6 +75,9 @@ final class CharacterTab extends JPanel {
     private final Set<String> loading = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
     private final JLabel status = new JLabel();
+    private final JRadioButton newChar = new JRadioButton("Create a new character");
+    private final JRadioButton importChar = new JRadioButton("Use my exported character");
+    private final JLabel importSummary = new JLabel();
     private final JRadioButton male = new JRadioButton("Male");
     private final JRadioButton female = new JRadioButton("Female");
     private final DefaultListModel<String> portraitModel = new DefaultListModel<String>();
@@ -195,9 +201,34 @@ final class CharacterTab extends JPanel {
         buttons.add(save);
         buttons.add(refresh);
 
+        ButtonGroup source = new ButtonGroup();
+        source.add(newChar);
+        source.add(importChar);
+        newChar.setSelected(true);
+        ActionListener sourceChanged = new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                updateMode(true);
+            }
+        };
+        newChar.addActionListener(sourceChanged);
+        importChar.addActionListener(sourceChanged);
+        JPanel sourceRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        sourceRow.add(newChar);
+        sourceRow.add(importChar);
+        JPanel sourcePanel = new JPanel(new BorderLayout(0, 2));
+        sourcePanel.add(sourceRow, BorderLayout.NORTH);
+        sourcePanel.add(importSummary, BorderLayout.CENTER);
+        sourcePanel.add(new JLabel("Your name at the top is your character's name; you can change it for either kind."),
+                BorderLayout.SOUTH);
+        sourcePanel.setBorder(BorderFactory.createTitledBorder("Character"));
+
+        JPanel statusAndPortraits = new JPanel(new BorderLayout(0, 6));
+        statusAndPortraits.add(status, BorderLayout.NORTH);
+        statusAndPortraits.add(portraitPanel, BorderLayout.CENTER);
+
         JPanel top = new JPanel(new BorderLayout(0, 6));
-        top.add(status, BorderLayout.NORTH);
-        top.add(portraitPanel, BorderLayout.CENTER);
+        top.add(sourcePanel, BorderLayout.NORTH);
+        top.add(statusAndPortraits, BorderLayout.CENTER);
 
         add(top, BorderLayout.NORTH);
         add(startPanel, BorderLayout.CENTER);
@@ -208,6 +239,12 @@ final class CharacterTab extends JPanel {
 
     /** Reads the catalog and the saved profile, and fills the lists. */
     void reload() {
+        // Imported characters don't need the catalog, so set the mode first.
+        JSONObject saved = loadProfile();
+        if (saved != null && "import".equals(saved.optString("mode"))) importChar.setSelected(true);
+        else newChar.setSelected(true);
+        updateMode(false);
+
         String text = game.readCommon(CATALOG);
         catalog = null;
         searchRoots.clear();
@@ -272,6 +309,7 @@ final class CharacterTab extends JPanel {
             if (list.get(i).id.equals(wanted)) sel = i;
         }
         if (!startModel.isEmpty()) startList.setSelectedIndex(sel);
+        updateMode(false);
     }
 
     private void fillPortraits(String select) {
@@ -338,6 +376,7 @@ final class CharacterTab extends JPanel {
     boolean saveProfile() {
         String name = host.currentName();
         if (name == null) return false;
+        if (importChar.isSelected()) return saveImportProfile(name);
         String portrait = portraitList.getSelectedValue();
         Start start = startList.getSelectedValue();
         if (catalog == null || portrait == null || start == null) {
@@ -350,6 +389,7 @@ final class CharacterTab extends JPanel {
             o.put("playerId", playerId);
             o.put("name", name);
             o.put("gender", female.isSelected() ? "female" : "male");
+            o.put("mode", "new");
             o.put("portrait", portrait);
             o.put("start", start.id);
             o.put("savedAt", System.currentTimeMillis());
@@ -359,6 +399,88 @@ final class CharacterTab extends JPanel {
         } catch (Exception e) {
             host.log("Couldn't save your character: " + e.getMessage());
             return false;
+        }
+    }
+
+    // ================================================================ import
+
+    static final String EXPORT = "multisector_character.json";
+
+    /** The character exported from the game (F8, Export character), or null. */
+    JSONObject loadExport() {
+        String text = game.readCommon(EXPORT);
+        if (text == null) return null;
+        try {
+            return new JSONObject(text);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    static String exportName(JSONObject export) {
+        JSONObject ch = export.optJSONObject("character");
+        if (ch == null) return "";
+        return (ch.optString("first", "") + " " + ch.optString("last", "")).trim();
+    }
+
+    /** "Jane Doe, level 7, 5 ships, 2 officers, 120,000 credits (exported 2026-11-22 01:40)" */
+    static String exportSummary(JSONObject export) {
+        JSONObject ch = export.optJSONObject("character");
+        JSONArray fleet = export.optJSONArray("fleet");
+        JSONArray officers = export.optJSONArray("officers");
+        String when = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm")
+                .format(new java.util.Date(export.optLong("exportedAt", 0)));
+        return exportName(export) + ", level " + (ch == null ? "?" : ch.optInt("level", 1))
+                + ", " + (fleet == null ? 0 : fleet.length()) + " ships, "
+                + (officers == null ? 0 : officers.length()) + " officers, "
+                + String.format("%,d", export.optLong("credits", 0)) + " credits (exported " + when + ")";
+    }
+
+    private boolean saveImportProfile(String name) {
+        JSONObject export = loadExport();
+        if (export == null) {
+            host.log("No exported character yet. Load your own save in Starsector, press F8 and click Export character.");
+            return false;
+        }
+        try {
+            if (playerId == null || playerId.isEmpty()) playerId = UUID.randomUUID().toString();
+            JSONObject ch = export.optJSONObject("character");
+            JSONObject o = new JSONObject();
+            o.put("playerId", playerId);
+            o.put("mode", "import");
+            o.put("name", name); // may differ from the exported name: renaming is allowed
+            o.put("gender", ch == null ? "male" : ch.optString("gender", "MALE").toLowerCase());
+            o.put("portrait", ch == null ? "" : ch.optString("portrait", ""));
+            o.put("exportedAt", export.optLong("exportedAt", 0));
+            o.put("savedAt", System.currentTimeMillis());
+            game.writeCommon(PROFILE, o.toString(2));
+            host.log("Saved your character: " + name + ", imported (" + exportSummary(export)
+                    + "). It's used the first time you join a host's world.");
+            return true;
+        } catch (Exception e) {
+            host.log("Couldn't save your character: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Greys out the new-character choices while an imported character is selected. */
+    private void updateMode(boolean userClicked) {
+        boolean fresh = newChar.isSelected();
+        male.setEnabled(fresh);
+        female.setEnabled(fresh);
+        portraitList.setEnabled(fresh);
+        startList.setEnabled(fresh);
+        JSONObject export = loadExport();
+        if (export == null) {
+            importSummary.setText("No exported character yet. To bring one in: load your own save in Starsector, "
+                    + "press F8, click Export character.");
+            importChar.setEnabled(false);
+            if (importChar.isSelected()) newChar.setSelected(true);
+        } else {
+            importChar.setEnabled(true);
+            importSummary.setText("Exported character: " + exportSummary(export));
+            // Pre-fill the exported name when switching to it; the name box stays editable.
+            if (userClicked && importChar.isSelected()) host.setName(exportName(export));
         }
     }
 

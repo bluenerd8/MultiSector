@@ -55,6 +55,22 @@ public final class ProfileApplier {
             return "couldn't read your launcher character (" + e.getMessage() + "), so you're playing as the host's character.";
         }
 
+        if ("import".equals(profile.optString("mode"))) {
+            try {
+                String text = Global.getSettings().readTextFileFromCommon(CharacterExporter.EXPORT_FILE);
+                if (text == null || text.trim().isEmpty()) {
+                    return "your launcher character is set to an imported one, but no export was found. "
+                            + "Export it again from your own save (F8, Export character).";
+                }
+                String msg = new CharacterImporter().apply(new JSONObject(text), profile.optString("name", null));
+                Global.getSector().getPersistentData().put(APPLIED_KEY, downloadId == null ? "unknown" : downloadId);
+                return msg;
+            } catch (Exception e) {
+                log.warn("[MultiSector] couldn't import the exported character", e);
+                return "couldn't import your character: " + e.getMessage();
+            }
+        }
+
         try {
             applyCharacter(profile);
             String startName = applyFleet(profile.optString("start", ""));

@@ -16,6 +16,7 @@ import com.fs.starfarer.api.ui.LabelAPI;
 import com.fs.starfarer.api.ui.TextFieldAPI;
 import com.fs.starfarer.api.ui.TooltipMakerAPI;
 import com.fs.starfarer.api.util.Misc;
+import multisector.character.CharacterExporter;
 import multisector.net.AddressFinder;
 import multisector.net.NetConfig;
 import multisector.net.Session;
@@ -35,7 +36,7 @@ import java.util.Map;
 public class MultiplayerDialog extends BaseCustomDialogDelegate {
 
     private static final float WIDTH = 520f;
-    private static final float HEIGHT = 540f;
+    private static final float HEIGHT = 640f;
     private static final float BUTTON_W = 180f;
     private static final float BUTTON_H = 28f;
     private static final String PERSIST_KEY = "multisector_lastJoinAddress";
@@ -43,6 +44,7 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate {
     private static final String BTN_HOST = "host";
     private static final String BTN_JOIN = "join";
     private static final String BTN_COPY = "copy";
+    private static final String BTN_EXPORT = "export";
 
     /** Last address typed into Join, for this game session. Also saved per save file. */
     private static String lastJoinAddress = "";
@@ -202,6 +204,13 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate {
                     s.join(address, MultiSectorConfig.getPort(), playerName());
                 }
             }
+        } else if (BTN_EXPORT.equals(id)) {
+            try {
+                localInfo = "Exported " + CharacterExporter.export() + ". In the MultiSector launcher's Character tab, "
+                        + "choose \"Use my exported character\".";
+            } catch (Exception e) {
+                localError = "Export failed: " + e.getMessage();
+            }
         } else if (BTN_COPY.equals(id) && shareAddress != null) {
             localInfo = Clipboard.copy(shareAddress)
                     ? "Copied " + shareAddress + " to the clipboard."
@@ -277,6 +286,12 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate {
         // Players
         t.addSectionHeading("Players", Alignment.MID, 18f);
         playersLabel = t.addPara(playersText(), 8f);
+
+        // Character export
+        t.addSectionHeading("Your character", Alignment.MID, 18f);
+        t.addPara("Take this character, fleet, officers and cargo into a friend's MultiSector world. "
+                + "Colonies, reputation and story progress stay in this save.", gray, 8f);
+        t.addButton("Export character", BTN_EXPORT, BUTTON_W, BUTTON_H, pad);
 
         t.addPara("Shortcut: %s. Only connecting works so far; game sync comes next.", 18f, gray,
                 MultiSectorConfig.getHotkeyName()).setColor(gray);

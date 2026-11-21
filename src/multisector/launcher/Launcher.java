@@ -115,6 +115,10 @@ public final class Launcher {
                 return myName();
             }
 
+            public void setName(String name) {
+                if (name != null && !name.trim().isEmpty()) nameField.setText(name.trim());
+            }
+
             public void log(String line) {
                 Launcher.this.log(line);
             }
@@ -340,7 +344,23 @@ public final class Launcher {
                 .append(GameInstall.megabytes(info.zipBytes)).append(" to download)\n");
         sb.append("Game version: ").append(info.gameVersion).append('\n');
         org.json.JSONObject profile = characterTab.loadProfile();
-        if (profile != null) {
+        if (profile != null && "import".equals(profile.optString("mode"))) {
+            org.json.JSONObject export = characterTab.loadExport();
+            sb.append("You'll play as: ").append(profile.optString("name")).append(", imported");
+            if (export != null) sb.append(" (").append(CharacterTab.exportSummary(export)).append(")");
+            sb.append(" in ").append(info.hostName).append("'s world.\n");
+            if (export != null && export.optJSONArray("mods") != null) {
+                List<String> needs = new ArrayList<String>();
+                org.json.JSONArray m = export.optJSONArray("mods");
+                for (int i = 0; i < m.length(); i++) {
+                    if (!info.mods.contains(m.optString(i))) needs.add(m.optString(i));
+                }
+                if (!needs.isEmpty()) {
+                    sb.append("Note: your character was exported with mods the host doesn't use: ").append(needs)
+                            .append(". Ships or items from those mods will be left behind.\n");
+                }
+            }
+        } else if (profile != null) {
             sb.append("You'll play as: ").append(profile.optString("name")).append(" (starting fleet: ")
                     .append(profile.optString("start")).append(") in ").append(info.hostName).append("'s world.\n");
         } else {
