@@ -76,11 +76,21 @@ function Test-GameRunning {
     return [bool]$procs
 }
 
+function Test-LauncherRunning {
+    # Only the installed copy reads the installed jar; "dev launcher" runs from build/classes.
+    $procs = Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match "multisector\.launcher" -and $_.CommandLine -match "MultiSector\.jar" }
+    return [bool]$procs
+}
+
 function Invoke-Install {
     # Starsector reads classes from the jar lazily. Replacing the jar while the
     # game runs makes later class loads fail with "invalid LOC header".
     if (Test-GameRunning) {
         throw "Starsector is running. Close the game first; replacing the mod while it runs breaks it until restart."
+    }
+    if (Test-LauncherRunning) {
+        throw "The MultiSector launcher is open. Close it first; replacing the mod while it runs breaks it until restart."
     }
     Invoke-Build
     # /MIR only touches <game>\mods\MultiSector.

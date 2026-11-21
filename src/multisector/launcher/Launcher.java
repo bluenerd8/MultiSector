@@ -40,6 +40,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -335,7 +336,8 @@ public final class Launcher {
         StringBuilder sb = new StringBuilder();
         sb.append("Host: ").append(info.hostName).append('\n');
         sb.append("Save: ").append(info.characterName).append(", saved ").append(info.saveDate)
-                .append(" (").append(GameInstall.megabytes(info.saveBytes)).append(")\n");
+                .append(" (").append(GameInstall.megabytes(info.saveBytes)).append(", ")
+                .append(GameInstall.megabytes(info.zipBytes)).append(" to download)\n");
         sb.append("Game version: ").append(info.gameVersion).append('\n');
 
         List<String> mine = game.enabledMods();
@@ -366,30 +368,42 @@ public final class Launcher {
         background(new Runnable() {
             public void run() {
                 try {
-                    final File folder = LobbyClient.download(game, info.address, name, new LobbyClient.Progress() {
+                    final long started = System.currentTimeMillis();
+                    final LobbyClient.Result result = LobbyClient.download(game, info.address, name, new LobbyClient.Progress() {
                         long lastUi;
 
-                        public void update(final long done, final long total) {
+                        public synchronized void update(final long done, final long total) {
                             long now = System.currentTimeMillis();
-                            if (now - lastUi < 100 && done < total) return;
+                            if (now - lastUi < 150 && done < total) return;
                             lastUi = now;
+                            final String text = progressText(done, total, now - started);
                             ui(new Runnable() {
                                 public void run() {
                                     progress.setValue(total == 0 ? 1000 : (int) (done * 1000 / total));
-                                    progress.setString(GameInstall.megabytes(done) + " / " + GameInstall.megabytes(total));
+                                    progress.setString(text);
                                 }
                             });
                         }
                     });
+                    final long elapsed = System.currentTimeMillis() - started;
                     String[] hp = LobbyClient.splitAddress(info.address);
                     writeSession("join", hp[0], info.gamePort, name, info.characterName);
                     ui(new Runnable() {
                         public void run() {
                             progress.setValue(1000);
-                            progress.setString("Done");
                             downloadButton.setEnabled(true);
                             checkButton.setEnabled(true);
-                            log("Saved to " + folder.getName() + ". Click Launch Starsector, then Continue.");
+                            if (result.skipped) {
+                                progress.setString("Already up to date");
+                                log("You already have this exact save, so nothing was downloaded. "
+                                        + "Click Launch Starsector, then Continue.");
+                            } else {
+                                progress.setString("Done");
+                                log(String.format(Locale.ROOT, "Downloaded %s in %.1f s (%s). Saved to %s. "
+                                                + "Click Launch Starsector, then Continue.",
+                                        GameInstall.megabytes(info.zipBytes), elapsed / 1000.0,
+                                        speed(info.zipBytes, elapsed), result.folder.getName()));
+                            }
                         }
                     });
                 } catch (final IOException e) {
@@ -404,6 +418,26 @@ public final class Launcher {
                 }
             }
         });
+    }
+
+    /** "1.2 / 2.1 MB  -  340 KB/s  -  3 s left" */
+    private static String progressText(long done, long total, long elapsedMs) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(GameInstall.megabytes(done)).append(" / ").append(GameInstall.megabytes(total));
+        if (elapsedMs > 500 && done > 0) {
+            sb.append("  -  ").append(speed(done, elapsedMs));
+            double rate = done / (elapsedMs / 1000.0);
+            long left = (long) Math.ceil((total - done) / Math.max(rate, 1));
+            if (done < total) sb.append("  -  ").append(left < 60 ? left + " s left" : (left / 60) + " min left");
+        }
+        return sb.toString();
+    }
+
+    private static String speed(long bytes, long elapsedMs) {
+        double perSec = bytes / Math.max(elapsedMs / 1000.0, 0.001);
+        return perSec >= 1024 * 1024
+                ? String.format(Locale.ROOT, "%.1f MB/s", perSec / (1024 * 1024))
+                : String.format(Locale.ROOT, "%.0f KB/s", perSec / 1024);
     }
 
     // ================================================================ shared

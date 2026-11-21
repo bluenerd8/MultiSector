@@ -33,12 +33,15 @@ public final class Protocol {
     // TCP, launcher lobby (port + 1)
     /** client -> host: name */
     public static final byte LOBBY_HELLO = 20;
-    /** host -> client: hostName, characterName, saveDate, gameVersion, saveBytes(long), gamePort(int), modCount(int), modIds... */
+    /**
+     * host -> client: hostName, characterName, saveDate, gameVersion, saveBytes(long), gamePort(int),
+     * modCount(int), modIds..., zipBytes(long), zipSha256
+     */
     public static final byte LOBBY_INFO = 21;
-    /** client -> host: send me the save */
-    public static final byte LOBBY_GET_SAVE = 22;
-    /** host -> client: totalBytes(long), fileCount(int); a raw zip stream of the save folder follows */
-    public static final byte LOBBY_SAVE_BEGIN = 23;
+    /** client -> host: zipSha256, offset(long), length(int). Repeatable on one connection. */
+    public static final byte LOBBY_GET_RANGE = 22;
+    /** host -> client: offset(long), length(int); then exactly length raw bytes of the zipped save */
+    public static final byte LOBBY_RANGE = 23;
 
     // UDP
     /** client -> host: seq, sentNanos. Host echoes it back as PONG. */
