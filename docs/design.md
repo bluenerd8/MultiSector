@@ -195,4 +195,10 @@ Start with 4-5 files (ModPlugin, basic NetworkManager, one Intent, one DeltaEven
 - **The mod sandbox.** Starsector loads mod jars through `com.fs.starfarer.loading.scripts.ScriptClassLoader`, which refuses classes from some JDK packages. Strings in the engine jar list `java.lang.reflect` (except `Type`), most of `java.io` (with an allowlist of basic streams), `java.nio.file`, `javax.script`, `java.util.prefs` and `sun.reflect.misc`. `java.net` is not listed. Bundled libraries are loaded the same way, so the rules apply to them too.
 - **Consequence for KryoNet.** Kryo's serializers rely on reflection, so KryoNet probably will not load from a mod jar. The plan is a small hand-written network layer on `java.net` sockets with packets packed into `ByteBuffer`. Fallback: put KryoNet on the game's classpath through `vmparams`, which bypasses the sandbox but means every player edits that file.
 - **Sandbox probe.** `multisector.probe` tests each candidate API at startup and logs PASS/BLOCKED to `starsector.log`. Its results replace the guesses above.
-- **Connection model.** Direct connection to the host's IP and port. See [networking.md](networking.md).
+- **Connection model.** Direct connection to the host's IP on port 7777 (TCP + UDP). Hamachi is the primary supported setup. Hamachi-driven constraints:
+  - the host binds the wildcard address so the Hamachi adapter is included
+  - UDP payloads are capped at 1200 bytes (Hamachi's adapter MTU is 1404)
+  - the firewall rules are port-based on all profiles, because Hamachi is usually classed as a Public network
+
+  See [networking.md](networking.md).
+- **Wire basics (`multisector.net`).** Every packet starts with magic `MSEC` plus a protocol version. TCP messages are length-prefixed frames. `NetTest` is a standalone tester using the same format.

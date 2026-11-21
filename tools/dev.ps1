@@ -7,14 +7,23 @@
 #   dev package    build, then zip the mod into dist/ to send to friends
 #   dev clean      delete build/, dist/ and mod/jars/
 #
+#   dev ip                       show this PC's addresses (finds your Hamachi IP)
+#   dev nettest host [port]      run a connection test host
+#   dev nettest join <ip> [port] test the connection to a host
+#   dev firewall [port]          open the port in Windows Firewall (asks for admin)
+#   dev firewall remove          remove those firewall rules again
+#
 # The game folder defaults to D:\Starsector. Override it with the
 # STARSECTOR_DIR environment variable, or -GameDir <path>.
 # The JDK bundled with the game is used, so no separate Java install is needed.
 
 param(
     [Parameter(Position = 0)][string]$Task = "help",
-    [string]$GameDir = $(if ($env:STARSECTOR_DIR) { $env:STARSECTOR_DIR } else { "D:\Starsector" })
+    [string]$GameDir = $(if ($env:STARSECTOR_DIR) { $env:STARSECTOR_DIR } else { "D:\Starsector" }),
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest = @()
 )
+
+$DefaultPort = 7777   # keep in sync with NetConfig.DEFAULT_PORT
 
 $ErrorActionPreference = "Stop"
 trap { Write-Host "error: $($_.Exception.Message)" -ForegroundColor Red; exit 1 }
@@ -103,6 +112,45 @@ function Invoke-Package {
     Write-Host "Packaged $zip (unzip into Starsector\mods)"
 }
 
+function Invoke-NetTest([string[]]$NetArgs) {
+    Invoke-Build | Out-Null
+    # Runs outside the game, so the mod sandbox doesn't apply here.
+    & (Join-Path $jdkBin "java.exe") -cp (Join-Path $root "build\classes") multisector.net.NetTest @NetArgs
+    exit $LASTEXITCODE
+}
+
+function Invoke-Firewall([string[]]$FwArgs) {
+    $remove = $FwArgs.Count -gt 0 -and $FwArgs[0] -eq "remove"
+    $port = $DefaultPort
+    if (-not $remove -and $FwArgs.Count -gt 0) { $port = [int]$FwArgs[0] }
+    $java = Join-Path $jdkBin "java.exe"
+
+    # Runs elevated. Port rules work on every network profile, including
+    # Public, which is what Windows usually assigns to the Hamachi adapter.
+    # Clicking "Cancel" on Windows' "allow Java?" prompt creates Block rules
+    # for java.exe, and Block beats Allow, so those are removed too.
+    $script = @"
+`$ErrorActionPreference = 'Stop'
+Get-NetFirewallRule -Group 'MultiSector' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+if ('$remove' -eq 'True') {
+    Write-Host 'Removed MultiSector firewall rules.'
+} else {
+    New-NetFirewallRule -Group 'MultiSector' -DisplayName 'MultiSector (TCP $port)' -Direction Inbound -Protocol TCP -LocalPort $port -Action Allow -Profile Any | Out-Null
+    New-NetFirewallRule -Group 'MultiSector' -DisplayName 'MultiSector (UDP $port)' -Direction Inbound -Protocol UDP -LocalPort $port -Action Allow -Profile Any | Out-Null
+    Write-Host 'Opened TCP and UDP port $port on all network types (Private, Public, Domain).'
+    `$blocks = Get-NetFirewallApplicationFilter -Program '$java' -ErrorAction SilentlyContinue | Get-NetFirewallRule | Where-Object { `$_.Action -eq 'Block' -and `$_.Direction -eq 'Inbound' }
+    foreach (`$b in `$blocks) { Write-Host ('Removed block rule for the game''s Java: ' + `$b.DisplayName); `$b | Remove-NetFirewallRule }
+}
+Write-Host ''
+Read-Host 'Press Enter to close'
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+    Write-Host "Asking Windows for admin rights to change firewall rules..."
+    $p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encoded
+    if ($p.ExitCode -ne 0) { throw "firewall update failed (exit $($p.ExitCode))" }
+    Write-Host "Done."
+}
+
 function Invoke-Clean {
     foreach ($p in @("build", "dist", "mod\jars")) {
         $full = Join-Path $root $p
@@ -117,6 +165,9 @@ switch ($Task.ToLower()) {
     "log"     { Show-Log }
     "package" { Invoke-Package }
     "clean"   { Invoke-Clean }
+    "ip"      { Invoke-NetTest @("ip") }
+    "nettest" { Invoke-NetTest $Rest }
+    "firewall" { Invoke-Firewall $Rest }
     default {
         Write-Host @"
 Usage: dev <task>
@@ -127,6 +178,12 @@ Usage: dev <task>
   log        show MultiSector lines from the game log
   package    build, then zip the mod into dist/ for friends
   clean      delete build/, dist/ and mod/jars/
+
+  ip                        show this PC's addresses (finds your Hamachi IP)
+  nettest host [port]       run a connection test host
+  nettest join <ip> [port]  test the connection to a host
+  firewall [port]           open port $DefaultPort in Windows Firewall (asks for admin)
+  firewall remove           remove those firewall rules
 
 Game folder: $GameDir  (set STARSECTOR_DIR to change it)
 "@
