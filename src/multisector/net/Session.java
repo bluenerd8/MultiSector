@@ -9,12 +9,15 @@ import java.net.InetSocketAddress;
 import java.net.NoRouteToHostException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketAddress;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -83,6 +86,17 @@ public final class Session {
     private DatagramSocket clientUdp;
     private volatile int myId = -1;
 
+    // ---- fleet positions (both sides)
+    /** This game's own fleet, set by the game thread about 10 times a second. */
+    private volatile FleetState localFleet;
+    /** Other players' fleets, by player id, with arrival times. */
+    private final ConcurrentHashMap<Integer, FleetState.Received> remoteFleets =
+            new ConcurrentHashMap<Integer, FleetState.Received>();
+    /** Host: where each player's UDP packets come from, to send world states back. */
+    private final ConcurrentHashMap<Integer, SocketAddress> udpAddresses = new ConcurrentHashMap<Integer, SocketAddress>();
+    private static final int SYNC_INTERVAL_MS = 100;
+    private int hostSeq;
+
     private Session() {
     }
 
@@ -100,6 +114,16 @@ public final class Session {
     public int getPingMs() { return pingMs; }
     public int getMyId() { return myId; }
     public boolean isActive() { return state != State.IDLE; }
+
+    /** The game thread reports where this player's fleet is. Sent at the next sync tick. */
+    public void setLocalFleet(FleetState s) {
+        localFleet = s;
+    }
+
+    /** Other players' latest fleet positions, by player id. Read by the game thread. */
+    public Map<Integer, FleetState.Received> getRemoteFleets() {
+        return Collections.unmodifiableMap(remoteFleets);
+    }
 
     /** Queues a message for the game to show, next to the session's own ones. */
     public void notice(String text) {
@@ -146,6 +170,7 @@ public final class Session {
         startThread("MultiSector-accept", new Runnable() { public void run() { acceptLoop(gen); } });
         startThread("MultiSector-udp", new Runnable() { public void run() { udpEchoLoop(gen); } });
         startThread("MultiSector-list", new Runnable() { public void run() { listBroadcastLoop(gen); } });
+        startThread("MultiSector-sync", new Runnable() { public void run() { hostSyncLoop(gen); } });
     }
 
     /**
@@ -253,6 +278,10 @@ public final class Session {
             // connection dropped; handled below
         } finally {
             closeQuietly(s);
+            if (conn != null) {
+                remoteFleets.remove(conn.id);
+                udpAddresses.remove(conn.id);
+            }
             if (conn != null && conns.remove(conn) && alive(gen)) {
                 notices.add(conn.name + " left");
                 refreshHostPlayers();
@@ -279,15 +308,81 @@ public final class Session {
             try {
                 DatagramPacket p = new DatagramPacket(buf, buf.length);
                 u.receive(p);
-                if (p.getLength() < Protocol.PING_SIZE) continue;
                 ByteBuffer bb = ByteBuffer.wrap(buf, 0, p.getLength());
-                if (Protocol.readHeader(bb, null) != Protocol.PING) continue;
-                buf[Protocol.TYPE_OFFSET] = Protocol.PONG;
-                u.send(new DatagramPacket(buf, p.getLength(), p.getSocketAddress()));
+                int type = Protocol.readHeader(bb, null);
+                if (type == Protocol.PING && p.getLength() >= Protocol.PING_SIZE) {
+                    buf[Protocol.TYPE_OFFSET] = Protocol.PONG;
+                    u.send(new DatagramPacket(buf, p.getLength(), p.getSocketAddress()));
+                } else if (type == Protocol.FLEET_STATE) {
+                    receiveFleetState(bb, p);
+                }
             } catch (IOException e) {
                 if (!alive(gen)) return; // socket closed by stop()
+            } catch (RuntimeException e) {
+                // malformed packet; ignore it
             }
         }
+    }
+
+    /** A client's own fleet position. Accepted only from the IP its TCP connection uses. */
+    private void receiveFleetState(ByteBuffer bb, DatagramPacket p) {
+        FleetState s = FleetState.read(bb);
+        Conn owner = null;
+        for (Conn c : conns) if (c.id == s.playerId) owner = c;
+        if (owner == null || !owner.socket.getInetAddress().equals(p.getAddress())) return;
+        s.name = owner.name; // trust the handshake name, not the packet
+        FleetState.Received old = remoteFleets.get(s.playerId);
+        if (old != null && s.seq <= old.state.seq && old.state.seq - s.seq < 1000) return; // out of order
+        remoteFleets.put(s.playerId, new FleetState.Received(s, System.nanoTime()));
+        udpAddresses.put(s.playerId, p.getSocketAddress());
+    }
+
+    /** Every tick, sends each client every other player's fleet (including the host's). */
+    private void hostSyncLoop(int gen) {
+        while (alive(gen)) {
+            sleep(SYNC_INTERVAL_MS);
+            if (!alive(gen)) return;
+            List<FleetState> all = new ArrayList<FleetState>();
+            FleetState mine = localFleet;
+            if (mine != null) {
+                FleetState m = mine.copy();
+                m.playerId = HOST_ID;
+                m.name = localName;
+                m.seq = hostSeq++; // clients drop updates that don't move the sequence forward
+                all.add(m);
+            }
+            for (FleetState.Received r : remoteFleets.values()) all.add(r.state);
+            DatagramSocket u = hostUdp;
+            if (u == null) continue;
+            for (Map.Entry<Integer, SocketAddress> e : udpAddresses.entrySet()) {
+                List<FleetState> others = new ArrayList<FleetState>();
+                for (FleetState s : all) if (s.playerId != e.getKey()) others.add(s);
+                sendWorldState(u, e.getValue(), others);
+            }
+        }
+    }
+
+    /** Packs fleet states into as few datagrams as fit under the size limit. */
+    private static void sendWorldState(DatagramSocket u, SocketAddress to, List<FleetState> states) {
+        int i = 0;
+        do {
+            ByteBuffer bb = ByteBuffer.allocate(NetConfig.MAX_DATAGRAM);
+            bb.putInt(NetConfig.MAGIC).putShort(NetConfig.PROTOCOL_VERSION).put(Protocol.WORLD_STATE);
+            int countPos = bb.position();
+            bb.putShort((short) 0);
+            short count = 0;
+            while (i < states.size() && bb.remaining() >= states.get(i).size()) {
+                states.get(i++).write(bb);
+                count++;
+            }
+            if (count == 0 && i < states.size()) i++; // a single state too big to send; skip it
+            bb.putShort(countPos, count);
+            try {
+                u.send(new DatagramPacket(bb.array(), bb.position(), to));
+            } catch (IOException ignored) {
+                // UDP: a lost tick is replaced by the next one
+            }
+        } while (i < states.size());
     }
 
     private void listBroadcastLoop(int gen) {
@@ -384,7 +479,9 @@ public final class Session {
             }
             notices.add("Connected to " + hostName);
             final InetSocketAddress udpTarget = target;
-            startThread("MultiSector-ping", new Runnable() { public void run() { pingLoop(gen, udpTarget); } });
+            udp.setSoTimeout(1000);
+            startThread("MultiSector-send", new Runnable() { public void run() { clientSendLoop(gen, udpTarget); } });
+            startThread("MultiSector-recv", new Runnable() { public void run() { clientReceiveLoop(gen); } });
 
             s.setSoTimeout(IDLE_TIMEOUT_MS);
             while (alive(gen)) {
@@ -439,50 +536,77 @@ public final class Session {
         return Collections.unmodifiableList(list);
     }
 
-    private void pingLoop(int gen, InetSocketAddress target) {
+    /** Client: sends this fleet's position every tick, and a ping (plus a ping report over TCP) every second. */
+    private void clientSendLoop(int gen, InetSocketAddress target) {
         DatagramSocket udp = clientUdp;
-        byte[] out = new byte[Protocol.PING_SIZE];
-        byte[] in = new byte[256];
         int seq = 0;
-        try {
-            udp.setSoTimeout(PING_INTERVAL_MS);
-        } catch (IOException e) {
-            return;
-        }
+        int pingSeq = 0;
+        long nextPing = 0;
         while (alive(gen)) {
-            long sentAt = System.nanoTime();
+            long now = System.nanoTime();
             try {
-                ByteBuffer bb = ByteBuffer.wrap(out);
-                bb.putInt(NetConfig.MAGIC).putShort(NetConfig.PROTOCOL_VERSION).put(Protocol.PING)
-                        .putInt(seq).putLong(sentAt);
-                udp.send(new DatagramPacket(out, out.length, target));
-
-                long deadline = System.currentTimeMillis() + PING_INTERVAL_MS;
-                while (alive(gen) && System.currentTimeMillis() < deadline) {
-                    DatagramPacket p = new DatagramPacket(in, in.length);
-                    try {
-                        udp.receive(p);
-                    } catch (SocketTimeoutException e) {
-                        break;
-                    }
-                    ByteBuffer r = ByteBuffer.wrap(in, 0, p.getLength());
-                    if (p.getLength() < Protocol.PING_SIZE || Protocol.readHeader(r, null) != Protocol.PONG) continue;
-                    if (r.getInt() != seq) continue; // reply to an older ping
-                    pingMs = (int) ((System.nanoTime() - r.getLong()) / 1000000L);
-                    break;
+                FleetState mine = localFleet;
+                if (mine != null && myId >= 0) {
+                    FleetState s = mine.copy();
+                    s.playerId = myId;
+                    s.seq = seq++;
+                    s.name = localName;
+                    ByteBuffer bb = Protocol.begin(Protocol.FLEET_STATE, s.size());
+                    s.write(bb);
+                    udp.send(new DatagramPacket(bb.array(), bb.position(), target));
                 }
-                Conn c = toHost;
-                if (c != null && pingMs >= 0) {
-                    ByteBuffer rep = Protocol.begin(Protocol.PING_REPORT, 4);
-                    rep.putInt(pingMs).flip();
-                    c.send(rep);
+                if (now >= nextPing) {
+                    nextPing = now + PING_INTERVAL_MS * 1000000L;
+                    byte[] out = new byte[Protocol.PING_SIZE];
+                    ByteBuffer bb = ByteBuffer.wrap(out);
+                    bb.putInt(NetConfig.MAGIC).putShort(NetConfig.PROTOCOL_VERSION).put(Protocol.PING)
+                            .putInt(pingSeq++).putLong(now);
+                    udp.send(new DatagramPacket(out, out.length, target));
+                    Conn c = toHost;
+                    if (c != null && pingMs >= 0) {
+                        ByteBuffer rep = Protocol.begin(Protocol.PING_REPORT, 4);
+                        rep.putInt(pingMs).flip();
+                        c.send(rep);
+                    }
                 }
             } catch (IOException e) {
                 if (!alive(gen)) return;
             }
-            seq++;
-            long elapsed = (System.nanoTime() - sentAt) / 1000000L;
-            if (elapsed < PING_INTERVAL_MS) sleep(PING_INTERVAL_MS - elapsed);
+            sleep(SYNC_INTERVAL_MS);
+        }
+    }
+
+    /** Client: receives ping replies and the other players' fleet positions. */
+    private void clientReceiveLoop(int gen) {
+        DatagramSocket udp = clientUdp;
+        byte[] in = new byte[2048];
+        while (alive(gen)) {
+            try {
+                DatagramPacket p = new DatagramPacket(in, in.length);
+                udp.receive(p);
+                ByteBuffer r = ByteBuffer.wrap(in, 0, p.getLength());
+                int type = Protocol.readHeader(r, null);
+                if (type == Protocol.PONG && p.getLength() >= Protocol.PING_SIZE) {
+                    r.getInt(); // seq
+                    pingMs = (int) ((System.nanoTime() - r.getLong()) / 1000000L);
+                } else if (type == Protocol.WORLD_STATE) {
+                    long arrived = System.nanoTime();
+                    int n = r.getShort();
+                    for (int i = 0; i < n; i++) {
+                        FleetState s = FleetState.read(r);
+                        if (s.playerId == myId) continue;
+                        FleetState.Received old = remoteFleets.get(s.playerId);
+                        if (old != null && s.seq <= old.state.seq && old.state.seq - s.seq < 1000) continue;
+                        remoteFleets.put(s.playerId, new FleetState.Received(s, arrived));
+                    }
+                }
+            } catch (SocketTimeoutException e) {
+                // just loop
+            } catch (IOException e) {
+                if (!alive(gen)) return;
+            } catch (RuntimeException e) {
+                // malformed packet; ignore it
+            }
         }
     }
 
@@ -507,6 +631,8 @@ public final class Session {
         if (clientUdp != null) clientUdp.close();
         clientUdp = null;
         players = Collections.emptyList();
+        remoteFleets.clear();
+        udpAddresses.clear();
         pingMs = -1;
         myId = -1;
         state = State.IDLE;

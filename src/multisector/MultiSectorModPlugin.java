@@ -7,6 +7,8 @@ import com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotAPI;
 import com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotsAPI;
 import multisector.net.AddressFinder;
 import multisector.probe.SandboxProbe;
+import multisector.sync.FleetSync;
+import multisector.sync.PuppetManager;
 import multisector.ui.AutoConnect;
 import multisector.ui.MultiSectorConfig;
 import multisector.ui.MultiplayerAbility;
@@ -38,8 +40,10 @@ public class MultiSectorModPlugin extends BaseModPlugin {
 
     @Override
     public void onGameLoad(boolean newGame) {
+        PuppetManager.forget(); // any puppets belonged to the previously loaded world
         Global.getSector().getListenerManager().addListener(new MultiplayerHotkey(), true);
         Global.getSector().addTransientScript(new SessionNoticeScript(MultiSectorConfig.isShowHintOnLoad()));
+        Global.getSector().addTransientScript(new FleetSync());
         try {
             ensureAbilityOnBar();
         } catch (Exception e) {
@@ -50,6 +54,12 @@ public class MultiSectorModPlugin extends BaseModPlugin {
         } catch (Exception e) {
             Global.getLogger(MultiSectorModPlugin.class).warn("[MultiSector] auto-connect failed", e);
         }
+    }
+
+    /** Other players' puppet fleets must never be written into the save; FleetSync re-adds them next frame. */
+    @Override
+    public void beforeGameSave() {
+        PuppetManager.removeAll();
     }
 
     /** Gives the player the Multiplayer ability and puts it in the first free ability-bar slot. */

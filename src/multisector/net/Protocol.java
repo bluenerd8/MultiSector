@@ -47,6 +47,10 @@ public final class Protocol {
     /** client -> host: seq, sentNanos. Host echoes it back as PONG. */
     public static final byte PING = 10;
     public static final byte PONG = 11;
+    /** client -> host: one FleetState (the sender's own fleet) */
+    public static final byte FLEET_STATE = 12;
+    /** host -> client: count(short), then FleetStates of every other player */
+    public static final byte WORLD_STATE = 13;
     /** offset of the type byte inside a packet, so the host can flip PING to PONG in place */
     public static final int TYPE_OFFSET = 6;
     /** header + seq(4) + sentNanos(8) */
