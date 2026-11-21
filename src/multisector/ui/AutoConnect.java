@@ -1,6 +1,7 @@
 package multisector.ui;
 
 import com.fs.starfarer.api.Global;
+import multisector.character.ProfileApplier;
 import multisector.net.NetConfig;
 import multisector.net.Session;
 import org.apache.log4j.Logger;
@@ -43,10 +44,21 @@ public final class AutoConnect {
             log.info("[MultiSector] launcher session is " + age / 3600000 + " h old, ignoring");
             return;
         }
-        String loaded = Global.getSector().getPlayerPerson().getNameString().trim();
-        // Compare without spaces: the descriptor and the API can format the name slightly differently.
-        if (!character.replaceAll("\\s+", "").equalsIgnoreCase(loaded.replaceAll("\\s+", ""))) {
-            log.info("[MultiSector] launcher session is for \"" + character + "\", this save is \"" + loaded + "\"; not connecting");
+        // Identify the shared world by its seed: it's the same in the host's save and
+        // every friend's copy, and unlike the character name it doesn't change when a
+        // friend's character is swapped in.
+        String seed = s.optString("seed", "");
+        String loadedSeed = Global.getSector().getSeedString();
+        boolean sameWorld;
+        if (!seed.isEmpty()) {
+            sameWorld = seed.equals(loadedSeed);
+        } else { // session files from older launchers
+            String loaded = Global.getSector().getPlayerPerson().getNameString().trim();
+            sameWorld = character.replaceAll("\\s+", "").equalsIgnoreCase(loaded.replaceAll("\\s+", ""));
+        }
+        if (!sameWorld) {
+            log.info("[MultiSector] launcher session is for world " + seed + " (\"" + character + "\"), this save is "
+                    + loadedSeed + "; not connecting");
             notice("this isn't the save from the launcher (\"" + character + "\"), so not connecting automatically.");
             return;
         }
@@ -62,6 +74,9 @@ public final class AutoConnect {
                 notice("Couldn't start hosting: " + e.getMessage());
             }
         } else if (mode.equals("join") && !host.isEmpty()) {
+            // First load of a fresh download: swap the host's character for ours.
+            String applied = ProfileApplier.applyIfNeeded(s.optString("downloadId", null));
+            if (applied != null) notice(applied);
             if (session.getState() == Session.State.CONNECTED || session.getState() == Session.State.CONNECTING) return;
             if (session.isActive()) session.stop();
             MultiplayerDialog.setLastJoinAddress(host + (port != NetConfig.DEFAULT_PORT ? ":" + port : ""));

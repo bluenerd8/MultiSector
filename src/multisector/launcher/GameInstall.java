@@ -136,7 +136,52 @@ final class GameInstall {
     /** Text of the first &lt;name ...&gt;text&lt;/name&gt;, or null. */
     static String tag(String xml, String name) {
         Matcher m = Pattern.compile("<" + name + "(?:\\s[^>]*)?>([^<]*)</" + name + ">").matcher(xml);
-        return m.find() ? m.group(1).trim() : null;
+        if (!m.find()) return null;
+        return m.group(1).trim().replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"")
+                .replace("&apos;", "'").replace("&amp;", "&");
+    }
+
+    /**
+     * The world's seed ("MN-...") from campaign.xml. It's the same for the host's
+     * save and every copy of it, so the mod uses it to recognise the shared world.
+     * Read line by line: it sits near the end of a file that can be 100 MB.
+     */
+    static String readSeed(File saveDir) {
+        File f = new File(saveDir, "campaign.xml");
+        Pattern p = Pattern.compile("<seedString>([^<]+)</seedString>");
+        try (java.io.BufferedReader r = Files.newBufferedReader(f.toPath(), StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                if (!line.contains("<seedString>")) continue;
+                Matcher m = p.matcher(line);
+                if (m.find()) return m.group(1).trim();
+            }
+        } catch (IOException ignored) {
+        }
+        return "";
+    }
+
+    /**
+     * Changes how a downloaded save appears in the game's Load list: your
+     * character's name and portrait instead of the host's, so it's easy to
+     * tell apart from the host's own save.
+     */
+    static void relabel(File saveDir, String label, String portrait) throws IOException {
+        File desc = new File(saveDir, "descriptor.xml");
+        String xml = new String(Files.readAllBytes(desc.toPath()), StandardCharsets.UTF_8);
+        xml = replaceTag(xml, "characterName", escapeXml(label));
+        if (portrait != null && !portrait.isEmpty()) xml = replaceTag(xml, "portraitName", escapeXml(portrait));
+        xml = replaceTag(xml, "characterLevel", "1");
+        Files.write(desc.toPath(), xml.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String replaceTag(String xml, String name, String value) {
+        return xml.replaceFirst("(<" + name + "(?:\\s[^>]*)?>)[^<]*(</" + name + ">)",
+                "$1" + Matcher.quoteReplacement(value) + "$2");
+    }
+
+    private static String escapeXml(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     /**

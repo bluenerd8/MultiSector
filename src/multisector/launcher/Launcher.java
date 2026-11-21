@@ -280,7 +280,7 @@ public final class Launcher {
         });
         try {
             s.start();
-            writeSession("host", null, port, name, save.characterName);
+            writeSession("host", null, port, name, save.characterName, GameInstall.readSeed(save.folder), null);
         } catch (IOException e) {
             s.stop();
             error(e.getMessage());
@@ -339,6 +339,13 @@ public final class Launcher {
                 .append(" (").append(GameInstall.megabytes(info.saveBytes)).append(", ")
                 .append(GameInstall.megabytes(info.zipBytes)).append(" to download)\n");
         sb.append("Game version: ").append(info.gameVersion).append('\n');
+        org.json.JSONObject profile = characterTab.loadProfile();
+        if (profile != null) {
+            sb.append("You'll play as: ").append(profile.optString("name")).append(" (starting fleet: ")
+                    .append(profile.optString("start")).append(") in ").append(info.hostName).append("'s world.\n");
+        } else {
+            sb.append("No character saved yet: set one up in the Character tab first, or you'll play as the host's character.\n");
+        }
 
         List<String> mine = game.enabledMods();
         List<String> missing = new ArrayList<String>(info.mods);
@@ -386,8 +393,10 @@ public final class Launcher {
                         }
                     });
                     final long elapsed = System.currentTimeMillis() - started;
+                    final String label = labelDownload(result.folder, info.hostName);
                     String[] hp = LobbyClient.splitAddress(info.address);
-                    writeSession("join", hp[0], info.gamePort, name, info.characterName);
+                    writeSession("join", hp[0], info.gamePort, name, info.characterName,
+                            GameInstall.readSeed(result.folder), info.zipHash);
                     ui(new Runnable() {
                         public void run() {
                             progress.setValue(1000);
@@ -395,15 +404,15 @@ public final class Launcher {
                             checkButton.setEnabled(true);
                             if (result.skipped) {
                                 progress.setString("Already up to date");
-                                log("You already have this exact save, so nothing was downloaded. "
-                                        + "Click Launch Starsector, then Continue.");
+                                log("You already have this exact save, so nothing was downloaded.");
                             } else {
                                 progress.setString("Done");
-                                log(String.format(Locale.ROOT, "Downloaded %s in %.1f s (%s). Saved to %s. "
-                                                + "Click Launch Starsector, then Continue.",
+                                log(String.format(Locale.ROOT, "Downloaded %s in %.1f s (%s).",
                                         GameInstall.megabytes(info.zipBytes), elapsed / 1000.0,
-                                        speed(info.zipBytes, elapsed), result.folder.getName()));
+                                        speed(info.zipBytes, elapsed)));
                             }
+                            log("In the game's Load list it's \"" + label + "\". Click Launch Starsector, then "
+                                    + "Continue (or Load it).");
                         }
                     });
                 } catch (final IOException e) {
@@ -456,16 +465,42 @@ public final class Launcher {
     }
 
     /**
+     * Shows the downloaded save in the game's Load list under your character
+     * ("Bob - Alice's world") with your portrait, instead of the host's name.
+     * Returns the label.
+     */
+    private String labelDownload(File folder, String hostName) {
+        org.json.JSONObject profile = characterTab.loadProfile();
+        String me = profile == null ? null : profile.optString("name", null);
+        String portrait = profile == null ? null : profile.optString("portrait", null);
+        String label = (me == null || me.isEmpty() ? "MultiSector" : me) + " - " + hostName + "'s world";
+        try {
+            GameInstall.relabel(folder, label, portrait);
+        } catch (IOException e) {
+            log("Couldn't rename the save in the Load list: " + e.getMessage());
+        }
+        if (profile == null) {
+            log("You haven't saved a character yet (Character tab), so you'll play as the host's character.");
+        }
+        return label;
+    }
+
+    /**
      * Tells the mod what to do when the save loads. The mod reads it with
      * readTextFileFromCommon, which is allowed inside the game's sandbox.
+     * seed identifies the shared world; downloadId makes the mod swap in your
+     * character once per download.
      */
-    private void writeSession(String mode, String host, int port, String name, String characterName) throws IOException {
+    private void writeSession(String mode, String host, int port, String name, String characterName,
+                              String seed, String downloadId) throws IOException {
         String json = "{\n"
                 + "  \"mode\": " + quote(mode) + ",\n"
                 + "  \"host\": " + quote(host == null ? "" : host) + ",\n"
                 + "  \"port\": " + port + ",\n"
                 + "  \"name\": " + quote(name) + ",\n"
                 + "  \"characterName\": " + quote(characterName) + ",\n"
+                + "  \"seed\": " + quote(seed == null ? "" : seed) + ",\n"
+                + "  \"downloadId\": " + quote(downloadId == null ? "" : downloadId) + ",\n"
                 + "  \"createdAt\": " + System.currentTimeMillis() + "\n"
                 + "}\n";
         game.writeCommon(NetConfig.SESSION_FILE, json);
