@@ -227,6 +227,7 @@ Every player runs the real Starsector simulation on their own copy of the world.
 |---|---|
 | Anyone presses pause on the map | Everyone pauses (`PAUSE_REQUEST` -> host -> clock) |
 | Anyone unpauses | Everyone resumes |
+| Anyone presses Ctrl+Space inside a dialog, market or menu | Everyone pauses or resumes. The keyboard is read directly, because dialogs take the normal input. Plain Space would fire while typing. |
 | Someone opens a menu, market or dialog | Only their game pauses. The world clock keeps going, and they catch up after. |
 | Host fast-forwards | Shared clock runs at `campaignSpeedupMult`. Friends are told to fast-forward too; anyone who doesn't gets their date stepped forward. |
 | Friend fast-forwards alone | Disabled: their `campaignSpeedupMult` is set to 1 unless the host is fast-forwarding, so they can't run ahead. (If the engine caches that setting, the 3-hour correction still pulls them back.) |
@@ -305,4 +306,31 @@ Decision: a dialog (market, planet, hail, cargo or refit screen) pauses only the
 
 - **Docked at something that orbits** (planet, station): the player's position packets carry `dockedAt` (the entity id, the same in every copy) plus their offset from it. Other games draw that player's fleet riding along with the planet. When the dialog closes and the date catches up, `Docking.reattach` puts their own fleet back at the same offset after the orbit catch-up.
 - **Talking to a fleet:** the fleet being talked to stays frozen, and so does the player's own fleet. Friends can't open host-driven fleets yet. Letting them would need the host to apply battle results; otherwise a fleet a friend destroyed would reappear. A per-fleet claim (freeze only that fleet, and tell a second player someone is already dealing with it) comes with battle results.
-- **The host in a dialog:** Starsector stops the host's whole campaign, which would also freeze every NPC fleet that friends in the host's system are watching. So while the host is in a dialog or menu, the game is unpaused, and a friend is in the host's system, `NpcSync` moves those fleets itself in real time (`fleet.advance`, at most 0.1 s per step). It skips the fleet the host is talking to and fleets in a battle. Meanwhile the host's fleet is flagged as ignored by other fleets, so nobody tries to start a second encounter; the flag is removed when the dialog closes and before any save. Only fleets move: spawning, NPC battles and the economy wait for the host to close the dialog.
+- **The host in a dialog:** Starsector stops the host's whole campaign, which would also freeze every NPC fleet that friends in the host's system are watching. So while the host is in a dialog or menu, the game is unpaused, and a friend is in the host's system, `NpcSync` moves those fleets itself in real time (`fleet.advance`, at most 0.1 s per step). It skips the fleet the host is talking to and fleets in a battle. Meanwhile the host's fleet is flagged as ignored by other fleets, so nobody tries to start a second encounter; the flag is removed when the dialog closes and before any save. Only fleets move: spawning, NPC battles and the economy wait for the host to close the dialog. `moveFleetsDuringHostDialogs: false` turns just this off.
+
+---
+
+## 15. Friends' actions reach the host: fleet locks and battles
+
+### Locks
+
+When a player opens a dialog with an NPC fleet in a shared star system, that fleet is locked: held in place on every game, and nobody else can open it.
+
+1. **Friend clicks a host fleet:** `NpcInteractionGuard` opens a short "reaching the host" step and sends `CLAIM_REQUEST(handle)`.
+2. **Host** (`FleetLocks.hostFrame`) refuses if another player holds it, if the host is talking to it, or if it's in a battle, and says who has it. Otherwise it freezes the fleet (AI off, held at its spot, `$multisector_claimedBy` set to the player's name) and answers `CLAIM_REPLY` with the fleet's **exact copy**: every ship's loadout (`ShipJson`, shared with the character export), officer, readiness and hull damage, plus each ship's host member id. This can exceed 32K chars, so it uses `Protocol.putLongString`.
+3. **Friend:** the stand-in is rebuilt as that exact copy, then the game's own `FleetInteractionDialogPluginImpl` takes over. Talking, fighting, pursuing and looting all work as normal on the friend's PC.
+4. **When that dialog closes**, `FleetLocks.friendFrame` compares the ships left with the copy. No losses: `CLAIM_RELEASE`. Otherwise: `BATTLE_RESULT` with the host member ids of the lost ships.
+5. **Host** removes those ships from its real fleet. If none are left, it despawns the fleet with reason `OTHER`, not `DESTROYED_BY_BATTLE`: bounty and mission listeners expect real battle data with that reason. Then it unfreezes and tells everyone. The normal NPC sync then updates or removes the fleet on every game.
+6. Until the host's update arrives (or 5 s pass), the friend doesn't re-create a stand-in for that fleet, so a destroyed fleet can't flash back.
+
+Safety: a player leaving frees everything they held. Holds end after 20 minutes regardless. Freezes are lifted before every save and re-applied next frame. If the request times out, it's released in case the host's yes was still on its way. The host clicking a fleet a friend holds is told who has it, and fleets the host keeps moving during its own dialogs skip held ones.
+
+### Hidden fleets
+
+The friend's own extra fleets in a shared system were only made undetectable. Next to a planet the game could still show them, which looked like fleets spawning around a docked friend. They're now also parked 150,000 units out (orbit detached), and put back exactly where they were afterwards. The first 30 hidden per shared stretch are named in the log ("hiding this game's own ...").
+
+### Still to do
+
+- Markets: show the host's stock on open, and send purchases and sales back.
+- What a friend gains from battles (loot, XP, reputation) stays on their own game. Reputation is per player anyway: each friend has their own standing.
+- Hyperspace sharing.

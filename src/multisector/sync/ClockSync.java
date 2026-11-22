@@ -6,10 +6,12 @@ import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.util.Misc;
 import multisector.net.ClockState;
 import multisector.net.Session;
 import multisector.net.SharedClock;
 import org.apache.log4j.Logger;
+import org.lwjgl.input.Keyboard;
 
 import java.util.Locale;
 
@@ -71,6 +73,7 @@ public class ClockSync implements EveryFrameScript {
         Session session = Session.get();
         Session.State state = session.getState();
         if (state != Session.State.IDLE) Docking.track(); // before any catch-up below moves the planets
+        if (state == Session.State.HOSTING || state == Session.State.CONNECTED) dialogPauseKey(session);
         if (state != lastState) {
             lastState = state;
             resetFriendState();
@@ -235,6 +238,44 @@ public class ClockSync implements EveryFrameScript {
             originalSpeedup = null;
         }
         appliedSpeedup = -1f;
+    }
+
+    // ================================================================ pause from inside a dialog
+
+    private boolean keyWasDown;
+
+    /**
+     * Ctrl+Space inside a dialog, market or menu pauses or resumes the shared
+     * world for everyone. (On the map, the game's own pause key already does.)
+     * The game routes input to the open dialog, so the keyboard is read
+     * directly. Plain Space would fire while typing a ship name, so it
+     * needs Ctrl.
+     */
+    private void dialogPauseKey(Session session) {
+        boolean ctrl = Keyboard.isKeyDown(Keyboard.KEY_LCONTROL) || Keyboard.isKeyDown(Keyboard.KEY_RCONTROL);
+        boolean down = ctrl && Keyboard.isKeyDown(Keyboard.KEY_SPACE);
+        boolean pressed = down && !keyWasDown;
+        keyWasDown = down;
+        if (!pressed || isMapView()) return;
+
+        boolean pause;
+        if (session.getState() == Session.State.HOSTING) {
+            SharedClock clock = session.getSharedClock();
+            pause = clock.isRunning();
+            clock.setPaused(pause, session.getMyId(), System.nanoTime());
+        } else {
+            ClockState.Received r = session.getRemoteClock();
+            pause = r == null || !r.state.isStopped();
+            session.requestPause(pause);
+        }
+        String text = pause ? "Paused the game for everyone (Ctrl+Space resumes)."
+                : "Resumed the game for everyone.";
+        CampaignUIAPI ui = Global.getSector().getCampaignUI();
+        if (ui != null && ui.getCurrentInteractionDialog() != null) {
+            ui.getCurrentInteractionDialog().getTextPanel().addPara("MultiSector: " + text, Misc.getGrayColor());
+        } else {
+            session.notice(text);
+        }
     }
 
     // ================================================================ shared

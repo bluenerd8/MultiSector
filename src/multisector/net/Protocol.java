@@ -41,6 +41,16 @@ public final class Protocol {
     /** host -> clients: locationId, handle. That fleet left the system or is gone. */
     public static final byte NPC_GONE = 16;
 
+    // TCP: locking an NPC fleet a player interacts with (see sync.NpcSync)
+    /** client -> host: handle. "I'm opening this fleet's dialog: hold it for me." */
+    public static final byte CLAIM_REQUEST = 26;
+    /** host -> client: handle, granted(byte), holderName, fleetJson (long string; the exact fleet when granted) */
+    public static final byte CLAIM_REPLY = 27;
+    /** client -> host: handle. "Done with it, nothing changed." */
+    public static final byte CLAIM_RELEASE = 28;
+    /** client -> host: handle, count(int), lost member ids (strings). Applies the losses, then releases. */
+    public static final byte BATTLE_RESULT = 29;
+
     // TCP from the host's own launcher (loopback only) to the host's game
     /** launcher -> game: friendName. "A friend is about to download: save now (and hold the clock)." */
     public static final byte LOCAL_SAVE = 30;
@@ -136,6 +146,25 @@ public final class Protocol {
     public static String getString(ByteBuffer bb) {
         int n = bb.getShort();
         if (n < 0 || n * 2 > bb.remaining()) throw new IllegalArgumentException("bad string length " + n);
+        char[] c = new char[n];
+        for (int i = 0; i < n; i++) c[i] = bb.getChar();
+        return new String(c);
+    }
+
+    /** Size of a string written with {@link #putLongString}: an int length, then UTF-16 chars. */
+    public static int longStringSize(String s) {
+        return 4 + 2 * s.length();
+    }
+
+    /** For text that may pass 32K chars (a fleet's exact description). TCP only. */
+    public static void putLongString(ByteBuffer bb, String s) {
+        bb.putInt(s.length());
+        for (int i = 0; i < s.length(); i++) bb.putChar(s.charAt(i));
+    }
+
+    public static String getLongString(ByteBuffer bb) {
+        int n = bb.getInt();
+        if (n < 0 || n * 2L > bb.remaining()) throw new IllegalArgumentException("bad long string length " + n);
         char[] c = new char[n];
         for (int i = 0; i < n; i++) c[i] = bb.getChar();
         return new String(c);

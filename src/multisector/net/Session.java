@@ -126,6 +126,14 @@ public final class Session {
 
     // ---- host: the host's own launcher asking for a fresh save
     private final ConcurrentLinkedQueue<SaveRequest> saveRequests = new ConcurrentLinkedQueue<SaveRequest>();
+
+    // ---- locks on NPC fleets players interact with
+    /** Host: lock requests, releases and battle results from players, for the game thread. */
+    private final ConcurrentLinkedQueue<ClaimEvent> claimEvents = new ConcurrentLinkedQueue<ClaimEvent>();
+    /** Host: messages the game thread wants sent to one player: {playerId, message}. */
+    private final ConcurrentLinkedQueue<Object[]> directed = new ConcurrentLinkedQueue<Object[]>();
+    /** Client: the host's answers to our lock requests, by handle. */
+    private final ConcurrentHashMap<Integer, ClaimReply> claimReplies = new ConcurrentHashMap<Integer, ClaimReply>();
     /** How long the launcher waits for the game to save. */
     private static final int SAVE_WAIT_MS = 20000;
 
@@ -223,6 +231,100 @@ public final class Session {
     /** Host: where every published fleet is now. */
     public void hostNpcStates(List<NpcState> states) {
         npcStates = Collections.unmodifiableList(new ArrayList<NpcState>(states));
+    }
+
+    // ---- fleet locks: host side
+
+    /** Host: next lock request, release, battle result or departure, for the game thread. */
+    public ClaimEvent pollClaimEvent() {
+        return claimEvents.poll();
+    }
+
+    /** Host: answers a player's lock request. fleetJson is the fleet's exact copy when granted. */
+    public void replyClaim(int playerId, int handle, boolean granted, String holder, String fleetJson) {
+        String h = holder == null ? "" : holder;
+        String j = fleetJson == null ? "" : fleetJson;
+        ByteBuffer bb = Protocol.begin(Protocol.CLAIM_REPLY, 4 + 1 + Protocol.stringSize(h) + Protocol.longStringSize(j));
+        bb.putInt(handle).put((byte) (granted ? 1 : 0));
+        Protocol.putString(bb, h);
+        Protocol.putLongString(bb, j);
+        bb.flip();
+        directed.add(new Object[]{playerId, bb});
+    }
+
+    // ---- fleet locks: client side
+
+    /** Client: ask the host to hold this fleet for us. The answer comes back through {@link #takeClaimReply}. */
+    public void requestClaim(int handle) {
+        claimReplies.remove(handle);
+        outbox.add(handleMessage(Protocol.CLAIM_REQUEST, handle));
+    }
+
+    /** Client: the host's answer for that fleet, once (null until it arrives). */
+    public ClaimReply takeClaimReply(int handle) {
+        return claimReplies.remove(handle);
+    }
+
+    /** Client: done with that fleet and nothing changed. */
+    public void releaseClaim(int handle) {
+        outbox.add(handleMessage(Protocol.CLAIM_RELEASE, handle));
+    }
+
+    /** Client: which of the fleet's ships (the host's member ids) were lost; the host applies it and releases. */
+    public void sendBattleResult(int handle, List<String> lostIds) {
+        int size = 4 + 4;
+        for (String id : lostIds) size += Protocol.stringSize(id);
+        ByteBuffer bb = Protocol.begin(Protocol.BATTLE_RESULT, size);
+        bb.putInt(handle).putInt(lostIds.size());
+        for (String id : lostIds) Protocol.putString(bb, id);
+        bb.flip();
+        outbox.add(bb);
+    }
+
+    private static ByteBuffer handleMessage(byte type, int handle) {
+        ByteBuffer bb = Protocol.begin(type, 4);
+        bb.putInt(handle).flip();
+        return bb;
+    }
+
+    /** Something a player did about a lock, for the host's game thread. */
+    public static final class ClaimEvent {
+        public static final int REQUEST = 0;
+        public static final int RELEASE = 1;
+        public static final int RESULT = 2;
+        /** The player left: everything they held is free again. */
+        public static final int LEFT = 3;
+
+        public final int kind;
+        public final int playerId;
+        public final String playerName;
+        public final int handle;
+        public final List<String> lost;
+
+        ClaimEvent(int kind, int playerId, String playerName, int handle, List<String> lost) {
+            this.kind = kind;
+            this.playerId = playerId;
+            this.playerName = playerName;
+            this.handle = handle;
+            this.lost = lost == null ? Collections.<String>emptyList() : lost;
+        }
+    }
+
+    /** The host's answer to a lock request. */
+    public static final class ClaimReply {
+        public final int handle;
+        public final boolean granted;
+        /** Who holds it, when refused. */
+        public final String holder;
+        /** The fleet's exact copy, when granted. */
+        public final String fleetJson;
+
+        ClaimReply(int handle, boolean granted, String holder, String fleetJson) {
+            this.handle = handle;
+            this.granted = granted;
+            this.holder = holder;
+            this.fleetJson = fleetJson;
+        }
     }
 
     // ---- NPC fleets: client side
@@ -447,6 +549,17 @@ public final class Session {
                         notices.add(conn.name + (p ? " paused the game." : waited
                                 ? " resumed the game, so it stopped waiting for joining players." : " resumed the game."));
                     }
+                } else if (type == Protocol.CLAIM_REQUEST && msg.remaining() >= 4) {
+                    claimEvents.add(new ClaimEvent(ClaimEvent.REQUEST, conn.id, conn.name, msg.getInt(), null));
+                } else if (type == Protocol.CLAIM_RELEASE && msg.remaining() >= 4) {
+                    claimEvents.add(new ClaimEvent(ClaimEvent.RELEASE, conn.id, conn.name, msg.getInt(), null));
+                } else if (type == Protocol.BATTLE_RESULT && msg.remaining() >= 8) {
+                    int handle = msg.getInt();
+                    int n = msg.getInt();
+                    if (n < 0 || n > 1000) throw new IllegalArgumentException("bad loss count " + n);
+                    List<String> lost = new ArrayList<String>(n);
+                    for (int i = 0; i < n; i++) lost.add(Protocol.getString(msg));
+                    claimEvents.add(new ClaimEvent(ClaimEvent.RESULT, conn.id, conn.name, handle, lost));
                 } else if (type == Protocol.FLEET_COMP) {
                     msg.getInt(); // the sender's id: we already know who they are
                     FleetComp c = FleetComp.read(msg);
@@ -474,6 +587,8 @@ public final class Session {
                 remoteFleets.remove(conn.id);
                 udpAddresses.remove(conn.id);
                 comps.remove(conn.id);
+                // Anything they were holding is free again.
+                claimEvents.add(new ClaimEvent(ClaimEvent.LEFT, conn.id, conn.name, 0, null));
             }
             if (conn != null && conns.remove(conn) && alive(gen)) {
                 notices.add(conn.name + " left");
@@ -570,6 +685,17 @@ public final class Session {
                         c.send(out.duplicate());
                     } catch (IOException e) {
                         closeQuietly(c.socket); // its reader thread cleans up
+                    }
+                }
+            }
+            Object[] d;
+            while ((d = directed.poll()) != null) {
+                for (Conn c : conns) {
+                    if (c.id != (Integer) d[0]) continue;
+                    try {
+                        c.send((ByteBuffer) d[1]);
+                    } catch (IOException e) {
+                        closeQuietly(c.socket);
                     }
                 }
             }
@@ -780,6 +906,12 @@ public final class Session {
                 } else if (type == Protocol.FLEET_COMP) {
                     int pid = msg.getInt();
                     comps.put(pid, FleetComp.read(msg));
+                } else if (type == Protocol.CLAIM_REPLY) {
+                    int handle = msg.getInt();
+                    boolean granted = msg.get() != 0;
+                    String holder = Protocol.getString(msg);
+                    String json = Protocol.getLongString(msg);
+                    claimReplies.put(handle, new ClaimReply(handle, granted, holder, json));
                 } else if (type == Protocol.NPC_RESET) {
                     String loc = Protocol.getString(msg);
                     npcInfos.clear();
@@ -970,6 +1102,9 @@ public final class Session {
     }
 
     private void clearNpc() {
+        claimEvents.clear();
+        directed.clear();
+        claimReplies.clear();
         npcLocation = "";
         npcInfos.clear();
         npcStates = Collections.emptyList();

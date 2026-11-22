@@ -82,67 +82,11 @@ public final class CharacterExporter {
     }
 
     private static JSONObject person(PersonAPI p, MutableCharacterStatsAPI stats) throws Exception {
-        JSONObject o = new JSONObject();
-        FullName n = p.getName();
-        o.put("first", n.getFirst() == null ? "" : n.getFirst());
-        o.put("last", n.getLast() == null ? "" : n.getLast());
-        o.put("gender", p.getGender() == null ? "MALE" : p.getGender().name());
-        o.put("portrait", p.getPortraitSprite());
-        o.put("personality", p.getPersonalityAPI() == null ? "" : p.getPersonalityAPI().getId());
-        o.put("rank", p.getRankId() == null ? "" : p.getRankId());
-        o.put("post", p.getPostId() == null ? "" : p.getPostId());
-        o.put("level", stats.getLevel());
-        o.put("xp", stats.getXP());
-        o.put("bonusXp", stats.getBonusXp());
-        o.put("points", stats.getPoints());
-        o.put("storyPoints", stats.getStoryPoints());
-        JSONObject skills = new JSONObject();
-        for (MutableCharacterStatsAPI.SkillLevelAPI s : stats.getSkillsCopy()) {
-            if (s.getLevel() > 0 && s.getSkill() != null) skills.put(s.getSkill().getId(), s.getLevel());
-        }
-        o.put("skills", skills);
-        return o;
+        return ShipJson.person(p, stats);
     }
 
     private static JSONObject ship(FleetMemberAPI m) throws Exception {
-        ShipVariantAPI v = m.getVariant();
-        JSONObject s = new JSONObject();
-        s.put("hull", v.getHullSpec().getHullId());
-        s.put("baseHull", v.getHullSpec().getBaseHullId());
-        s.put("stockVariant", v.getHullVariantId());
-        s.put("variantName", v.getDisplayName());
-        s.put("shipName", m.getShipName());
-        s.put("flagship", m.isFlagship());
-        s.put("cr", m.getRepairTracker().getCR());
-        s.put("hullFraction", m.getStatus().getHullFraction());
-        s.put("mothballed", m.getRepairTracker().isMothballed());
-        s.put("vents", v.getNumFluxVents());
-        s.put("caps", v.getNumFluxCapacitors());
-        s.put("hasModules", v.getStationModules() != null && !v.getStationModules().isEmpty());
-
-        JSONObject weapons = new JSONObject();
-        for (String slot : v.getFittedWeaponSlots()) {
-            String w = v.getWeaponId(slot);
-            if (w != null) weapons.put(slot, w);
-        }
-        s.put("weapons", weapons);
-
-        JSONObject wings = new JSONObject();
-        List<String> wingList = v.getWings();
-        for (int i = 0; wingList != null && i < wingList.size(); i++) {
-            if (wingList.get(i) != null) wings.put(String.valueOf(i), wingList.get(i));
-        }
-        s.put("wings", wings);
-
-        JSONArray mods = new JSONArray();
-        for (String id : v.getNonBuiltInHullmods()) {
-            if (!v.getPermaMods().contains(id)) mods.put(id);
-        }
-        s.put("hullmods", mods);
-        s.put("permaMods", array(v.getPermaMods()));
-        s.put("sMods", array(v.getSMods()));
-        s.put("sModdedBuiltIns", array(v.getSModdedBuiltIns()));
-        return s;
+        return ShipJson.ship(m);
     }
 
     private static JSONArray cargo(CampaignFleetAPI fleet) throws Exception {

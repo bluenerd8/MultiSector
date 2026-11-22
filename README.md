@@ -7,6 +7,7 @@ Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), ai
 ## Time and pause
 
 - **Pause** on the map pauses everyone, and anyone can resume. Your own menus, markets and dialogs only pause your game. The shared clock keeps going, and your date catches up when you close them.
+- **Ctrl+Space** pauses or resumes everyone from inside a dialog, market or menu, where the normal pause key doesn't reach.
 - **Fast-forward** follows the host. When the host fast-forwards, turn yours on too. Yours does nothing while the host isn't.
 - **Joining:** when you click Download, the host's game saves a fresh copy for you. By default everyone waits, paused, until you're in the game, so you start in exactly the world you downloaded. The host (or anyone) can unpause to stop waiting. Turn this off with `holdWhileJoining` in `data/config/multisector.json`.
 - If your save is older or newer than the host's world, your date is set to the host's when you connect.

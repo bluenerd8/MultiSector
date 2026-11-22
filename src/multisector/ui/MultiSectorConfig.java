@@ -18,6 +18,7 @@ public final class MultiSectorConfig {
     private static boolean showHintOnLoad = true;
     private static boolean holdWhileJoining = true;
     private static boolean syncNpcFleets = true;
+    private static boolean moveFleetsDuringHostDialogs = true;
     private static boolean showPlayersHud = true;
     private static int hudHotkey = Keyboard.KEY_F7;
     private static String hudHotkeyName = "F7";
@@ -46,6 +47,7 @@ public final class MultiSectorConfig {
             holdWhileJoining = json.optBoolean("holdWhileJoining", true);
 
             syncNpcFleets = json.optBoolean("syncNpcFleets", true);
+            moveFleetsDuringHostDialogs = json.optBoolean("moveFleetsDuringHostDialogs", true);
             showPlayersHud = json.optBoolean("showPlayersHud", true);
             String hk = json.optString("hudHotkey", "F7").trim().toUpperCase();
             int hidx = Keyboard.getKeyIndex(hk);
@@ -77,6 +79,8 @@ public final class MultiSectorConfig {
     public static boolean isHoldWhileJoining() { return holdWhileJoining; }
     /** In a star system shared with the host, show the host's NPC fleets instead of this game's own. */
     public static boolean isSyncNpcFleets() { return syncNpcFleets; }
+    /** Host: keep NPC fleets in the host's system moving for friends while the host is in a dialog. */
+    public static boolean isMoveFleetsDuringHostDialogs() { return moveFleetsDuringHostDialogs; }
     /** Whether the players panel starts shown. */
     public static boolean isShowPlayersHud() { return showPlayersHud; }
     public static int getHudHotkey() { return hudHotkey; }

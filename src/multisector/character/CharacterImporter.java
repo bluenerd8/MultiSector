@@ -106,111 +106,13 @@ final class CharacterImporter {
     // ---------------------------------------------------------------- people
 
     private void applyPerson(PersonAPI p, MutableCharacterStatsAPI stats, JSONObject o, String nameOverride) {
-        Gender gender = "FEMALE".equalsIgnoreCase(o.optString("gender")) ? Gender.FEMALE : Gender.MALE;
-        String first = o.optString("first", "");
-        String last = o.optString("last", "");
-        if (nameOverride != null && !nameOverride.trim().isEmpty()) {
-            String n = nameOverride.trim();
-            int space = n.indexOf(' ');
-            first = space > 0 ? n.substring(0, space) : n;
-            last = space > 0 ? n.substring(space + 1).trim() : "";
-        }
-        p.setName(new FullName(first, last, gender));
-        p.setGender(gender);
-        String portrait = o.optString("portrait", "");
-        if (!portrait.isEmpty()) p.setPortraitSprite(portrait);
-        if (!o.optString("personality", "").isEmpty()) p.setPersonality(o.optString("personality"));
-        if (!o.optString("rank", "").isEmpty()) p.setRankId(o.optString("rank"));
-        if (!o.optString("post", "").isEmpty()) p.setPostId(o.optString("post"));
-
-        stats.resetSkills();
-        stats.setLevel(o.optInt("level", 1));
-        stats.setXP(o.optLong("xp", 0));
-        stats.setBonusXp(o.optLong("bonusXp", 0));
-        stats.setPoints(o.optInt("points", 0));
-        stats.setStoryPoints(o.optInt("storyPoints", 0));
-        JSONObject skills = o.optJSONObject("skills");
-        if (skills != null) {
-            Iterator<?> it = skills.keys();
-            while (it.hasNext()) {
-                String id = (String) it.next();
-                if (!exists("skill", id)) continue;
-                stats.setSkillLevel(id, (float) skills.optDouble(id, 0));
-            }
-        }
-        stats.refreshCharacterStatsEffects();
+        ShipJson.applyPerson(p, stats, o, nameOverride);
     }
 
     // ----------------------------------------------------------------- ships
 
     private FleetMemberAPI buildShip(JSONObject s) throws Exception {
-        String label = s.optString("shipName", s.optString("hull"));
-        if (s.optBoolean("hasModules")) {
-            // Multi-module ships: rebuilding each module's loadout isn't supported yet; use the stock layout.
-            String stock = s.optString("stockVariant", "");
-            if (exists("variant", stock)) {
-                FleetMemberAPI m = Global.getFactory().createFleetMember(FleetMemberType.SHIP, stock);
-                m.setShipName(s.optString("shipName", m.getShipName()));
-                return m;
-            }
-            skipped.add("ship " + label);
-            return null;
-        }
-
-        ShipHullSpecAPI hull = hullSpec(s.optString("hull"));
-        if (hull == null) hull = hullSpec(s.optString("baseHull"));
-        if (hull == null) {
-            skipped.add("ship " + label + " (" + s.optString("hull") + ")");
-            return null;
-        }
-        ShipVariantAPI v = Global.getSettings().createEmptyVariant(hull.getHullId() + "_multisector", hull);
-        v.setSource(VariantSource.REFIT);
-        String vName = s.optString("variantName", "");
-        if (!vName.isEmpty()) v.setVariantDisplayName(vName);
-
-        JSONObject weapons = s.optJSONObject("weapons");
-        if (weapons != null) {
-            Iterator<?> it = weapons.keys();
-            while (it.hasNext()) {
-                String slot = (String) it.next();
-                String w = weapons.getString(slot);
-                if (v.getWeaponId(slot) != null) continue; // built-in, already there
-                if (exists("weapon", w)) v.addWeapon(slot, w);
-                else skipped.add("weapon " + w);
-            }
-        }
-        JSONObject wings = s.optJSONObject("wings");
-        if (wings != null) {
-            Iterator<?> it = wings.keys();
-            while (it.hasNext()) {
-                String idx = (String) it.next();
-                String w = wings.getString(idx);
-                int i = Integer.parseInt(idx);
-                if (v.getWingId(i) != null) continue; // built-in
-                if (exists("wing", w)) v.setWingId(i, w);
-                else skipped.add("fighter wing " + w);
-            }
-        }
-        Set<String> sMods = set(s.optJSONArray("sMods"));
-        for (String id : list(s.optJSONArray("permaMods"))) {
-            if (exists("hullmod", id)) v.addPermaMod(id, sMods.contains(id));
-            else skipped.add("hullmod " + id);
-        }
-        for (String id : list(s.optJSONArray("hullmods"))) {
-            if (exists("hullmod", id)) v.addMod(id);
-            else skipped.add("hullmod " + id);
-        }
-        for (String id : list(s.optJSONArray("sModdedBuiltIns"))) {
-            if (exists("hullmod", id)) v.getSModdedBuiltIns().add(id);
-        }
-        v.setNumFluxVents(s.optInt("vents", 0));
-        v.setNumFluxCapacitors(s.optInt("caps", 0));
-
-        FactoryAPI f = Global.getFactory();
-        FleetMemberAPI m = f.createFleetMember(FleetMemberType.SHIP, v);
-        String shipName = s.optString("shipName", "");
-        if (!shipName.isEmpty()) m.setShipName(shipName);
-        return m;
+        return ShipJson.buildShip(s, skipped);
     }
 
     // ----------------------------------------------------------------- cargo
@@ -247,30 +149,8 @@ final class CharacterImporter {
 
     // --------------------------------------------------------------- helpers
 
-    /** True if this game knows the thing; the spec lookups throw or return null otherwise. */
     private static boolean exists(String type, String id) {
-        if (id == null || id.isEmpty()) return false;
-        try {
-            if (type.equals("weapon")) return Global.getSettings().getWeaponSpec(id) != null;
-            if (type.equals("wing")) return Global.getSettings().getFighterWingSpec(id) != null;
-            if (type.equals("hullmod")) return Global.getSettings().getHullModSpec(id) != null;
-            if (type.equals("skill")) return Global.getSettings().getSkillSpec(id) != null;
-            if (type.equals("special")) return Global.getSettings().getSpecialItemSpec(id) != null;
-            if (type.equals("commodity")) return Global.getSettings().getCommoditySpec(id) != null;
-            if (type.equals("variant")) return Global.getSettings().getVariant(id) != null;
-        } catch (Throwable t) {
-            return false;
-        }
-        return false;
-    }
-
-    private static ShipHullSpecAPI hullSpec(String id) {
-        if (id == null || id.isEmpty()) return null;
-        try {
-            return Global.getSettings().getHullSpec(id);
-        } catch (Throwable t) {
-            return null;
-        }
+        return ShipJson.exists(type, id);
     }
 
     private static List<String> list(JSONArray a) {
