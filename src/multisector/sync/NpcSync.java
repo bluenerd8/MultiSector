@@ -6,6 +6,7 @@ import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.FleetDataAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.OrbitAPI;
+import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.combat.ShipHullSpecAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
@@ -129,16 +130,19 @@ public class NpcSync implements EveryFrameScript {
         try {
             if (!MultiSectorConfig.isSyncNpcFleets()) {
                 releaseAll();
+                stopWorldMoving();
                 return;
             }
             if (s.getState() == Session.State.HOSTING) {
                 releaseAll();
                 host(s);
             } else if (s.getState() == Session.State.CONNECTED) {
+                stopWorldMoving();
                 hostLoc = null;
                 friend(s);
             } else {
                 releaseAll();
+                stopWorldMoving();
                 hostLoc = null;
             }
         } catch (RuntimeException e) {
@@ -149,7 +153,9 @@ public class NpcSync implements EveryFrameScript {
     /** Before every save: nothing of ours may end up in a save file. Set up again next frame. */
     public static void releaseForSave() {
         NpcSync s = current;
-        if (s != null) s.releaseAll();
+        if (s == null) return;
+        s.releaseAll();
+        s.stopWorldMoving(); // the host's own fleet must not be saved as "ignored by other fleets"
     }
 
     /** A save is loading: drop references into the old world without touching it. */
@@ -161,6 +167,7 @@ public class NpcSync implements EveryFrameScript {
 
     private void host(Session s) {
         long now = System.nanoTime();
+        keepWorldMoving(s, now);
         if (now - nextCapture < 0) return;
         nextCapture = now + CAPTURE_NANOS;
         CampaignFleetAPI me = Global.getSector().getPlayerFleet();
@@ -218,6 +225,93 @@ public class NpcSync implements EveryFrameScript {
             nextResend = now + RESEND_NANOS;
             s.hostNpcResendAll();
         }
+    }
+
+    // ---- host in a dialog: the system keeps going
+
+    /** Longest single step; a hitch never moves fleets in one big jump. */
+    private static final float MAX_STEP_SECONDS = 0.1f;
+    /** This many failed fleet updates in one dialog and we stop trying until it closes. */
+    private static final int MAX_FAILURES = 20;
+
+    private long lastRunNanos;
+    private boolean setIgnoredFlag;
+    private int failures;
+
+    /**
+     * Starsector stops the whole campaign while a dialog or menu is open. On
+     * the host that would also stop every NPC fleet that friends in the same
+     * system are watching. So while the host is in a dialog (and the game
+     * isn't paused, and a friend is in this system), the host's game moves
+     * those fleets itself, in real time:
+     * <ul>
+     * <li>the fleet the host is talking to stays frozen, so it's still there
+     *     when the dialog closes;</li>
+     * <li>fleets in a battle are left alone;</li>
+     * <li>other fleets ignore the host's fleet meanwhile, so nobody tries to
+     *     start a second encounter with a host who's already in one.</li>
+     * </ul>
+     * Only fleets advance: no spawning, no battles resolving, no economy.
+     * Those wait for the host to close the dialog, as before.
+     */
+    private void keepWorldMoving(Session s, long now) {
+        LocationAPI loc = hostLocation();
+        boolean active = loc != null && !ClockSync.isMapView() && s.getSharedClock().isRunning()
+                && friendIn(s, FleetSync.locationId(loc));
+        if (!active) {
+            stopWorldMoving();
+            return;
+        }
+        float dt = lastRunNanos == 0 ? 0f : Math.min((now - lastRunNanos) / 1e9f, MAX_STEP_SECONDS);
+        lastRunNanos = now;
+        if (dt <= 0f || failures >= MAX_FAILURES) return;
+
+        CampaignFleetAPI me = Global.getSector().getPlayerFleet();
+        if (!setIgnoredFlag && !me.getMemoryWithoutUpdate().contains(MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS)) {
+            me.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS, true);
+            setIgnoredFlag = true;
+        }
+        SectorEntityToken talkingTo = dialogTarget();
+        for (CampaignFleetAPI f : new ArrayList<CampaignFleetAPI>(loc.getFleets())) {
+            if (!isNpc(f) || f == talkingTo || f.getBattle() != null) continue;
+            try {
+                f.advance(dt);
+            } catch (RuntimeException e) {
+                if (++failures == MAX_FAILURES) {
+                    log.warn("[MultiSector] stopped moving fleets during this dialog after repeated errors", e);
+                }
+            }
+        }
+    }
+
+    /** The dialog closed (or something else changed): back to the game's own rules. */
+    private void stopWorldMoving() {
+        lastRunNanos = 0;
+        failures = 0;
+        if (setIgnoredFlag) {
+            CampaignFleetAPI me = Global.getSector().getPlayerFleet();
+            if (me != null) me.getMemoryWithoutUpdate().unset(MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS);
+            setIgnoredFlag = false;
+        }
+    }
+
+    private static LocationAPI hostLocation() {
+        CampaignFleetAPI me = Global.getSector().getPlayerFleet();
+        LocationAPI loc = me == null ? null : me.getContainingLocation();
+        return loc == null || loc.isHyperspace() ? null : loc;
+    }
+
+    private static boolean friendIn(Session s, String locId) {
+        for (multisector.net.FleetState.Received r : s.getRemoteFleets().values()) {
+            if (locId.equals(r.state.location)) return true;
+        }
+        return false;
+    }
+
+    private static SectorEntityToken dialogTarget() {
+        com.fs.starfarer.api.campaign.CampaignUIAPI ui = Global.getSector().getCampaignUI();
+        com.fs.starfarer.api.campaign.InteractionDialogAPI d = ui == null ? null : ui.getCurrentInteractionDialog();
+        return d == null ? null : d.getInteractionTarget();
     }
 
     /** An ordinary NPC fleet: not a player, not one of our stand-ins, not a station. */
