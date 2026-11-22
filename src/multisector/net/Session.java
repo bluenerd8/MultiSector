@@ -17,6 +17,7 @@ import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -114,26 +115,24 @@ public final class Session {
     /** TCP messages from the game thread. Client: sent to the host. Host: sent to every client. */
     private final ConcurrentLinkedQueue<ByteBuffer> outbox = new ConcurrentLinkedQueue<ByteBuffer>();
 
-    // ---- NPC fleets in the host's star system
-    /** Host: the system whose fleets we're publishing; client: the one the host says it's sending. "" = none. */
-    private volatile String npcLocation = "";
-    private final ConcurrentHashMap<Integer, NpcInfo> npcInfos = new ConcurrentHashMap<Integer, NpcInfo>();
-    /** Host: latest positions, replaced as a whole by the game thread. */
-    private volatile List<NpcState> npcStates = Collections.emptyList();
-    /** Client: latest positions by handle, with arrival times. */
-    private final ConcurrentHashMap<Integer, NpcState.Received> npcReceived =
-            new ConcurrentHashMap<Integer, NpcState.Received>();
+    // ---- NPC fleets. Each part of the world follows one player's game (see ZonePlanner): that
+    // player publishes its NPC fleets there, the host relays them, and everyone else there shows them.
+    /** Who follows whose world, by player id. Anyone missing follows their own. Host: planned; client: from the host. */
+    private volatile Map<Integer, Integer> follows = Collections.emptyMap();
+    /** Host: plans {@link #follows}. Only the sync thread uses it. */
+    private final ZonePlanner planner = new ZonePlanner();
+    /** What we publish: the location ("" = nothing), each fleet's details, and their latest positions. */
+    private volatile String pubLocation = "";
+    private final ConcurrentHashMap<Integer, NpcInfo> pubInfos = new ConcurrentHashMap<Integer, NpcInfo>();
+    private volatile List<NpcState> pubStates = Collections.emptyList();
+    /** What the other players publish, by publisher id. */
+    private final ConcurrentHashMap<Integer, Feed> feeds = new ConcurrentHashMap<Integer, Feed>();
 
     // ---- host: the host's own launcher asking for a fresh save
     private final ConcurrentLinkedQueue<SaveRequest> saveRequests = new ConcurrentLinkedQueue<SaveRequest>();
 
-    // ---- locks on NPC fleets players interact with
-    /** Host: lock requests, releases and battle results from players, for the game thread. */
-    private final ConcurrentLinkedQueue<ClaimEvent> claimEvents = new ConcurrentLinkedQueue<ClaimEvent>();
     /** Host: messages the game thread wants sent to one player: {playerId, message}. */
     private final ConcurrentLinkedQueue<Object[]> directed = new ConcurrentLinkedQueue<Object[]>();
-    /** Client: the host's answers to our lock requests, by handle. */
-    private final ConcurrentHashMap<Integer, ClaimReply> claimReplies = new ConcurrentHashMap<Integer, ClaimReply>();
 
     // ---- markets
     /** Host: stock requests and trades from players, for the game thread: {kind, playerId, name, text}. */
@@ -142,8 +141,18 @@ public final class Session {
     private final ConcurrentHashMap<String, String> marketSnapshots = new ConcurrentHashMap<String, String>();
     public static final int MARKET_EVENT_REQUEST = 0;
     public static final int MARKET_EVENT_TRADE = 1;
-    /** Messages from other players (hails, offers), for the game thread. */
+    /** Messages from other players, for the game thread: conversations, and fleet locks. */
     private final ConcurrentLinkedQueue<PlayerMessage> playerMessages = new ConcurrentLinkedQueue<PlayerMessage>();
+    private final ConcurrentLinkedQueue<PlayerMessage> lockMessages = new ConcurrentLinkedQueue<PlayerMessage>();
+    private final ConcurrentLinkedQueue<PlayerMessage> battleMessages = new ConcurrentLinkedQueue<PlayerMessage>();
+    /** Objects in space that appeared, changed or went on another player's game, for the game thread. */
+    private final ConcurrentLinkedQueue<String> worldEvents = new ConcurrentLinkedQueue<String>();
+    /** PLAYER_MSG channels. */
+    public static final byte CHANNEL_TALK = 0;
+    public static final byte CHANNEL_LOCK = 1;
+    public static final byte CHANNEL_BATTLE = 2;
+    /** A player's position this old counts as gone (they're loading, or left). */
+    private static final long STALE_NANOS = 10_000_000_000L;
     /** Sent on a player's behalf when they leave, so whoever was talking to them knows. */
     public static final String LEFT_JSON = "{\"k\":\"left\"}";
     /** How long the launcher waits for the game to save. */
@@ -208,60 +217,161 @@ public final class Session {
         return comps.get(playerId);
     }
 
-    // ---- NPC fleets: host side
+    // ---- NPC fleets: publishing (any player whose world others follow)
 
-    /** Host: from now on, the NPC fleets sent are those of this star system ("" for none). */
-    public void hostNpcReset(String locationId) {
-        npcLocation = locationId == null ? "" : locationId;
-        npcInfos.clear();
-        npcStates = Collections.emptyList();
-        if (state == State.HOSTING) outbox.add(npcResetMessage(npcLocation));
+    /** From now on we publish the NPC fleets of this location ("" for none). */
+    public void publishReset(String locationId) {
+        String loc = locationId == null ? "" : locationId;
+        pubLocation = loc;
+        pubInfos.clear();
+        pubStates = Collections.emptyList();
+        sendNpc(npcResetMessage(publisherId(), loc));
     }
 
-    /** Host: a fleet in that system appeared or changed. */
-    public void hostNpcInfo(NpcInfo info) {
-        npcInfos.put(info.handle, info);
-        if (state == State.HOSTING) outbox.add(npcInfoMessage(npcLocation, info));
+    /** A published fleet appeared or changed. */
+    public void publishInfo(NpcInfo info) {
+        pubInfos.put(info.handle, info);
+        sendNpc(npcInfoMessage(publisherId(), pubLocation, info));
     }
 
-    /** Host: a fleet left that system or is gone. */
-    public void hostNpcGone(int handle) {
-        npcInfos.remove(handle);
-        if (state != State.HOSTING) return;
-        ByteBuffer bb = Protocol.begin(Protocol.NPC_GONE, Protocol.stringSize(npcLocation) + 4);
-        Protocol.putString(bb, npcLocation);
+    /** A published fleet left or is gone. */
+    public void publishGone(int handle) {
+        pubInfos.remove(handle);
+        String loc = pubLocation;
+        ByteBuffer bb = Protocol.begin(Protocol.NPC_GONE, 4 + Protocol.stringSize(loc) + 4);
+        bb.putInt(publisherId());
+        Protocol.putString(bb, loc);
         bb.putInt(handle).flip();
-        outbox.add(bb);
+        sendNpc(bb);
     }
 
-    /** Host: re-sends every fleet's details, in case a message crossed paths with a player joining. */
-    public void hostNpcResendAll() {
-        if (state != State.HOSTING) return;
-        for (NpcInfo i : npcInfos.values()) outbox.add(npcInfoMessage(npcLocation, i));
+    /** Re-sends every fleet's details, in case a message crossed paths with someone joining. */
+    public void publishResendAll() {
+        for (NpcInfo i : pubInfos.values()) sendNpc(npcInfoMessage(publisherId(), pubLocation, i));
     }
 
-    /** Host: where every published fleet is now. */
-    public void hostNpcStates(List<NpcState> states) {
-        npcStates = Collections.unmodifiableList(new ArrayList<NpcState>(states));
+    /** Where every published fleet is now. */
+    public void publishStates(List<NpcState> states) {
+        pubStates = Collections.unmodifiableList(new ArrayList<NpcState>(states));
     }
 
-    // ---- fleet locks: host side
-
-    /** Host: next lock request, release, battle result or departure, for the game thread. */
-    public ClaimEvent pollClaimEvent() {
-        return claimEvents.poll();
+    /** The location we're publishing, or "". */
+    public String getPublishedLocation() {
+        return pubLocation;
     }
 
-    /** Host: answers a player's lock request. fleetJson is the fleet's exact copy when granted. */
-    public void replyClaim(int playerId, int handle, boolean granted, String holder, String fleetJson) {
-        String h = holder == null ? "" : holder;
-        String j = fleetJson == null ? "" : fleetJson;
-        ByteBuffer bb = Protocol.begin(Protocol.CLAIM_REPLY, 4 + 1 + Protocol.stringSize(h) + Protocol.longStringSize(j));
-        bb.putInt(handle).put((byte) (granted ? 1 : 0));
-        Protocol.putString(bb, h);
-        Protocol.putLongString(bb, j);
+    private int publisherId() {
+        return state == State.HOSTING ? HOST_ID : myId;
+    }
+
+    /** Host: to every client. Client: to the host, which relays it. */
+    private void sendNpc(ByteBuffer bb) {
+        if (state == State.HOSTING || state == State.CONNECTED) outbox.add(bb);
+    }
+
+    // ---- NPC fleets: whose world to follow
+
+    /** The player whose world that player follows (themselves if nobody's). */
+    public int ownerOf(int playerId) {
+        Integer o = follows.get(playerId);
+        return o == null ? playerId : o;
+    }
+
+    /** True if some other player follows that player's world. */
+    public boolean hasFollowers(int playerId) {
+        for (Map.Entry<Integer, Integer> e : follows.entrySet()) {
+            if (e.getValue() == playerId && e.getKey() != playerId) return true;
+        }
+        return false;
+    }
+
+    /** What another player publishes (empty if nothing). */
+    public Feed getFeed(int publisher) {
+        Feed f = feeds.get(publisher);
+        return f == null ? Feed.EMPTY : f;
+    }
+
+    /** The NPC fleets one other player publishes. */
+    public static final class Feed {
+        static final Feed EMPTY = new Feed();
+        volatile String location = "";
+        final ConcurrentHashMap<Integer, NpcInfo> infos = new ConcurrentHashMap<Integer, NpcInfo>();
+        final ConcurrentHashMap<Integer, NpcState.Received> states = new ConcurrentHashMap<Integer, NpcState.Received>();
+
+        public String getLocation() {
+            return location;
+        }
+
+        public Map<Integer, NpcInfo> getInfos() {
+            return Collections.unmodifiableMap(infos);
+        }
+
+        public Map<Integer, NpcState.Received> getStates() {
+            return Collections.unmodifiableMap(states);
+        }
+
+        void reset(String loc) {
+            location = loc;
+            infos.clear();
+            states.clear();
+        }
+    }
+
+    private Feed feed(int publisher) {
+        Feed f = feeds.get(publisher);
+        if (f == null) {
+            feeds.putIfAbsent(publisher, new Feed());
+            f = feeds.get(publisher);
+        }
+        return f;
+    }
+
+    private static ByteBuffer zonesMessage(Map<Integer, Integer> map) {
+        ByteBuffer bb = Protocol.begin(Protocol.ZONES, 2 + map.size() * 8);
+        bb.putShort((short) map.size());
+        for (Map.Entry<Integer, Integer> e : map.entrySet()) bb.putInt(e.getKey()).putInt(e.getValue());
         bb.flip();
-        directed.add(new Object[]{playerId, bb});
+        return bb;
+    }
+
+    private static Map<Integer, Integer> readZones(ByteBuffer bb) {
+        int n = bb.getShort();
+        if (n < 0 || n > MAX_PLAYERS * 2) throw new IllegalArgumentException("bad zone count " + n);
+        Map<Integer, Integer> m = new HashMap<Integer, Integer>();
+        for (int i = 0; i < n; i++) m.put(bb.getInt(), bb.getInt());
+        return Collections.unmodifiableMap(m);
+    }
+
+    /** NPC positions as datagrams. */
+    private static List<ByteBuffer> npcStatePackets(int publisher, String loc, List<NpcState> states) {
+        List<ByteBuffer> out = new ArrayList<ByteBuffer>();
+        int i = 0;
+        while (i < states.size()) {
+            ByteBuffer bb = ByteBuffer.allocate(NetConfig.MAX_DATAGRAM);
+            bb.putInt(NetConfig.MAGIC).putShort(NetConfig.PROTOCOL_VERSION).put(Protocol.NPC_STATE);
+            bb.putInt(publisher);
+            Protocol.putString(bb, loc);
+            int countPos = bb.position();
+            bb.putShort((short) 0);
+            short count = 0;
+            while (i < states.size() && bb.remaining() >= NpcState.SIZE) {
+                states.get(i++).write(bb);
+                count++;
+            }
+            if (count == 0) break; // a location id too long to leave room; never in practice
+            bb.putShort(countPos, count);
+            out.add(bb);
+        }
+        return out;
+    }
+
+    /** Positions into a feed: only fleets we have details for, so a late packet can't bring back a gone one. */
+    private static void readNpcStates(ByteBuffer r, Feed f, long arrived) {
+        int n = r.getShort();
+        for (int i = 0; i < n; i++) {
+            NpcState ns = NpcState.read(r);
+            if (f.infos.containsKey(ns.handle)) f.states.put(ns.handle, new NpcState.Received(ns, arrived));
+        }
     }
 
     // ---- markets
@@ -321,18 +431,62 @@ public final class Session {
         }
     }
 
-    /** Sends a message to one other player (through the host when we're a client). */
+    /** Sends a conversation message to one other player (through the host when we're a client). */
     public void sendPlayerMessage(int to, String json) {
+        send(to, CHANNEL_TALK, json);
+    }
+
+    /** Sends a fleet-lock message to another player (the one whose world has that fleet, or who asked). */
+    public void sendLockMessage(int to, String json) {
+        send(to, CHANNEL_LOCK, json);
+    }
+
+    /** Sends a joint-battle message to another player (sync.JointBattle). */
+    public void sendBattleMessage(int to, String json) {
+        send(to, CHANNEL_BATTLE, json);
+    }
+
+    /** Next joint-battle message from another player, or null. */
+    public PlayerMessage pollBattleMessage() {
+        return battleMessages.poll();
+    }
+
+    private void send(int to, byte channel, String json) {
         if (state == State.HOSTING) {
-            directed.add(new Object[]{to, playerMessage(to, HOST_ID, json)});
+            directed.add(new Object[]{to, playerMessage(to, HOST_ID, channel, json)});
         } else if (state == State.CONNECTED) {
-            outbox.add(playerMessage(to, myId, json));
+            outbox.add(playerMessage(to, myId, channel, json));
         }
     }
 
-    /** Next message from another player, or null. */
+    /** Tells everyone else about an object in space that appeared, changed or went here. */
+    public void sendWorldEvent(String json) {
+        if (state != State.HOSTING && state != State.CONNECTED) return;
+        ByteBuffer bb = Protocol.begin(Protocol.WORLD_EVENT, Protocol.longStringSize(json));
+        Protocol.putLongString(bb, json);
+        bb.flip();
+        outbox.add(bb); // host: to every client; client: to the host, which applies and relays it
+    }
+
+    /** Next object change from another player's game, or null. */
+    public String pollWorldEvent() {
+        return worldEvents.poll();
+    }
+
+    /** Next conversation message from another player, or null. */
     public PlayerMessage pollPlayerMessage() {
         return playerMessages.poll();
+    }
+
+    /** Next fleet-lock message from another player, or null. */
+    public PlayerMessage pollLockMessage() {
+        return lockMessages.poll();
+    }
+
+    private void received(byte channel, PlayerMessage m) {
+        if (channel == CHANNEL_LOCK) lockMessages.add(m);
+        else if (channel == CHANNEL_BATTLE) battleMessages.add(m);
+        else playerMessages.add(m);
     }
 
     /** True if that player is in the session right now. */
@@ -341,115 +495,25 @@ public final class Session {
         return false;
     }
 
-    private static ByteBuffer playerMessage(int to, int from, String json) {
-        ByteBuffer bb = Protocol.begin(Protocol.PLAYER_MSG, 4 + 4 + Protocol.longStringSize(json));
-        bb.putInt(to).putInt(from);
+    private static ByteBuffer playerMessage(int to, int from, byte channel, String json) {
+        ByteBuffer bb = Protocol.begin(Protocol.PLAYER_MSG, 4 + 4 + 1 + Protocol.longStringSize(json));
+        bb.putInt(to).putInt(from).put(channel);
         Protocol.putLongString(bb, json);
         bb.flip();
         return bb;
     }
 
-    // ---- fleet locks: client side
-
-    /** Client: ask the host to hold this fleet for us. The answer comes back through {@link #takeClaimReply}. */
-    public void requestClaim(int handle) {
-        claimReplies.remove(handle);
-        outbox.add(handleMessage(Protocol.CLAIM_REQUEST, handle));
-    }
-
-    /** Client: the host's answer for that fleet, once (null until it arrives). */
-    public ClaimReply takeClaimReply(int handle) {
-        return claimReplies.remove(handle);
-    }
-
-    /** Client: done with that fleet and nothing changed. */
-    public void releaseClaim(int handle) {
-        outbox.add(handleMessage(Protocol.CLAIM_RELEASE, handle));
-    }
-
-    /** Client: which of the fleet's ships (the host's member ids) were lost; the host applies it and releases. */
-    public void sendBattleResult(int handle, List<String> lostIds) {
-        int size = 4 + 4;
-        for (String id : lostIds) size += Protocol.stringSize(id);
-        ByteBuffer bb = Protocol.begin(Protocol.BATTLE_RESULT, size);
-        bb.putInt(handle).putInt(lostIds.size());
-        for (String id : lostIds) Protocol.putString(bb, id);
-        bb.flip();
-        outbox.add(bb);
-    }
-
-    private static ByteBuffer handleMessage(byte type, int handle) {
-        ByteBuffer bb = Protocol.begin(type, 4);
-        bb.putInt(handle).flip();
-        return bb;
-    }
-
-    /** Something a player did about a lock, for the host's game thread. */
-    public static final class ClaimEvent {
-        public static final int REQUEST = 0;
-        public static final int RELEASE = 1;
-        public static final int RESULT = 2;
-        /** The player left: everything they held is free again. */
-        public static final int LEFT = 3;
-
-        public final int kind;
-        public final int playerId;
-        public final String playerName;
-        public final int handle;
-        public final List<String> lost;
-
-        ClaimEvent(int kind, int playerId, String playerName, int handle, List<String> lost) {
-            this.kind = kind;
-            this.playerId = playerId;
-            this.playerName = playerName;
-            this.handle = handle;
-            this.lost = lost == null ? Collections.<String>emptyList() : lost;
-        }
-    }
-
-    /** The host's answer to a lock request. */
-    public static final class ClaimReply {
-        public final int handle;
-        public final boolean granted;
-        /** Who holds it, when refused. */
-        public final String holder;
-        /** The fleet's exact copy, when granted. */
-        public final String fleetJson;
-
-        ClaimReply(int handle, boolean granted, String holder, String fleetJson) {
-            this.handle = handle;
-            this.granted = granted;
-            this.holder = holder;
-            this.fleetJson = fleetJson;
-        }
-    }
-
-    // ---- NPC fleets: client side
-
-    /** Client: the star system whose fleets the host is sending, or "". */
-    public String getNpcLocation() {
-        return npcLocation;
-    }
-
-    /** Client: the host's fleets in that system, by handle. */
-    public Map<Integer, NpcInfo> getNpcInfos() {
-        return Collections.unmodifiableMap(npcInfos);
-    }
-
-    /** Client: their latest positions, by handle. */
-    public Map<Integer, NpcState.Received> getNpcStates() {
-        return Collections.unmodifiableMap(npcReceived);
-    }
-
-    private static ByteBuffer npcResetMessage(String loc) {
-        ByteBuffer bb = Protocol.begin(Protocol.NPC_RESET, Protocol.stringSize(loc));
+    private static ByteBuffer npcResetMessage(int publisher, String loc) {
+        ByteBuffer bb = Protocol.begin(Protocol.NPC_RESET, 4 + Protocol.stringSize(loc));
+        bb.putInt(publisher);
         Protocol.putString(bb, loc);
         bb.flip();
         return bb;
     }
 
-    private static ByteBuffer npcInfoMessage(String loc, NpcInfo info) {
-        ByteBuffer bb = Protocol.begin(Protocol.NPC_INFO, Protocol.stringSize(loc) + info.size());
+    private static ByteBuffer npcInfoMessage(int publisher, String loc, NpcInfo info) {
+        ByteBuffer bb = Protocol.begin(Protocol.NPC_INFO, 4 + Protocol.stringSize(loc) + info.size());
+        bb.putInt(publisher);
         Protocol.putString(bb, loc);
         info.write(bb);
         bb.flip();
@@ -621,10 +685,16 @@ public final class Session {
             for (Map.Entry<Integer, FleetComp> e : comps.entrySet()) {
                 if (e.getKey() != id) conn.send(compMessage(e.getKey(), e.getValue()));
             }
-            // And the NPC fleets in the host's system.
-            String npcLoc = npcLocation;
-            conn.send(npcResetMessage(npcLoc));
-            for (NpcInfo i : npcInfos.values()) conn.send(npcInfoMessage(npcLoc, i));
+            // And every published NPC fleet: ours, and those we relay for other players.
+            String npcLoc = pubLocation;
+            conn.send(npcResetMessage(HOST_ID, npcLoc));
+            for (NpcInfo i : pubInfos.values()) conn.send(npcInfoMessage(HOST_ID, npcLoc, i));
+            for (Map.Entry<Integer, Feed> e : feeds.entrySet()) {
+                Feed f = e.getValue();
+                conn.send(npcResetMessage(e.getKey(), f.location));
+                for (NpcInfo i : f.infos.values()) conn.send(npcInfoMessage(e.getKey(), f.location, i));
+            }
+            conn.send(zonesMessage(follows));
             notices.add(name + " joined (" + from + ")");
             if (clock.release(name, System.nanoTime())) {
                 notices.add(clock.isRunning() ? "Everyone's in, so the game carries on." : name + " is in.");
@@ -646,40 +716,63 @@ public final class Session {
                         notices.add(conn.name + (p ? " paused the game." : waited
                                 ? " resumed the game, so it stopped waiting for joining players." : " resumed the game."));
                     }
-                } else if (type == Protocol.PLAYER_MSG && msg.remaining() >= 8) {
+                } else if (type == Protocol.PLAYER_MSG && msg.remaining() >= 9) {
                     int to = msg.getInt();
                     msg.getInt(); // who they say they are: we know who they are
+                    byte channel = msg.get();
                     String json = Protocol.getLongString(msg);
                     if (to == HOST_ID) {
-                        playerMessages.add(new PlayerMessage(conn.id, conn.name, json));
+                        received(channel, new PlayerMessage(conn.id, conn.name, json));
                     } else {
                         Conn target = null;
                         for (Conn c : conns) if (c.id == to) target = c;
                         if (target == null) {
-                            conn.send(playerMessage(conn.id, to, LEFT_JSON)); // they're gone
+                            conn.send(playerMessage(conn.id, to, channel, LEFT_JSON)); // they're gone
                         } else {
                             try {
-                                target.send(playerMessage(to, conn.id, json));
+                                target.send(playerMessage(to, conn.id, channel, json));
                             } catch (IOException e) {
                                 closeQuietly(target.socket);
                             }
                         }
                     }
+                } else if (type == Protocol.WORLD_EVENT) {
+                    String json = Protocol.getLongString(msg);
+                    worldEvents.add(json);
+                    ByteBuffer ev = Protocol.begin(Protocol.WORLD_EVENT, Protocol.longStringSize(json));
+                    Protocol.putLongString(ev, json);
+                    ev.flip();
+                    relay(conn, ev);
+                } else if (type == Protocol.NPC_RESET) {
+                    msg.getInt(); // publisher: it's them
+                    String loc = Protocol.getString(msg);
+                    feed(conn.id).reset(loc);
+                    relay(conn, npcResetMessage(conn.id, loc));
+                } else if (type == Protocol.NPC_INFO) {
+                    msg.getInt();
+                    String loc = Protocol.getString(msg);
+                    NpcInfo info = NpcInfo.read(msg);
+                    Feed f = feed(conn.id);
+                    if (loc.equals(f.location)) f.infos.put(info.handle, info);
+                    relay(conn, npcInfoMessage(conn.id, loc, info));
+                } else if (type == Protocol.NPC_GONE) {
+                    msg.getInt();
+                    String loc = Protocol.getString(msg);
+                    int handle = msg.getInt();
+                    Feed f = feed(conn.id);
+                    if (loc.equals(f.location)) {
+                        f.infos.remove(handle);
+                        f.states.remove(handle);
+                    }
+                    ByteBuffer gone = Protocol.begin(Protocol.NPC_GONE, 4 + Protocol.stringSize(loc) + 4);
+                    gone.putInt(conn.id);
+                    Protocol.putString(gone, loc);
+                    gone.putInt(handle).flip();
+                    relay(conn, gone);
                 } else if (type == Protocol.MARKET_REQUEST) {
                     marketEvents.add(new Object[]{MARKET_EVENT_REQUEST, conn.id, conn.name, Protocol.getString(msg)});
                 } else if (type == Protocol.MARKET_TRADE) {
                     marketEvents.add(new Object[]{MARKET_EVENT_TRADE, conn.id, conn.name, Protocol.getLongString(msg)});
-                } else if (type == Protocol.CLAIM_REQUEST && msg.remaining() >= 4) {
-                    claimEvents.add(new ClaimEvent(ClaimEvent.REQUEST, conn.id, conn.name, msg.getInt(), null));
-                } else if (type == Protocol.CLAIM_RELEASE && msg.remaining() >= 4) {
-                    claimEvents.add(new ClaimEvent(ClaimEvent.RELEASE, conn.id, conn.name, msg.getInt(), null));
-                } else if (type == Protocol.BATTLE_RESULT && msg.remaining() >= 8) {
-                    int handle = msg.getInt();
-                    int n = msg.getInt();
-                    if (n < 0 || n > 1000) throw new IllegalArgumentException("bad loss count " + n);
-                    List<String> lost = new ArrayList<String>(n);
-                    for (int i = 0; i < n; i++) lost.add(Protocol.getString(msg));
-                    claimEvents.add(new ClaimEvent(ClaimEvent.RESULT, conn.id, conn.name, handle, lost));
                 } else if (type == Protocol.FLEET_COMP) {
                     msg.getInt(); // the sender's id: we already know who they are
                     FleetComp c = FleetComp.read(msg);
@@ -707,11 +800,14 @@ public final class Session {
                 remoteFleets.remove(conn.id);
                 udpAddresses.remove(conn.id);
                 comps.remove(conn.id);
-                // Anything they were holding is free again.
-                claimEvents.add(new ClaimEvent(ClaimEvent.LEFT, conn.id, conn.name, 0, null));
-                // And anyone talking or trading with them.
-                playerMessages.add(new PlayerMessage(conn.id, conn.name, LEFT_JSON));
-                outbox.add(playerMessage(-1, conn.id, LEFT_JSON));
+                // Anyone talking or trading with them, or holding fleets for or from them, is told.
+                for (byte ch : new byte[]{CHANNEL_TALK, CHANNEL_LOCK, CHANNEL_BATTLE}) {
+                    received(ch, new PlayerMessage(conn.id, conn.name, LEFT_JSON));
+                    outbox.add(playerMessage(-1, conn.id, ch, LEFT_JSON));
+                }
+                // Their NPC fleets go with them.
+                feeds.remove(conn.id);
+                outbox.add(npcResetMessage(conn.id, ""));
             }
             if (conn != null && conns.remove(conn) && alive(gen)) {
                 notices.add(conn.name + " left");
@@ -739,6 +835,18 @@ public final class Session {
         Protocol.putString(bb, text);
         bb.flip();
         Frames.write(s.getOutputStream(), bb);
+    }
+
+    /** Host: passes a message from one client on to all the others. */
+    private void relay(Conn from, ByteBuffer msg) {
+        for (Conn other : conns) {
+            if (other == from) continue;
+            try {
+                other.send(msg.duplicate());
+            } catch (IOException e) {
+                closeQuietly(other.socket);
+            }
+        }
     }
 
     private static ByteBuffer compMessage(int playerId, FleetComp c) {
@@ -774,6 +882,8 @@ public final class Session {
                     u.send(new DatagramPacket(buf, p.getLength(), p.getSocketAddress()));
                 } else if (type == Protocol.FLEET_STATE) {
                     receiveFleetState(bb, p);
+                } else if (type == Protocol.NPC_STATE) {
+                    relayNpcStates(u, bb, p);
                 }
             } catch (IOException e) {
                 if (!alive(gen)) return; // socket closed by stop()
@@ -794,6 +904,60 @@ public final class Session {
         if (old != null && s.seq <= old.state.seq && old.state.seq - s.seq < 1000) return; // out of order
         remoteFleets.put(s.playerId, new FleetState.Received(s, System.nanoTime()));
         udpAddresses.put(s.playerId, p.getSocketAddress());
+    }
+
+    /**
+     * A client's NPC positions: kept if we follow their world, and passed on
+     * to the other players who follow it and are in that location.
+     */
+    private void relayNpcStates(DatagramSocket u, ByteBuffer bb, DatagramPacket p) {
+        int publisher = bb.getInt();
+        Conn owner = null;
+        for (Conn c : conns) if (c.id == publisher) owner = c;
+        if (owner == null || !owner.socket.getInetAddress().equals(p.getAddress())) return;
+        String loc = Protocol.getString(bb);
+        Feed f = feeds.get(publisher);
+        if (f == null || !loc.equals(f.location)) return; // from before they moved
+        readNpcStates(bb, f, System.nanoTime());
+        Map<Integer, Integer> fol = follows;
+        for (Map.Entry<Integer, SocketAddress> e : udpAddresses.entrySet()) {
+            int to = e.getKey();
+            Integer o = fol.get(to);
+            if (to == publisher || o == null || o != publisher) continue;
+            FleetState.Received r = remoteFleets.get(to);
+            if (r == null || !loc.equals(r.state.location)) continue;
+            try {
+                u.send(new DatagramPacket(p.getData(), p.getOffset(), p.getLength(), e.getValue()));
+            } catch (IOException ignored) {
+                // the next tick sends them again
+            }
+        }
+    }
+
+    /** Host: who follows whom, from everyone's latest position; told to everyone when it changes. */
+    private void planZones() {
+        long now = System.nanoTime();
+        List<FleetState> all = new ArrayList<FleetState>();
+        FleetState mine = localFleet;
+        if (mine != null) {
+            FleetState m = mine.copy();
+            m.playerId = HOST_ID;
+            all.add(m);
+        }
+        for (FleetState.Received r : remoteFleets.values()) {
+            if (now - r.arrivedNanos < STALE_NANOS) all.add(r.state);
+        }
+        Map<Integer, Integer> next = planner.plan(all, now);
+        if (next.equals(follows)) return;
+        follows = next;
+        ByteBuffer z = zonesMessage(next);
+        for (Conn c : conns) {
+            try {
+                c.send(z.duplicate());
+            } catch (IOException e) {
+                closeQuietly(c.socket);
+            }
+        }
     }
 
     /** Every tick, sends each client every other player's fleet (including the host's). */
@@ -835,6 +999,7 @@ public final class Session {
                     }
                 }
             }
+            planZones();
             if (cu != null) sendNpcStates(cu);
             List<FleetState> all = new ArrayList<FleetState>();
             FleetState mine = localFleet;
@@ -856,31 +1021,21 @@ public final class Session {
         }
     }
 
-    /** NPC fleet positions, only to the players who are in the host's star system. */
+    /** Our NPC fleet positions, to the players who follow the host's world and are in that location. */
     private void sendNpcStates(DatagramSocket u) {
-        String loc = npcLocation;
-        List<NpcState> states = npcStates;
+        String loc = pubLocation;
+        List<NpcState> states = pubStates;
         if (loc.isEmpty() || states.isEmpty()) return;
+        Map<Integer, Integer> fol = follows;
         List<SocketAddress> targets = new ArrayList<SocketAddress>();
         for (Map.Entry<Integer, SocketAddress> e : udpAddresses.entrySet()) {
+            Integer o = fol.get(e.getKey());
+            if (o == null || o != HOST_ID) continue;
             FleetState.Received r = remoteFleets.get(e.getKey());
             if (r != null && loc.equals(r.state.location)) targets.add(e.getValue());
         }
         if (targets.isEmpty()) return;
-        int i = 0;
-        while (i < states.size()) {
-            ByteBuffer bb = ByteBuffer.allocate(NetConfig.MAX_DATAGRAM);
-            bb.putInt(NetConfig.MAGIC).putShort(NetConfig.PROTOCOL_VERSION).put(Protocol.NPC_STATE);
-            Protocol.putString(bb, loc);
-            int countPos = bb.position();
-            bb.putShort((short) 0);
-            short count = 0;
-            while (i < states.size() && bb.remaining() >= NpcState.SIZE) {
-                states.get(i++).write(bb);
-                count++;
-            }
-            if (count == 0) return; // a location id too long to leave room; never in practice
-            bb.putShort(countPos, count);
+        for (ByteBuffer bb : npcStatePackets(HOST_ID, loc, states)) {
             for (SocketAddress to : targets) {
                 try {
                     u.send(new DatagramPacket(bb.array(), bb.position(), to));
@@ -920,6 +1075,14 @@ public final class Session {
             if (!alive(gen)) return;
             refreshHostPlayers();
             broadcastPlayers();
+            ByteBuffer z = zonesMessage(follows); // again now and then, in case one crossed a join
+            for (Conn c : conns) {
+                try {
+                    c.send(z.duplicate());
+                } catch (IOException e) {
+                    closeQuietly(c.socket);
+                }
+            }
         }
     }
 
@@ -1029,34 +1192,36 @@ public final class Session {
                 } else if (type == Protocol.FLEET_COMP) {
                     int pid = msg.getInt();
                     comps.put(pid, FleetComp.read(msg));
-                } else if (type == Protocol.PLAYER_MSG && msg.remaining() >= 8) {
+                } else if (type == Protocol.PLAYER_MSG && msg.remaining() >= 9) {
                     msg.getInt(); // to: us
                     int from = msg.getInt();
-                    playerMessages.add(new PlayerMessage(from, playerName(from), Protocol.getLongString(msg)));
+                    byte channel = msg.get();
+                    received(channel, new PlayerMessage(from, playerName(from), Protocol.getLongString(msg)));
+                } else if (type == Protocol.ZONES) {
+                    follows = readZones(msg);
+                } else if (type == Protocol.WORLD_EVENT) {
+                    worldEvents.add(Protocol.getLongString(msg));
                 } else if (type == Protocol.MARKET_SNAPSHOT) {
                     String marketId = Protocol.getString(msg);
                     marketSnapshots.put(marketId, Protocol.getLongString(msg));
-                } else if (type == Protocol.CLAIM_REPLY) {
-                    int handle = msg.getInt();
-                    boolean granted = msg.get() != 0;
-                    String holder = Protocol.getString(msg);
-                    String json = Protocol.getLongString(msg);
-                    claimReplies.put(handle, new ClaimReply(handle, granted, holder, json));
                 } else if (type == Protocol.NPC_RESET) {
+                    int pub = msg.getInt();
                     String loc = Protocol.getString(msg);
-                    npcInfos.clear();
-                    npcReceived.clear();
-                    npcLocation = loc;
+                    if (pub != myId) feed(pub).reset(loc);
                 } else if (type == Protocol.NPC_INFO) {
+                    int pub = msg.getInt();
                     String loc = Protocol.getString(msg);
                     NpcInfo info = NpcInfo.read(msg);
-                    if (loc.equals(npcLocation)) npcInfos.put(info.handle, info);
+                    Feed f = feeds.get(pub);
+                    if (pub != myId && f != null && loc.equals(f.location)) f.infos.put(info.handle, info);
                 } else if (type == Protocol.NPC_GONE) {
+                    int pub = msg.getInt();
                     String loc = Protocol.getString(msg);
                     int handle = msg.getInt();
-                    if (loc.equals(npcLocation)) {
-                        npcInfos.remove(handle);
-                        npcReceived.remove(handle);
+                    Feed f = feeds.get(pub);
+                    if (f != null && loc.equals(f.location)) {
+                        f.infos.remove(handle);
+                        f.states.remove(handle);
                     }
                 } else if (type == Protocol.BYE) {
                     endReason = "Host: " + Protocol.getString(msg);
@@ -1123,6 +1288,13 @@ public final class Session {
                     s.write(bb);
                     udp.send(new DatagramPacket(bb.array(), bb.position(), target));
                 }
+                String loc = pubLocation;
+                List<NpcState> states = pubStates;
+                if (myId >= 0 && !loc.isEmpty() && !states.isEmpty() && hasFollowers(myId)) {
+                    for (ByteBuffer bb : npcStatePackets(myId, loc, states)) {
+                        udp.send(new DatagramPacket(bb.array(), bb.position(), target));
+                    }
+                }
                 if (now >= nextPing) {
                     nextPing = now + PING_INTERVAL_MS * 1000000L;
                     byte[] out = new byte[Protocol.PING_SIZE];
@@ -1164,15 +1336,11 @@ public final class Session {
                         remoteClock = new ClockState.Received(cs, System.nanoTime());
                     }
                 } else if (type == Protocol.NPC_STATE) {
+                    int pub = r.getInt();
                     String loc = Protocol.getString(r);
-                    if (!loc.equals(npcLocation)) continue; // from before the host changed systems
-                    long arrived = System.nanoTime();
-                    int n = r.getShort();
-                    for (int i = 0; i < n; i++) {
-                        NpcState ns = NpcState.read(r);
-                        // Only fleets we have details for; a late packet mustn't bring back a gone one.
-                        if (npcInfos.containsKey(ns.handle)) npcReceived.put(ns.handle, new NpcState.Received(ns, arrived));
-                    }
+                    Feed f = feeds.get(pub);
+                    if (f == null || !loc.equals(f.location)) continue; // from before they moved
+                    readNpcStates(r, f, System.nanoTime());
                 } else if (type == Protocol.WORLD_STATE) {
                     long arrived = System.nanoTime();
                     int n = r.getShort();
@@ -1233,15 +1401,18 @@ public final class Session {
 
     private void clearNpc() {
         playerMessages.clear();
+        lockMessages.clear();
+        battleMessages.clear();
+        worldEvents.clear();
         marketEvents.clear();
         marketSnapshots.clear();
-        claimEvents.clear();
         directed.clear();
-        claimReplies.clear();
-        npcLocation = "";
-        npcInfos.clear();
-        npcStates = Collections.emptyList();
-        npcReceived.clear();
+        follows = Collections.emptyMap();
+        planner.reset();
+        pubLocation = "";
+        pubInfos.clear();
+        pubStates = Collections.emptyList();
+        feeds.clear();
     }
 
     private static void sendBye(Conn c, String reason) {

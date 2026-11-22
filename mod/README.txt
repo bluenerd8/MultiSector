@@ -52,13 +52,21 @@ PLAYING OVER HAMACHI
   - Fast-forward follows the host. Turn yours on when they do.
   - When you download, the host's game saves a fresh copy, and everyone
     waits (paused) until you're in. Unpause to stop waiting.
-  - In a star system you share with the host, you see the host's NPC
-    fleets and can fight them. Markets are shared through the host.
-  Hyperspace NPC fleets and battle wreckage aren't shared yet.
+  - Where players are together, everyone sees the same NPC fleets: in a
+    star system those of whoever got there first, in hyperspace those of
+    the nearby player who has been there longest. You can fight them.
+  - Markets are shared through the host. Battle wreckage, cargo pods and
+    objectives (comm relays, sensor arrays...) are shared everywhere.
+  Players far apart in hyperspace each have their own hyperspace fleets.
 
   Click another player's fleet to hail them. They can answer or decline.
   While you talk, both fleets hold still. You can offer each other
   credits, cargo and ships; what you offer comes back if they say no.
+
+  When a friend nearby is in a battle, you're asked to join. Your own
+  ships then fight beside theirs (controlled by the battle AI), you see
+  how each one does, and you can order a retreat. Losses and damage are
+  applied to your fleet afterwards.
 
   The players panel (top right of the map, F7 hides it) shows where the
   others are and what they're doing. F8 shows their fleet, level and

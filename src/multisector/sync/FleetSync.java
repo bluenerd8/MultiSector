@@ -139,8 +139,8 @@ public class FleetSync implements EveryFrameScript {
 
     /**
      * The fleet's ships, flagship first, with exact loadouts so other games
-     * draw the fleet as it really is. Readiness and hull damage are left out,
-     * since they change all the time and would make it resend constantly.
+     * draw the fleet as it really is. Readiness and hull damage go to the
+     * nearest 10%, so small changes don't make it resend constantly.
      */
     private FleetComp composition(CampaignFleetAPI fleet, FleetMemberAPI flag) {
         List<FleetMemberAPI> members = new ArrayList<FleetMemberAPI>();
@@ -153,19 +153,24 @@ public class FleetSync implements EveryFrameScript {
         for (FleetMemberAPI m : members) hulls.add(m.getHullSpec().getHullId());
         long now = System.nanoTime();
         if (!hulls.equals(exactHulls) || now - exactAt > EXACT_NANOS) {
+            boolean sameShips = hulls.equals(exactHulls);
             exactHulls = hulls;
             exactAt = now;
             try {
                 org.json.JSONArray a = new org.json.JSONArray();
                 for (FleetMemberAPI m : members.subList(0, Math.min(members.size(), FleetComp.MAX_SHIPS))) {
                     org.json.JSONObject js = ShipJson.ship(m);
-                    js.remove("cr");
-                    js.remove("hullFraction");
+                    // To the nearest 10%: close enough to show, and it doesn't resend every frame.
+                    js.put("cr", Math.round(m.getRepairTracker().getCR() * 10f) / 10.0);
+                    js.put("hullFraction", Math.round(m.getStatus().getHullFraction() * 10f) / 10.0);
                     a.put(js);
                 }
                 exactJson = a.toString();
             } catch (Exception e) {
-                exactJson = ""; // the hull list alone still works
+                // Same ships: keep the last good list until the next try. Different ships: the hull
+                // list alone is closer to the truth than the old loadouts.
+                if (!sameShips) exactJson = "";
+                Global.getLogger(FleetSync.class).warn("[MultiSector] couldn't describe our ships this time: " + e);
             }
         }
         return new FleetComp(hulls, exactJson);

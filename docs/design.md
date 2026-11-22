@@ -400,3 +400,77 @@ Trading is by offers: credits (fixed steps), cargo (the game's cargo picker, on 
 ### Not yet: fighting together
 
 Battles run in the combat engine, outside the campaign, and syncing real-time combat is a separate, much larger project. A smaller step that fits the current design: when a player fights near a friend, add the friend's exact ships (already sent for puppets) as an allied AI fleet in that battle, then send the friend their losses, the same way NPC battle results reach the host.
+
+## 18. Whose world: first come, hyperspace groups, and shared objects
+
+### The problem
+
+Every game makes up its own NPC fleets around its own player. Until 0.0.19 the host's world always won, and only inside a star system. That broke in two ways in play:
+
+- **Hyperspace wasn't shared.** A friend was attacked by pirates that existed only on their game.
+- **Arriving second swapped the world.** A friend explored a system alone, then the host arrived. The friend's whole local world (the fleets around them, mid-chase) was swapped for the host's. Save fleets that both games had kept the friend's ships and status, so the two views never fully matched.
+
+### Owners (`ZonePlanner`, on the host)
+
+The host decides, 10 times a second, whose world each player follows, and sends the plan (`ZONES`) when it changes and every 2 s:
+
+- **Star system:** the owner is whoever has been in the system longest, and stays the owner until they leave. Ties go to the lower id (the host is 0). So whoever arrives second sees the first player's world, and the first player's world doesn't change under them. When the owner leaves, the next player in line takes over, and their own fleets come back.
+- **Hyperspace:** players within 4,000 units (2 ly) of an owner follow the one who has been in hyperspace longest. They stop following beyond 5,500 units (2.75 ly), so the edge doesn't flip back and forth. Players further apart run their own hyperspace, which is unavoidable: a game only creates fleets around its own player, so nobody else's game has those fleets.
+
+### Publishing (`NpcSync`), now any player
+
+Any player with followers publishes their fleets: every NPC fleet in a system, or those within 8,000 units in hyperspace. That includes a friend whose world the host follows. `NPC_RESET`/`INFO`/`GONE` carry the publisher's id; the host relays a client's to all other clients, and keeps them in case it follows that client itself. `NPC_STATE` datagrams go client → host → the players following that publisher in that location.
+
+A follower:
+
+- steers its own copy of a save fleet (same id) to the owner's position, **and now gives it the owner's ships, name and faction**. Before, it kept its own ships, so a fleet that fought on one game but not the other looked different;
+- shows a stand-in for any other owner fleet;
+- hides its own extras: all of them in a system; in hyperspace, only those within 7,500 units of the owner.
+
+### Locks (`FleetLocks`)
+
+Lock requests go to the fleet's owner, not always the host. They travel on a new lock channel of `PLAYER_MSG`, relayed by the host: `claim`, `reply` (with the exact copy), `release`, `result` (ships lost), and `left` when a player disconnects.
+
+### Shared objects (`WorldObjects`)
+
+Each game checks the place its player is in once a second. When an object of these kinds appears, changes or goes, it sends a `WORLD_EVENT` to the host. The host applies it to its own world and relays it, so every world gets it, wherever its player is:
+
+| Object | Created elsewhere | Changes passed on | Removal |
+|---|---|---|---|
+| Debris field (battle or other) | yes: size, density, salvage value and drops, recoverable ships, salvage seed | density, salvaged | yes |
+| Derelict ship ("wreck") | yes: ship (stock variant or exact), condition, lifetime | | yes |
+| Cargo pods | yes, with cargo | cargo | yes |
+| Comm relay, nav buoy, sensor array (incl. makeshift) | yes: type, owner, orbit | owner, hacked | yes (deconstructed) |
+| Stable location | yes, with orbit | | yes (built on) |
+| Anything else salvageable from the save | no | | yes |
+
+Objects created elsewhere get the same id, so later changes reach them. Arriving somewhere only takes stock, so nothing already there is reported as new. Changes we apply update what we've seen, so they don't echo back. Changes to the object the player is in a dialog with wait until the dialog closes. Mission-critical objects (`$missionImportant`) are left alone.
+
+Known gaps: objects aren't locked while salvaged, so two players salvaging the same thing at the same moment can both get the loot. Objects owned by "the player" belong to each player's own player faction on their game.
+
+### Player fleets are enforced
+
+A player's fleet is only ever what that player's own game says. On everyone else's game it's a puppet, and puppets are now guarded:
+
+- The ship list carries each ship's readiness and hull damage, to the nearest 10%, along with the exact loadouts.
+- While a newer ship list is on its way (the position update with its new hash can arrive before the list over TCP), the puppet keeps the last list. Before, it fell back to the flagship alone for that moment.
+- Once a second, each puppet is checked against what it was built from: the same ship objects, flagship, and a loadout signature (hull mods, s-mods, weapons, wings, vents, capacitors, mothballed). Anything this game changed (a hyperspace storm, a script, a battle it was somehow pulled into) is restored: the fleet is rebuilt exactly, and drifting readiness or hull damage is put back. A puppet the game despawned is put back too. Restores are logged (5 per puppet at most).
+- Nothing in MultiSector writes to your own real fleet except a trade you accept or offer.
+
+## 19. Fighting together (`JointBattle`)
+
+Like the Co-op mod's battles, but each player keeps their own ships. The battle runs on one game, the **leader's**: whoever's fleet is in it.
+
+1. While the leader is in a battle dialog, every other player whose fleet is within 2,000 units is asked to join (`ask`, on a new battle channel of `PLAYER_MSG`). A player who is busy (in a dialog, a menu or their own battle) declines automatically.
+2. The other player's game opens a dialog: **Join the battle** or **Stay out**. Joining sends their fleet exactly: loadouts, officers, their own character on the flagship, readiness, damage, member ids (`join`).
+3. The leader's game rebuilds that player's puppet as the exact copy, stops guarding it (`PuppetManager.holdForBattle`), and adds it to the battle on the leader's side (`BattleAPI.join`). It's an allied fleet: the battle AI deploys and fights it, and the leader can't pilot it. The game already keeps allied ships out of the leader's post-battle recovery. A join that arrives once combat has started is refused (`late`). The leader's dialog says who's coming, so they can wait before engaging.
+4. While someone has joined, battle set-up (`pickBattleCreationPlugin`, MOD_GENERAL) is the game's own `BattleCreationPluginImpl` plus a combat plugin. Once a second it sends each joiner the state of every one of their ships (reserve, fighting with hull %, retreating, retreated, disabled, destroyed). It carries out a joiner's **retreat** order on all their ships. Campaign scripts don't run during combat, so the plugin also reads battle messages.
+5. When the battle is done (`isDone`, or the leader's fleet is out of it), the leader compares the puppet with the copy it was given and sends a `result`: ships lost, and hull and readiness for those that came back. The joiner's game applies that to their real fleet. If every ship was lost, the flagship survives at 10% hull and no readiness, because a player can't be left with no fleet. If only the flagship was lost, the player moves to another ship. The puppet then goes back to showing their ships as they are.
+6. A leader who leaves the game mid-battle leaves the joiner's fleet untouched. A joiner can stop waiting after two minutes of silence. A result that arrives later is still applied.
+
+Both players sit in dialogs meanwhile, so neither fleet moves.
+
+### Not yet
+
+- **Piloting your own ship** in someone else's battle. That's what the Co-op mod gets from screen sharing. Here it would need the battle running (or at least shown) on both games, with controls sent across: a project of its own.
+- **Loot and experience** go to the leader, as with any allied fleet. Reputation effects with the enemy's faction apply to the leader only.

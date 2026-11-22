@@ -34,22 +34,20 @@ public final class Protocol {
     /** client -> host: FleetComp of my fleet. host -> clients: playerId(int), FleetComp. */
     public static final byte FLEET_COMP = 8;
 
-    /** host -> clients: locationId. "The NPC fleets I'm sending are now for this star system" ("" = none). */
+    // TCP: NPC fleets (see sync.NpcSync). Any player whose world others follow publishes its fleets.
+    // Client -> host: the host fills in the publisher and relays it to every other client. Host -> clients: as is.
+    /** publisher(int), locationId. "The NPC fleets I publish are now this location's" ("" = none). */
     public static final byte NPC_RESET = 9;
-    /** host -> clients: locationId, NpcInfo. A fleet appeared or changed. */
+    /** publisher(int), locationId, NpcInfo. A fleet appeared or changed. */
     public static final byte NPC_INFO = 15;
-    /** host -> clients: locationId, handle. That fleet left the system or is gone. */
+    /** publisher(int), locationId, handle. That fleet left or is gone. */
     public static final byte NPC_GONE = 16;
-
-    // TCP: locking an NPC fleet a player interacts with (see sync.NpcSync)
-    /** client -> host: handle. "I'm opening this fleet's dialog: hold it for me." */
-    public static final byte CLAIM_REQUEST = 26;
-    /** host -> client: handle, granted(byte), holderName, fleetJson (long string; the exact fleet when granted) */
-    public static final byte CLAIM_REPLY = 27;
-    /** client -> host: handle. "Done with it, nothing changed." */
-    public static final byte CLAIM_RELEASE = 28;
-    /** client -> host: handle, count(int), lost member ids (strings). Applies the losses, then releases. */
-    public static final byte BATTLE_RESULT = 29;
+    /** host -> clients: count(short), then (playerId, ownerId) pairs: whose world each player follows (ZonePlanner) */
+    public static final byte ZONES = 36;
+    // 26-29 were fleet-lock messages; locks now travel as PLAYER_MSG on the lock channel.
+    /** either way: json (long string). An object in space appeared, changed or went (sync.WorldObjects).
+     *  Client -> host, which applies it and relays it to every other client; host -> clients. */
+    public static final byte WORLD_EVENT = 37;
 
     // TCP: markets (see sync.MarketSync). The host's markets are the real ones.
     /** client -> host: marketId. "I'm at this market: send me its stock." */
@@ -60,7 +58,7 @@ public final class Protocol {
     public static final byte MARKET_TRADE = 34;
 
     // TCP: player to player (see sync.PlayerTalk). Goes through the host, which fills in who sent it.
-    /** either way: int to, int from, json (long string). Hails, answers, offers. */
+    /** either way: to(int), from(int), channel(byte: 0 conversations, 1 fleet locks), json (long string) */
     public static final byte PLAYER_MSG = 35;
 
     // TCP from the host's own launcher (loopback only) to the host's game
@@ -114,7 +112,7 @@ public final class Protocol {
     public static final byte WORLD_STATE = 13;
     /** host -> client: ClockState, the shared campaign clock */
     public static final byte CLOCK = 14;
-    /** host -> client in the same star system: locationId, count(short), NpcStates */
+    /** publisher(int), locationId, count(short), NpcStates. Publisher -> host -> the players following it there. */
     public static final byte NPC_STATE = 17;
     /** offset of the type byte inside a packet, so the host can flip PING to PONG in place */
     public static final int TYPE_OFFSET = 6;

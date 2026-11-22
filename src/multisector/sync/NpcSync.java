@@ -15,6 +15,7 @@ import com.fs.starfarer.api.impl.campaign.ids.Factions;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.loading.VariantSource;
 import multisector.net.ClockState;
+import multisector.net.FleetState;
 import multisector.net.NpcInfo;
 import multisector.net.NpcState;
 import multisector.net.Session;
@@ -32,41 +33,51 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * NPC fleets in a star system shared with the host follow the host's game.
+ * NPC fleets where players are together follow one player's game.
  *
- * Starsector only creates NPC fleets near the local player (within about
- * 1.6 light-years) and each copy rolls its own, so two players in one
- * system see different patrols and traders. While a friend is in the same
- * star system as the host:
+ * <p>Starsector only creates NPC fleets near the local player (within about
+ * 1.6 light-years), and each copy of the world rolls its own, so two players
+ * in one place see different patrols, traders and pirates. Where players are
+ * together, the host decides whose game is the real one there (the "owner",
+ * see {@link multisector.net.ZonePlanner}): in a star system, whoever got
+ * there first; in hyperspace, a group of nearby players follows the one who
+ * has been in hyperspace longest.
  *
  * <ul>
- * <li><b>Host:</b> publishes every NPC fleet in its system (details over
- *     TCP when they change, positions over UDP 10 times a second).</li>
- * <li><b>Friend:</b> shows the host's fleets instead of its own. A fleet
+ * <li><b>Owner</b> (any player, host or not, with someone following them):
+ *     publishes its NPC fleets there. In a system that's every fleet; in
+ *     hyperspace, those within {@link #PUB_RADIUS} of it. Details go over TCP
+ *     when they change, positions over UDP 10 times a second, both relayed
+ *     by the host.</li>
+ * <li><b>Follower:</b> shows the owner's fleets instead of its own. A fleet
  *     that was in the shared save has the same id on both games, so the
- *     friend's own copy of it is steered to the host's position. Any other
- *     host fleet gets a stand-in ("mirror") fleet. The friend's own extra
- *     fleets are hidden (undetectable, AI off) and given back untouched
- *     when the shared stretch ends.</li>
+ *     follower's own copy is steered to the owner's position and given the
+ *     owner's ships. Any other owner fleet gets a stand-in ("mirror"). The
+ *     follower's own extra fleets are hidden (undetectable, AI off, parked
+ *     out of the way) and given back untouched when the shared stretch ends.
+ *     In hyperspace, only its own fleets near the owner are hidden.</li>
  * </ul>
  *
- * Deliberately narrow for now: star systems only (not hyperspace), and
- * host-driven fleets can't be talked to or fought on a friend's game
- * ({@link NpcInteractionGuard}), because the host doesn't resolve those
- * interactions yet. Nothing here is ever saved: everything is released
- * before a save and set up again on the next frame.
+ * Talking to or fighting a followed fleet goes through {@link FleetLocks}.
+ * Nothing here is ever saved: everything is released before a save and set
+ * up again on the next frame.
  *
  * Transient: added on each load.
  */
 public class NpcSync implements EveryFrameScript {
 
-    /** A stand-in fleet for one of the host's fleets. */
+    /** A stand-in fleet for one of the owner's fleets. */
     public static final String MIRROR_FLAG = "$multisector_mirror";
-    /** A friend's own fleet that is currently being steered by the host. */
+    /** A follower's own fleet that is currently being steered by the owner. */
     public static final String DRIVEN_FLAG = "$multisector_driven";
-    /** A friend's own fleet hidden because the host's world doesn't have it. */
+    /** A follower's own fleet hidden because the owner's world doesn't have it. */
     public static final String HIDDEN_FLAG = "$multisector_hidden";
     private static final String MOD_ID = "multisector_hidden";
+
+    /** Hyperspace: an owner publishes its fleets this close to it (2000 units is a light-year). */
+    static final float PUB_RADIUS = 8000f;
+    /** Hyperspace: a follower hides its own fleets this close to the owner. */
+    static final float HIDE_RADIUS = 7500f;
 
     private static final long CAPTURE_NANOS = 100_000_000L;
     private static final long DETAILS_NANOS = 1_000_000_000L;
@@ -80,8 +91,9 @@ public class NpcSync implements EveryFrameScript {
 
     private final Logger log = Global.getLogger(NpcSync.class);
 
-    // ---- host
-    private String hostLoc;
+    // ---- owner: publishing
+    /** The location we publish ("" = nothing, null = we're not the owner right now). */
+    private String pubLoc;
     private final Map<String, Integer> handles = new HashMap<String, Integer>();
     private final Map<Integer, CampaignFleetAPI> byHandle = new HashMap<Integer, CampaignFleetAPI>();
     private final Map<Integer, Integer> sentHash = new HashMap<Integer, Integer>();
@@ -90,8 +102,10 @@ public class NpcSync implements EveryFrameScript {
     private long nextDetails;
     private long nextResend;
 
-    // ---- friend
+    // ---- follower
     private LocationAPI zone;
+    /** Whose world we follow right now, or -1. */
+    private int zoneOwner = -1;
     private final Map<Integer, Driven> driven = new HashMap<Integer, Driven>();
     private final Map<CampaignFleetAPI, Hidden> hidden = new IdentityHashMap<CampaignFleetAPI, Hidden>();
     private long lastFrameNanos;
@@ -99,6 +113,7 @@ public class NpcSync implements EveryFrameScript {
     private static final class Driven {
         final CampaignFleetAPI fleet;
         final boolean mirror;
+        /** The owner's details last matched (0: not yet). */
         int hash;
         Boolean oldAi;
         OrbitAPI oldOrbit;
@@ -151,25 +166,26 @@ public class NpcSync implements EveryFrameScript {
             log.warn("[MultiSector] market sync failed this frame", e);
         }
         try {
-            if (!MultiSectorConfig.isSyncNpcFleets()) {
+            boolean on = s.getState() == Session.State.HOSTING
+                    || (s.getState() == Session.State.CONNECTED && s.getMyId() >= 0);
+            if (!on || !MultiSectorConfig.isSyncNpcFleets()) {
                 releaseAll();
+                stopPublishing(s, on);
                 stopWorldMoving();
-                FleetLocks.hostReleaseAll();
+                FleetLocks.releaseHolds();
                 return;
             }
-            if (s.getState() == Session.State.HOSTING) {
+            int me = s.getMyId();
+            FleetLocks.handleMessages(s, byHandle, s.playerName(me));
+            int owner = s.ownerOf(me);
+            if (owner == me) {
                 releaseAll();
-                host(s);
-            } else if (s.getState() == Session.State.CONNECTED) {
-                stopWorldMoving();
-                FleetLocks.hostReleaseAll();
-                hostLoc = null;
-                friend(s);
+                publish(s);
             } else {
-                releaseAll();
+                stopPublishing(s, true);
                 stopWorldMoving();
-                FleetLocks.hostReleaseAll();
-                hostLoc = null;
+                FleetLocks.releaseHolds();
+                follow(s, owner);
             }
         } catch (RuntimeException e) {
             log.warn("[MultiSector] NPC fleet sync failed this frame", e);
@@ -181,11 +197,11 @@ public class NpcSync implements EveryFrameScript {
         NpcSync s = current;
         if (s == null) return;
         s.releaseAll();
-        s.stopWorldMoving(); // the host's own fleet must not be saved as "ignored by other fleets"
-        FleetLocks.hostBeforeSave();
+        s.stopWorldMoving(); // our own fleet must not be saved as "ignored by other fleets"
+        FleetLocks.beforeSave();
     }
 
-    /** Friend: the host's handle for a fleet we're showing on its behalf, or -1 if it isn't one. */
+    /** Follower: the owner's handle for a fleet we're showing on their behalf, or -1 if it isn't one. */
     static int handleOf(CampaignFleetAPI f) {
         NpcSync s = current;
         if (s == null) return -1;
@@ -195,6 +211,12 @@ public class NpcSync implements EveryFrameScript {
         return -1;
     }
 
+    /** Follower: whose world we're showing, or -1. */
+    static int followedOwner() {
+        NpcSync s = current;
+        return s == null || s.zone == null ? -1 : s.zoneOwner;
+    }
+
     /** A save is loading: drop references into the old world without touching it. */
     public static void forget() {
         current = null;
@@ -202,29 +224,31 @@ public class NpcSync implements EveryFrameScript {
         MarketSync.forget();
     }
 
-    // ================================================================ host
+    // ================================================================ owner
 
-    private void host(Session s) {
+    private void publish(Session s) {
         long now = System.nanoTime();
         keepWorldMoving(s, now);
-        FleetLocks.hostFrame(s, byHandle, s.playerName(s.getMyId()));
+        FleetLocks.ownerFrame();
         if (now - nextCapture < 0) return;
         nextCapture = now + CAPTURE_NANOS;
         CampaignFleetAPI me = Global.getSector().getPlayerFleet();
         LocationAPI loc = me == null ? null : me.getContainingLocation();
-        String locId = loc == null || loc.isHyperspace() ? "" : FleetSync.locationId(loc);
-        if (!locId.equals(hostLoc)) {
-            hostLoc = locId;
+        // Only worth sending while someone follows us.
+        String locId = loc == null || !s.hasFollowers(s.getMyId()) ? "" : FleetSync.locationId(loc);
+        if (!locId.equals(pubLoc)) {
+            pubLoc = locId;
             handles.clear();
             byHandle.clear();
             sentHash.clear();
-            FleetLocks.hostReleaseAll(); // fleets held in the system we just left
-            s.hostNpcReset(locId);
+            FleetLocks.releaseHolds(); // fleets held in the place we just left
+            s.publishReset(locId);
             nextDetails = now;
-            if (!locId.isEmpty()) log.info("[MultiSector] publishing NPC fleets in " + locId);
+            if (!locId.isEmpty()) log.info("[MultiSector] publishing NPC fleets in " + locId + " for the players here");
         }
         if (locId.isEmpty()) return;
-        String hostName = s.playerName(s.getMyId());
+        String myName = s.playerName(s.getMyId());
+        boolean hyper = loc.isHyperspace();
 
         boolean details = now - nextDetails >= 0;
         if (details) nextDetails = now + DETAILS_NANOS;
@@ -232,6 +256,7 @@ public class NpcSync implements EveryFrameScript {
         List<NpcState> states = new ArrayList<NpcState>();
         for (CampaignFleetAPI f : loc.getFleets()) {
             if (!isNpc(f)) continue;
+            if (hyper && !FleetLocks.isHeld(f) && dist(f.getLocation(), me.getLocation()) > PUB_RADIUS) continue;
             Integer h = handles.get(f.getId());
             boolean fresh = h == null;
             if (fresh) {
@@ -241,11 +266,11 @@ public class NpcSync implements EveryFrameScript {
             seen.add(h);
             byHandle.put(h, f);
             if (fresh || details) {
-                NpcInfo info = describe(h, f, hostName);
+                NpcInfo info = describe(h, f, myName);
                 int sent = 31 * info.hash + info.status.hashCode(); // its status changing is news too
                 Integer old = sentHash.get(h);
                 if (old == null || old != sent) {
-                    s.hostNpcInfo(info);
+                    s.publishInfo(info);
                     sentHash.put(h, sent);
                 }
             }
@@ -261,19 +286,67 @@ public class NpcSync implements EveryFrameScript {
         for (Iterator<Map.Entry<String, Integer>> it = handles.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<String, Integer> e = it.next();
             if (seen.contains(e.getValue())) continue;
-            s.hostNpcGone(e.getValue());
+            s.publishGone(e.getValue());
             sentHash.remove(e.getValue());
             byHandle.remove(e.getValue());
             it.remove();
         }
-        s.hostNpcStates(states);
+        s.publishStates(states);
         if (now - nextResend >= 0) {
             nextResend = now + RESEND_NANOS;
-            s.hostNpcResendAll();
+            s.publishResendAll();
         }
     }
 
-    // ---- host in a dialog: the system keeps going
+    /** No longer the owner (or the session ended): followers stop showing our fleets. */
+    private void stopPublishing(Session s, boolean tell) {
+        if (pubLoc == null) return;
+        if (tell && !pubLoc.isEmpty()) s.publishReset("");
+        pubLoc = null;
+        handles.clear();
+        byHandle.clear();
+        sentHash.clear();
+    }
+
+    private static NpcInfo describe(int handle, CampaignFleetAPI f, String myName) {
+        List<String> variants = new ArrayList<String>();
+        List<String> hulls = new ArrayList<String>();
+        FleetMemberAPI flag = f.getFlagship();
+        List<FleetMemberAPI> members = f.getFleetData().getMembersListCopy();
+        if (flag != null) {
+            members.remove(flag);
+            members.add(0, flag);
+        }
+        for (FleetMemberAPI m : members) {
+            if (m.isFighterWing() || m.getVariant() == null) continue;
+            String v = m.getVariant().getHullVariantId();
+            variants.add(v == null ? "" : v);
+            hulls.add(m.getHullSpec().getHullId());
+        }
+        String faction = f.getFaction() == null ? "" : f.getFaction().getId();
+        return new NpcInfo(handle, f.getId(), faction, f.getName(), variants, hulls, status(f, myName));
+    }
+
+    /** What the fleet's tooltip should say it's doing, for every copy of it. */
+    private static String status(CampaignFleetAPI f, String myName) {
+        String holder = FleetLocks.holderOf(f);
+        if (holder != null) return FleetLocks.statusFor(holder);
+        if (f == dialogTarget()) return FleetLocks.statusFor(myName);
+        try {
+            if (f.getAI() == null) return "";
+            String o = f.getAI().getActionTextOverride();
+            if (o != null && !o.isEmpty()) return o;
+            if (f.getAI().getCurrentAssignment() != null) {
+                String t = f.getAI().getCurrentAssignment().getActionText();
+                return t == null ? "" : t;
+            }
+        } catch (Throwable ignored) {
+            // some custom fleet AI
+        }
+        return "";
+    }
+
+    // ---- owner in a dialog: the world keeps going for the followers
 
     /** Longest single step; a hitch never moves fleets in one big jump. */
     private static final float MAX_STEP_SECONDS = 0.1f;
@@ -286,25 +359,25 @@ public class NpcSync implements EveryFrameScript {
 
     /**
      * Starsector stops the whole campaign while a dialog or menu is open. On
-     * the host that would also stop every NPC fleet that friends in the same
-     * system are watching. So while the host is in a dialog (and the game
-     * isn't paused, and a friend is in this system), the host's game moves
-     * those fleets itself, in real time:
+     * the owner that would also stop every NPC fleet its followers are
+     * watching. So while the owner is in a dialog (and the shared clock is
+     * running), its game moves those fleets itself, in real time:
      * <ul>
-     * <li>the fleet the host is talking to stays frozen, so it's still there
+     * <li>the fleet the owner is talking to stays frozen, so it's still there
      *     when the dialog closes;</li>
-     * <li>fleets in a battle are left alone;</li>
-     * <li>other fleets ignore the host's fleet meanwhile, so nobody tries to
-     *     start a second encounter with a host who's already in one.</li>
+     * <li>fleets in a battle, or held by a player, are left alone;</li>
+     * <li>other fleets ignore the owner's fleet meanwhile, so nobody tries to
+     *     start a second encounter with a player who's already in one.</li>
      * </ul>
      * Only fleets advance: no spawning, no battles resolving, no economy.
-     * Those wait for the host to close the dialog, as before.
+     * Those wait for the owner to close the dialog, as before.
      */
     private void keepWorldMoving(Session s, long now) {
-        LocationAPI loc = hostLocation();
+        CampaignFleetAPI me = Global.getSector().getPlayerFleet();
+        LocationAPI loc = me == null ? null : me.getContainingLocation();
         boolean active = MultiSectorConfig.isMoveFleetsDuringHostDialogs()
-                && loc != null && !ClockSync.isMapView() && s.getSharedClock().isRunning()
-                && friendIn(s, FleetSync.locationId(loc));
+                && loc != null && !ClockSync.isMapView() && clockRunning(s)
+                && pubLoc != null && !pubLoc.isEmpty() && pubLoc.equals(FleetSync.locationId(loc));
         if (!active) {
             stopWorldMoving();
             return;
@@ -313,14 +386,15 @@ public class NpcSync implements EveryFrameScript {
         lastRunNanos = now;
         if (dt <= 0f || failures >= MAX_FAILURES) return;
 
-        CampaignFleetAPI me = Global.getSector().getPlayerFleet();
         if (!setIgnoredFlag && !me.getMemoryWithoutUpdate().contains(MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS)) {
             me.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS, true);
             setIgnoredFlag = true;
         }
         SectorEntityToken talkingTo = dialogTarget();
+        boolean hyper = loc.isHyperspace();
         for (CampaignFleetAPI f : new ArrayList<CampaignFleetAPI>(loc.getFleets())) {
             if (!isNpc(f) || f == talkingTo || f.getBattle() != null || FleetLocks.isHeld(f)) continue;
+            if (hyper && dist(f.getLocation(), me.getLocation()) > PUB_RADIUS) continue;
             try {
                 f.advance(dt);
             } catch (RuntimeException e) {
@@ -342,17 +416,11 @@ public class NpcSync implements EveryFrameScript {
         }
     }
 
-    private static LocationAPI hostLocation() {
-        CampaignFleetAPI me = Global.getSector().getPlayerFleet();
-        LocationAPI loc = me == null ? null : me.getContainingLocation();
-        return loc == null || loc.isHyperspace() ? null : loc;
-    }
-
-    private static boolean friendIn(Session s, String locId) {
-        for (multisector.net.FleetState.Received r : s.getRemoteFleets().values()) {
-            if (locId.equals(r.state.location)) return true;
-        }
-        return false;
+    /** Is the shared clock running (not paused)? */
+    private static boolean clockRunning(Session s) {
+        if (s.getState() == Session.State.HOSTING) return s.getSharedClock().isRunning();
+        ClockState.Received r = s.getRemoteClock();
+        return r != null && !r.state.isStopped();
     }
 
     static SectorEntityToken dialogTarget() {
@@ -369,85 +437,42 @@ public class NpcSync implements EveryFrameScript {
         return f.getFleetData() != null && f.getFleetData().getNumMembers() > 0;
     }
 
-    private static NpcInfo describe(int handle, CampaignFleetAPI f, String hostName) {
-        List<String> variants = new ArrayList<String>();
-        List<String> hulls = new ArrayList<String>();
-        FleetMemberAPI flag = f.getFlagship();
-        List<FleetMemberAPI> members = f.getFleetData().getMembersListCopy();
-        if (flag != null) {
-            members.remove(flag);
-            members.add(0, flag);
-        }
-        for (FleetMemberAPI m : members) {
-            if (m.isFighterWing() || m.getVariant() == null) continue;
-            String v = m.getVariant().getHullVariantId();
-            variants.add(v == null ? "" : v);
-            hulls.add(m.getHullSpec().getHullId());
-        }
-        String faction = f.getFaction() == null ? "" : f.getFaction().getId();
-        return new NpcInfo(handle, f.getId(), faction, f.getName(), variants, hulls, status(f, hostName));
+    private static float dist(Vector2f a, Vector2f b) {
+        float dx = a.x - b.x;
+        float dy = a.y - b.y;
+        return (float) Math.sqrt(dx * dx + dy * dy);
     }
 
-    /** What the fleet's tooltip should say it's doing, for every copy of it. */
-    private static String status(CampaignFleetAPI f, String hostName) {
-        String holder = FleetLocks.holderOf(f);
-        if (holder != null) return FleetLocks.statusFor(holder);
-        if (f == dialogTarget()) return FleetLocks.statusFor(hostName);
-        try {
-            if (f.getAI() == null) return "";
-            String o = f.getAI().getActionTextOverride();
-            if (o != null && !o.isEmpty()) return o;
-            if (f.getAI().getCurrentAssignment() != null) {
-                String t = f.getAI().getCurrentAssignment().getActionText();
-                return t == null ? "" : t;
-            }
-        } catch (Throwable ignored) {
-            // some custom fleet AI
-        }
-        return "";
-    }
+    // ================================================================ follower
 
-    /** Our copy's tooltip says what the host's fleet is doing, not what our copy was doing. */
-    private static void showStatus(Driven d, NpcInfo info) {
-        if (d.fleet.getAI() == null) return;
-        if (!d.textSaved) {
-            d.oldText = d.fleet.getAI().getActionTextOverride();
-            d.textSaved = true;
-        }
-        String want = info.status.isEmpty() ? d.oldText : info.status;
-        String now = d.fleet.getAI().getActionTextOverride();
-        if (want == null ? now != null : !want.equals(now)) d.fleet.getAI().setActionTextOverride(want);
-    }
-
-    // ================================================================ friend
-
-    private void friend(Session s) {
+    private void follow(Session s, int owner) {
         long now = System.nanoTime();
         float frameDt = lastFrameNanos == 0 ? 0f : Math.min((now - lastFrameNanos) / 1e9f, 0.25f);
         lastFrameNanos = now;
-        FleetLocks.friendFrame(s);
+        FleetLocks.followerFrame(s);
 
         CampaignFleetAPI me = Global.getSector().getPlayerFleet();
         LocationAPI here = me == null ? null : me.getContainingLocation();
-        String hostLocation = s.getNpcLocation();
-        boolean shared = here != null && !here.isHyperspace() && !hostLocation.isEmpty()
-                && hostLocation.equals(FleetSync.locationId(here));
+        Session.Feed feed = s.getFeed(owner);
+        String ownerLocation = feed.getLocation();
+        boolean shared = here != null && !ownerLocation.isEmpty() && ownerLocation.equals(FleetSync.locationId(here));
         if (!shared) {
             releaseAll();
             return;
         }
-        if (zone != here) {
+        if (zone != here || zoneOwner != owner) {
             releaseAll();
             zone = here;
+            zoneOwner = owner;
             loggedHidden = 0;
-            log.info("[MultiSector] sharing NPC fleets with the host in " + hostLocation);
+            log.info("[MultiSector] following " + s.playerName(owner) + "'s NPC fleets in " + ownerLocation);
         }
 
-        Map<Integer, NpcInfo> infos = s.getNpcInfos();
-        Map<Integer, NpcState.Received> states = s.getNpcStates();
-        float speed = clockSpeed(s.getRemoteClock());
+        Map<Integer, NpcInfo> infos = feed.getInfos();
+        Map<Integer, NpcState.Received> states = feed.getStates();
+        float speed = clockSpeed(s.getRemoteClock(), s);
 
-        // Fleets the host no longer has here.
+        // Fleets the owner no longer has here.
         for (Iterator<Map.Entry<Integer, Driven>> it = driven.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<Integer, Driven> e = it.next();
             Driven d = e.getValue();
@@ -457,7 +482,7 @@ public class NpcSync implements EveryFrameScript {
             }
         }
 
-        // The host's fleets: steer our copy, or show a stand-in.
+        // The owner's fleets: steer our copy, or show a stand-in.
         Set<CampaignFleetAPI> ours = java.util.Collections.newSetFromMap(new IdentityHashMap<CampaignFleetAPI, Boolean>());
         for (NpcInfo info : infos.values()) {
             NpcState.Received st = states.get(info.handle);
@@ -469,8 +494,9 @@ public class NpcSync implements EveryFrameScript {
                 d = adopt(info, st.state, here);
                 if (d == null) continue;
                 driven.put(info.handle, d);
-            } else if (d.mirror && d.hash != info.hash) {
-                fill(d.fleet, info); // it lost or gained ships on the host
+            }
+            if (d.hash != info.hash && d.fleet != FleetLocks.activeFleet()) {
+                match(d, info); // ships lost or gained on the owner's game, or never matched yet
                 d.hash = info.hash;
             }
             follow(d.fleet, st, speed, now, frameDt);
@@ -479,18 +505,26 @@ public class NpcSync implements EveryFrameScript {
         }
 
         // Everything else here is this game's own roll of the dice: hide it while shared.
+        // In hyperspace, only near the owner: further out the owner's game has no fleets to show.
+        Vector2f ownerAt = null;
+        if (here.isHyperspace()) {
+            FleetState.Received os = s.getRemoteFleets().get(owner);
+            if (os != null) ownerAt = new Vector2f(os.state.x, os.state.y);
+        }
         for (CampaignFleetAPI f : new ArrayList<CampaignFleetAPI>(here.getFleets())) {
             if (ours.contains(f) || !isNpc(f) || f.getMemoryWithoutUpdate().getBoolean(DRIVEN_FLAG)) continue;
-            if (f.getBattle() != null && !hidden.containsKey(f)) continue; // never pull a fleet out of a battle
             Hidden h = hidden.get(f);
-            if (h == null) {
-                hidden.put(f, hide(f));
-                if (loggedHidden++ < LOG_HIDDEN) {
-                    log.info("[MultiSector] hiding this game's own " + f.getName() + " (" + f.getFaction().getId()
-                            + ", " + f.getFleetData().getNumMembers() + " ships): the host's world doesn't have it");
-                }
-            } else {
+            if (h != null) {
                 park(f, h); // the game may move it; keep it out of sight
+                continue;
+            }
+            if (f.getBattle() != null) continue; // never pull a fleet out of a battle
+            if (here.isHyperspace() && (ownerAt == null || dist(f.getLocation(), ownerAt) > HIDE_RADIUS)) continue;
+            hidden.put(f, hide(f));
+            if (loggedHidden++ < LOG_HIDDEN) {
+                log.info("[MultiSector] hiding this game's own " + f.getName() + " (" + f.getFaction().getId()
+                        + ", " + f.getFleetData().getNumMembers() + " ships): " + s.playerName(owner)
+                        + "'s world doesn't have it");
             }
         }
         for (Iterator<Map.Entry<CampaignFleetAPI, Hidden>> it = hidden.entrySet().iterator(); it.hasNext(); ) {
@@ -503,10 +537,13 @@ public class NpcSync implements EveryFrameScript {
     }
 
     /** How fast the shared world runs: 0 paused, 1 normal, more while fast-forwarding. */
-    private static float clockSpeed(ClockState.Received r) {
-        if (r == null) return 1f;
-        if (r.state.isStopped()) return 0f;
-        return r.state.isFast() ? r.state.fastMult : 1f;
+    private static float clockSpeed(ClockState.Received r, Session s) {
+        ClockState st = s.getState() == Session.State.HOSTING
+                ? s.getSharedClock().snapshot(System.nanoTime()) // the host follows a friend's world too
+                : r == null ? null : r.state;
+        if (st == null) return 1f;
+        if (st.isStopped()) return 0f;
+        return st.isFast() ? st.fastMult : 1f;
     }
 
     /** Takes over our own copy of the fleet if we have one (same id), else makes a stand-in. */
@@ -539,8 +576,50 @@ public class NpcSync implements EveryFrameScript {
         return d;
     }
 
+    /**
+     * Makes our copy match the owner's details. A stand-in is simply
+     * rebuilt. Our own copy of a save fleet keeps everything about it (its
+     * officers, its part in missions and bounties) except the ships, name and
+     * faction, which follow the owner's: it may have fought on one game and
+     * not the other.
+     */
+    private void match(Driven d, NpcInfo info) {
+        CampaignFleetAPI f = d.fleet;
+        if (d.mirror) {
+            fill(f, info);
+            return;
+        }
+        NpcInfo mine = describe(info.handle, f, "");
+        if (!mine.variants.equals(info.variants) || !mine.hulls.equals(info.hulls)) {
+            log.info("[MultiSector] " + f.getName() + " has different ships on the owner's game ("
+                    + mine.hulls.size() + " here, " + info.hulls.size() + " there): using theirs");
+            fill(f, info);
+        }
+        if (!info.name.isEmpty() && !info.name.equals(f.getName())) f.setName(info.name);
+        if (!info.faction.isEmpty() && (f.getFaction() == null || !info.faction.equals(f.getFaction().getId()))) {
+            try {
+                f.setFaction(info.faction, true);
+            } catch (RuntimeException e) {
+                // a faction this game doesn't have: keep ours
+            }
+        }
+    }
+
+    /** Our copy's tooltip says what the owner's fleet is doing, not what our copy was doing. */
+    private static void showStatus(Driven d, NpcInfo info) {
+        if (d.fleet.getAI() == null) return;
+        if (!d.textSaved) {
+            d.oldText = d.fleet.getAI().getActionTextOverride();
+            d.textSaved = true;
+        }
+        String want = info.status.isEmpty() ? d.oldText : info.status;
+        String now = d.fleet.getAI().getActionTextOverride();
+        if (want == null ? now != null : !want.equals(now)) d.fleet.getAI().setActionTextOverride(want);
+    }
+
     private CampaignFleetAPI spawnMirror(NpcInfo info, NpcState st, LocationAPI here) {
-        String faction = Global.getSector().getFaction(info.faction) != null ? info.faction : Factions.NEUTRAL;
+        String faction = info.faction;
+        if (Global.getSector().getFaction(faction) == null) faction = Factions.INDEPENDENT;
         CampaignFleetAPI f = Global.getFactory().createEmptyFleet(faction, info.name, true);
         if (!fill(f, info)) return null;
         f.setName(info.name);
@@ -554,7 +633,7 @@ public class NpcSync implements EveryFrameScript {
         return f;
     }
 
-    /** Replaces the fleet's ships with the host's list. Returns false if none could be made. */
+    /** Replaces the fleet's ships with the owner's list. Returns false if none could be made. */
     private static boolean fill(CampaignFleetAPI f, NpcInfo info) {
         List<FleetMemberAPI> built = new ArrayList<FleetMemberAPI>();
         for (int i = 0; i < info.variants.size(); i++) {
@@ -569,11 +648,11 @@ public class NpcSync implements EveryFrameScript {
             m.getRepairTracker().setCR(m.getRepairTracker().getMaxCR());
         }
         data.setFlagship(built.get(0));
+        if (f.getCommander() != null) built.get(0).setCaptain(f.getCommander()); // the commander keeps their ship
         f.forceSync();
         return true;
     }
 
-    /** The host's variant if this game has it, else a bare hull of the same type. */
     private static FleetMemberAPI ship(String variantId, String hullId) {
         try {
             if (variantId != null && !variantId.isEmpty() && Global.getSettings().doesVariantExist(variantId)) {
@@ -591,7 +670,7 @@ public class NpcSync implements EveryFrameScript {
         }
     }
 
-    /** Glides toward where the host's fleet is now, predicted from its last update. */
+    /** Glides toward where the owner's fleet is now, predicted from its last update. */
     private static void follow(CampaignFleetAPI f, NpcState.Received r, float speed, long now, float frameDt) {
         NpcState s = r.state;
         float ahead = Math.min((now - r.arrivedNanos) / 1e9f, MAX_PREDICT_SECONDS) * speed;
@@ -618,7 +697,7 @@ public class NpcSync implements EveryFrameScript {
         h.y = f.getLocation().y;
         f.setOrbit(null);
         // Same stat the game's own "Go Dark" ability lowers; 0 means nobody can detect it.
-        f.getStats().getDetectedRangeMod().modifyMult(MOD_ID, 0f, "MultiSector: not in the host's world");
+        f.getStats().getDetectedRangeMod().modifyMult(MOD_ID, 0f, "MultiSector: not in the owner's world");
         f.setDoNotAdvanceAI(true);
         f.getMemoryWithoutUpdate().set(HIDDEN_FLAG, true);
         park(f, h);
@@ -656,11 +735,12 @@ public class NpcSync implements EveryFrameScript {
         if (driven.isEmpty() && hidden.isEmpty() && zone == null) return;
         for (Driven d : driven.values()) release(d);
         for (Map.Entry<CampaignFleetAPI, Hidden> e : hidden.entrySet()) unhide(e.getKey(), e.getValue());
-        if (zone != null) log.info("[MultiSector] stopped sharing NPC fleets (" + driven.size() + " followed, "
+        if (zone != null) log.info("[MultiSector] stopped following NPC fleets (" + driven.size() + " followed, "
                 + hidden.size() + " hidden)");
         driven.clear();
         hidden.clear();
         zone = null;
+        zoneOwner = -1;
         lastFrameNanos = 0;
     }
 }

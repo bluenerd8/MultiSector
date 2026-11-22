@@ -2,6 +2,7 @@ package multisector.sync;
 
 import com.fs.starfarer.api.PluginPick;
 import com.fs.starfarer.api.campaign.BaseCampaignPlugin;
+import com.fs.starfarer.api.campaign.BattleCreationPlugin;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.InteractionDialogPlugin;
@@ -20,11 +21,12 @@ import java.util.Map;
  *
  * <ul>
  * <li><b>Another player's fleet:</b> hails them ({@link PlayerTalk}).</li>
- * <li><b>Friend, host's fleet:</b> first asks the host to lock it
- *     ({@link FleetLocks}). Once granted, the fleet becomes the host's exact
- *     copy and the game's normal fleet dialog takes over: talk, fight,
- *     pursue, all as usual. If another player already has it, says who.</li>
- * <li><b>Host, fleet a friend holds:</b> says who's dealing with it.</li>
+ * <li><b>A fleet from the world we follow:</b> first asks its owner (the
+ *     host, or the friend whose world it is) to lock it ({@link FleetLocks}).
+ *     Once granted, the fleet becomes the owner's exact copy and the game's
+ *     normal fleet dialog takes over: talk, fight, pursue, all as usual. If
+ *     another player already has it, says who.</li>
+ * <li><b>Our own fleet that another player holds:</b> says who's dealing with it.</li>
  * </ul>
  * Everything else opens as normal.
  *
@@ -56,15 +58,29 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
             }
             return pick(PlayerTalk.hail(id));
         }
-        if (s.getState() == Session.State.HOSTING && mem.contains(FleetLocks.CLAIMED_BY)) {
+        if (!s.isActive()) return null;
+        if (mem.contains(FleetLocks.CLAIMED_BY)) {
             return pick(new Note(mem.getString(FleetLocks.CLAIMED_BY) + " is dealing with this fleet right now. "
                     + "Try again once they're done."));
         }
-        if (s.getState() != Session.State.CONNECTED) return null;
         if (!mem.getBoolean(NpcSync.MIRROR_FLAG) && !mem.getBoolean(NpcSync.DRIVEN_FLAG)) return null;
         int handle = NpcSync.handleOf(fleet);
-        if (handle < 0) return pick(new Note("This fleet just left the host's world. Try again in a moment."));
-        return pick(new Ask(handle, fleet));
+        int owner = NpcSync.followedOwner();
+        if (handle < 0 || owner < 0) {
+            return pick(new Note("This fleet just left the shared world. Try again in a moment."));
+        }
+        return pick(new Ask(owner, handle, fleet));
+    }
+
+    /**
+     * While another player's fleet has joined our battle, the battle is set
+     * up as usual plus a live report for them ({@link JointBattle}). Any
+     * other time we leave battle set-up to the game (and other mods).
+     */
+    @Override
+    public PluginPick<BattleCreationPlugin> pickBattleCreationPlugin(SectorEntityToken opponent) {
+        if (!(opponent instanceof CampaignFleetAPI) || !JointBattle.hasJoiners()) return null;
+        return new PluginPick<BattleCreationPlugin>(new JointBattle.Creation(), PickPriority.MOD_GENERAL);
     }
 
     private static PluginPick<InteractionDialogPlugin> pick(InteractionDialogPlugin p) {
@@ -123,48 +139,50 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
     private static final class Ask extends Base {
         private static final float TIMEOUT_SECONDS = 8f;
 
+        private final int owner;
         private final int handle;
         private final CampaignFleetAPI fleet;
         private float waited;
         private boolean answered;
         private boolean granted;
 
-        Ask(int handle, CampaignFleetAPI fleet) {
+        Ask(int owner, int handle, CampaignFleetAPI fleet) {
+            this.owner = owner;
             this.handle = handle;
             this.fleet = fleet;
         }
 
         public void init(InteractionDialogAPI dialog) {
             this.dialog = dialog;
-            dialog.getTextPanel().addPara("Your comms officer reaches the host's world about " + fleet.getName()
-                    + "...");
-            Session.get().requestClaim(handle);
+            dialog.getTextPanel().addPara("Your comms officer reaches " + Session.get().playerName(owner)
+                    + "'s world about " + fleet.getName() + "...");
+            FleetLocks.request(owner, handle);
             leaveOnly();
         }
 
         @Override
         public void advance(float amount) {
             if (answered) return;
-            Session.ClaimReply r = Session.get().takeClaimReply(handle);
+            FleetLocks.Reply r = FleetLocks.takeReply(handle);
             if (r == null) {
                 waited += Math.min(amount <= 0 ? 1f / 60f : amount, 0.1f);
                 if (waited > TIMEOUT_SECONDS) {
                     answered = true;
-                    Session.get().releaseClaim(handle); // in case the host's yes is still on its way
-                    dialog.getTextPanel().addPara("The host's world didn't answer. Try again in a moment.");
+                    FleetLocks.release(owner, handle); // in case their yes is still on its way
+                    dialog.getTextPanel().addPara("No answer. Try again in a moment.");
                 }
                 return;
             }
             answered = true;
             if (!r.granted) {
                 dialog.getTextPanel().addPara(r.holder.isEmpty()
-                        ? "That fleet is gone from the host's world."
+                        ? "That fleet is gone from the shared world."
                         : r.holder + " is already dealing with this fleet. Try again once they're done.");
                 return;
             }
-            if (!FleetLocks.takeOver(handle, fleet, r.fleetJson)) {
-                Session.get().releaseClaim(handle);
-                dialog.getTextPanel().addPara("Couldn't copy the host's fleet into this game. Leaving it alone.");
+            if (!FleetLocks.takeOver(owner, handle, fleet, r.fleetJson)) {
+                FleetLocks.release(owner, handle);
+                dialog.getTextPanel().addPara("Couldn't copy that fleet into this game. Leaving it alone.");
                 return;
             }
             granted = true;
@@ -183,11 +201,11 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
                 normal.init(dialog);
                 return;
             }
-            dialog.dismiss(); // FleetLocks sees the dialog close and lets the host know
+            dialog.dismiss(); // FleetLocks sees the dialog close and lets the owner know
             if (!granted && answered) return;
             if (!answered) {
                 answered = true;
-                Session.get().releaseClaim(handle); // in case the host says yes after we left
+                FleetLocks.release(owner, handle); // in case they say yes after we left
             }
         }
     }
