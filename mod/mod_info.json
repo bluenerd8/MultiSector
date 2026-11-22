@@ -2,7 +2,7 @@
     "id": "multisector",
     "name": "MultiSector",
     "author": "bluenerd8",
-    "version": "0.0.34",
+    "version": "0.0.35",
     "description": "Experimental multiplayer for Starsector. Share the host's world, see each other's fleets, and stay on one shared date with shared pause. Use the MultiSector launcher to host or join; F8 in the campaign shows the players. Where players are together (star systems and hyperspace), NPC fleets are shared and can be fought; wreckage and objectives are shared everywhere. Markets are shared through the host. Click another player's fleet to talk and trade; join each other's battles with your own ships.",
     "gameVersion": "0.98.5a-RC8",
     "jars": ["jars/MultiSector.jar"],

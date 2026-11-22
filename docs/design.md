@@ -459,6 +459,8 @@ A player's fleet is only ever what that player's own game says. On everyone else
 
 ## 19. Fighting together (`JointBattle`)
 
+The message-by-message protocol, and who owns which state, is in [joint-battle-protocol.md](joint-battle-protocol.md).
+
 Like the Co-op mod's battles, but each player keeps their own ships. The battle runs on one game, the **leader's**: whoever's fleet is in it.
 
 1. While the leader is in a battle dialog, every other player whose fleet is within 2,000 units is asked to join (`ask`, on a new battle channel of `PLAYER_MSG`). A player who is busy (in a dialog, a menu or their own battle) declines automatically.
@@ -539,3 +541,22 @@ From testing 0.0.33: joining while the leader was still on the deployment screen
 - **The view only shows the leader's battle.** It removes any ship it didn't make itself (wrecks' pieces aside) and keeps both reserves empty.
 - **Missing ships are asked for again.** Ships the stream mentions that the view doesn't have (an announcement lost, or a ship that couldn't be made) are asked for (`cwho`, up to 3 times each), and the leader announces them again. Ships the view can't build or place are logged with what's missing.
 - `PROTOCOL_VERSION` 15.
+
+### The joiner catches up first, then their ships come in (0.0.35)
+
+From testing 0.0.34: the joiner's ships were already in the battle as AI copies before the joiner was in it, the view showed the enemy as allies, and most ships in it looked scuttled.
+
+- **Enemies as allies in the view:** a newly built fleet member is on the player's side (owner 0), and the view only chose the fleet manager. The view now sets each member's side and ally flag before spawning it, and the ship's afterwards.
+- **"Scuttled" ships:** the joiner's own game could start the leader's combat logic inside the view (`JointCombatHook` only checked for an open view, which may not be set yet on its first frame). That logic reads the same combat datagrams as the view, so most of the leader's updates never reached the view's ships. Now `viewOpening` is set before the view's battle starts, and the hook never leads a combat while a view is opening or open.
+- **Ships in only after the joiner has caught up.** Joining no longer puts anything into the battle. The leader sends the view everything (`cstart`, every ship) and waits. The view says it's ready (`cdeploy`) once every ship it was told about is placed from the stream (at least 1.5 s after it opens, at most 8 s). Only then does the leader spawn the joiner's ships ("X joins your battle with N ships"). Without a view, `cdeploy` is sent on joining. If it never comes, the leader brings them in after 25 s.
+- **No stand-in fleet in a campaign battle.** If a player's stand-in fleet is ever in a battle on another game, it's taken out straight away (`BattleAPI.leave`), instead of waiting for the battle to end.
+- `PROTOCOL_VERSION` 16.
+
+### Players' ships are tagged, not AI allies (0.0.35)
+
+- Every ship a joiner brings in carries their player id (`JointCombat.PLAYER_TAG` in the ship's custom data). Everything about those ships follows from the tag, every frame on the leader's game:
+  - **Not an AI ally.** They're on the leader's side with `isAlly` false, so the ally admiral AI never drives them, and the leader's tactical orders (assignments, waypoints, full retreat) reach them like the leader's own ships. They still use the game's ship AI, except the one the joiner pilots.
+  - **Marked in the player's colour**: a soft glow under the hull, from a fixed palette by player id, so it's the same colour on every game. Their name floats over each ship as it arrives.
+  - **Never taken over.** If the leader switches to one of them, they're put back on their own ship ("That ship is X's: they command it").
+- `cship` carries whose ship each one is (`player`: a joiner's id, the leader's id for the leader's own ships, or -1). The joiner's view tags and marks other players' ships the same way, so the leader's ships glow in the leader's colour there.
+- Still to come: commands from the joiner to their own ships. For now their ships take the leader's side's orders.

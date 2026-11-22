@@ -191,7 +191,16 @@ public final class PuppetManager {
     /** Puts the puppet's ships back exactly as its player has them, if this game changed anything. */
     private static void enforce(Puppet p, FleetState s) {
         CampaignFleetAPI f = p.fleet;
-        if (f.getBattle() != null) return; // can't leave a battle; checked again once it's over
+        if (f.getBattle() != null) {
+            // A player's stand-in is never in a battle here: their ships join only through JointBattle.
+            try {
+                f.getBattle().leave(f, false);
+                log.info("[MultiSector] " + p.name + "'s fleet was pulled into a battle on this game; taking it out");
+            } catch (RuntimeException e) {
+                return; // checked again once it's over
+            }
+            if (f.getBattle() != null) return;
+        }
         String why = changed(p);
         if (why != null) {
             if (p.restores++ < LOG_RESTORES) {

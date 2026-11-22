@@ -22,6 +22,7 @@ public final class MultiSectorConfig {
     private static boolean showPlayersHud = true;
     private static boolean jointBattleView = true;
     private static boolean jointBattleDeployAll = true;
+    private static boolean jointBattleChecks = true;
     private static int hudHotkey = Keyboard.KEY_F7;
     private static String hudHotkeyName = "F7";
     private static String hudCorner = "topRight";
@@ -53,6 +54,7 @@ public final class MultiSectorConfig {
             showPlayersHud = json.optBoolean("showPlayersHud", true);
             jointBattleView = json.optBoolean("jointBattleView", true);
             jointBattleDeployAll = json.optBoolean("jointBattleDeployAll", true);
+            jointBattleChecks = json.optBoolean("jointBattleChecks", true);
             String hk = json.optString("hudHotkey", "F7").trim().toUpperCase();
             int hidx = Keyboard.getKeyIndex(hk);
             if (hidx != Keyboard.KEY_NONE) {
@@ -91,6 +93,8 @@ public final class MultiSectorConfig {
     public static boolean isJointBattleView() { return jointBattleView; }
     /** The leader's game deploys every combat-ready ship of a player who joined (not just what fits). */
     public static boolean isJointBattleDeployAll() { return jointBattleDeployAll; }
+    /** Joint battles write comparison tables of every ship to starsector.log, on both games. */
+    public static boolean isJointBattleChecks() { return jointBattleChecks; }
     public static int getHudHotkey() { return hudHotkey; }
     public static String getHudHotkeyName() { return hudHotkeyName; }
     /** topLeft, topRight, bottomLeft or bottomRight. */

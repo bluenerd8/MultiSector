@@ -124,7 +124,8 @@ public final class JointBattle implements EveryFrameScript {
                 if ("left".equals(k)) {
                     leaderLost(m.from);
                     joinerLost(m.from);
-                } else if ("join".equals(k) || "retreat".equals(k) || "seen".equals(k) || "cwho".equals(k)) {
+                } else if ("join".equals(k) || "retreat".equals(k) || "seen".equals(k) || "cwho".equals(k)
+                        || "cdeploy".equals(k)) {
                     toLeader(s, m, k, j);
                 } else {
                     toJoiner(s, m, k, j);
@@ -167,6 +168,9 @@ public final class JointBattle implements EveryFrameScript {
         final Map<String, float[]> lastHullCr = new HashMap<String, float[]>();
         /** Our member ids already put into the fight: never twice. */
         final Set<String> spawned = new HashSet<String>();
+        /** Their ships are in (only once their view has caught up with the battle). */
+        boolean deployed;
+        long joinedAt;
 
         Joiner(int id, String name, CampaignFleetAPI fleet) {
             this.id = id;
@@ -280,6 +284,12 @@ public final class JointBattle implements EveryFrameScript {
             }
             return;
         }
+        if ("cdeploy".equals(k)) {
+            Joiner jn = joiners.get(m.from);
+            JointCombat.Leader lead = JointCombat.Leader.active;
+            if (jn != null && lead != null) lead.bringIn(jn);
+            return;
+        }
         if ("cwho".equals(k)) {
             Joiner jn = joiners.get(m.from);
             JointCombat.Leader lead = JointCombat.Leader.active;
@@ -390,7 +400,7 @@ public final class JointBattle implements EveryFrameScript {
             m.getRepairTracker().setCR((float) sj.optDouble("cr", m.getRepairTracker().getMaxCR()));
             m.getStatus().setHullFraction((float) sj.optDouble("hullFraction", 1));
             if (sj.optBoolean("mothballed")) m.getRepairTracker().setMothballed(true);
-            m.setAlly(true);
+            m.setAlly(false); // a player's ship, not an AI ally (JointCombat.PLAYER_TAG)
             String owner = sj.optString("id", "");
             jn.toOwner.put(m.getId(), owner);
             jn.names.put(m.getId(), m.getShipName());
@@ -593,6 +603,7 @@ public final class JointBattle implements EveryFrameScript {
         lastHeard = System.nanoTime();
         if ("joined".equals(k) && phase == Phase.JOINING) {
             phase = Phase.IN;
+            if (!MultiSectorConfig.isJointBattleView()) bringUsIn(); // no view to catch up first
             say2("You've joined " + leaderName + "'s battle. Your ships arrive at their side of the battlefield."
                     + (MultiSectorConfig.isJointBattleView() ? " A view of it opens here and you fly your chosen ship;"
                     + " your other ships fight under the battle AI." : " Your ships fight under the battle AI."));
@@ -627,10 +638,14 @@ public final class JointBattle implements EveryFrameScript {
 
     /** The leader's combat is under way and we're in it: open our view of it, from the join dialog. */
     private static void openView(float w, float h) {
-        if (!MultiSectorConfig.isJointBattleView() || open == null || open.dialog == null) return;
+        if (!MultiSectorConfig.isJointBattleView()) return;
         CampaignFleetAPI me = Global.getSector().getPlayerFleet();
-        if (me == null) return;
+        if (open == null || open.dialog == null || me == null) {
+            bringUsIn(); // no view: our ships go in now
+            return;
+        }
         try {
+            JointCombat.viewOpening = System.nanoTime();
             viewCreation = new JointCombat.MirrorCreation(leader, w, h);
             viewDummy = Global.getFactory().createEmptyFleet(Factions.NEUTRAL, leaderName + "'s battle", true);
             open.dialog.startBattle(new BattleCreationContext(me, FleetGoal.ATTACK, viewDummy, FleetGoal.ATTACK));
@@ -638,9 +653,16 @@ public final class JointBattle implements EveryFrameScript {
         } catch (RuntimeException e) {
             viewCreation = null;
             viewDummy = null;
+            JointCombat.viewOpening = 0;
             log.warn("[MultiSector] couldn't open the battle view", e);
             say2("Couldn't open a view of the battle; you'll get reports here instead.");
+            bringUsIn();
         }
+    }
+
+    /** Our ships can go into the leader's battle now. */
+    private static void bringUsIn() {
+        Session.get().sendBattleMessage(leader, msg("cdeploy", joinBattle).toString());
     }
 
     /** The set-up for our battle view, once, if that's the battle starting. */
@@ -800,6 +822,7 @@ public final class JointBattle implements EveryFrameScript {
         shown.clear();
         viewCreation = null;
         viewDummy = null;
+        JointCombat.viewOpening = 0;
         JointCombat.pending.clear();
     }
 

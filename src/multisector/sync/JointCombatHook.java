@@ -44,7 +44,7 @@ public final class JointCombatHook extends BaseEveryFrameCombatPlugin {
         try {
             if (!Session.get().isActive()) return false;
             if (engine.isSimulation() || engine.isMission() || !engine.isInCampaign() || engine.isInCampaignSim()) return false;
-            if (JointCombat.view != null) return false;
+            if (JointCombat.isViewing()) return false; // our view of a friend's battle: theirs to lead
             CampaignFleetAPI me = Global.getSector() == null ? null : Global.getSector().getPlayerFleet();
             return me != null && me.getBattle() != null;
         } catch (RuntimeException e) {
