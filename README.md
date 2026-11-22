@@ -2,7 +2,7 @@
 
 Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), aimed at small friend groups (2–8 players). One player hosts and runs the real game; everyone else connects to them.
 
-> **Status: early prototype.** Players share the host's world. Everyone sees the other players' fleets (with all their ships) on the map. Everyone stays on the host's date, pause is shared, and fast-forward follows the host. NPC fleets, markets and battles aren't synced yet, so each copy of the world still runs those on its own.
+> **Status: early prototype.** Players share the host's world. Everyone sees the other players' fleets (with all their ships) on the map. Everyone stays on the host's date, pause is shared, and fast-forward follows the host. Planets line up, and in a star system you share with the host you see the host's NPC fleets. Elsewhere (hyperspace, other systems), markets and battles still run on each player's own game.
 
 ## Time and pause
 

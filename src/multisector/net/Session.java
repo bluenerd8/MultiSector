@@ -114,6 +114,16 @@ public final class Session {
     /** TCP messages from the game thread. Client: sent to the host. Host: sent to every client. */
     private final ConcurrentLinkedQueue<ByteBuffer> outbox = new ConcurrentLinkedQueue<ByteBuffer>();
 
+    // ---- NPC fleets in the host's star system
+    /** Host: the system whose fleets we're publishing; client: the one the host says it's sending. "" = none. */
+    private volatile String npcLocation = "";
+    private final ConcurrentHashMap<Integer, NpcInfo> npcInfos = new ConcurrentHashMap<Integer, NpcInfo>();
+    /** Host: latest positions, replaced as a whole by the game thread. */
+    private volatile List<NpcState> npcStates = Collections.emptyList();
+    /** Client: latest positions by handle, with arrival times. */
+    private final ConcurrentHashMap<Integer, NpcState.Received> npcReceived =
+            new ConcurrentHashMap<Integer, NpcState.Received>();
+
     // ---- host: the host's own launcher asking for a fresh save
     private final ConcurrentLinkedQueue<SaveRequest> saveRequests = new ConcurrentLinkedQueue<SaveRequest>();
     /** How long the launcher waits for the game to save. */
@@ -178,6 +188,75 @@ public final class Session {
         return comps.get(playerId);
     }
 
+    // ---- NPC fleets: host side
+
+    /** Host: from now on, the NPC fleets sent are those of this star system ("" for none). */
+    public void hostNpcReset(String locationId) {
+        npcLocation = locationId == null ? "" : locationId;
+        npcInfos.clear();
+        npcStates = Collections.emptyList();
+        if (state == State.HOSTING) outbox.add(npcResetMessage(npcLocation));
+    }
+
+    /** Host: a fleet in that system appeared or changed. */
+    public void hostNpcInfo(NpcInfo info) {
+        npcInfos.put(info.handle, info);
+        if (state == State.HOSTING) outbox.add(npcInfoMessage(npcLocation, info));
+    }
+
+    /** Host: a fleet left that system or is gone. */
+    public void hostNpcGone(int handle) {
+        npcInfos.remove(handle);
+        if (state != State.HOSTING) return;
+        ByteBuffer bb = Protocol.begin(Protocol.NPC_GONE, Protocol.stringSize(npcLocation) + 4);
+        Protocol.putString(bb, npcLocation);
+        bb.putInt(handle).flip();
+        outbox.add(bb);
+    }
+
+    /** Host: re-sends every fleet's details, in case a message crossed paths with a player joining. */
+    public void hostNpcResendAll() {
+        if (state != State.HOSTING) return;
+        for (NpcInfo i : npcInfos.values()) outbox.add(npcInfoMessage(npcLocation, i));
+    }
+
+    /** Host: where every published fleet is now. */
+    public void hostNpcStates(List<NpcState> states) {
+        npcStates = Collections.unmodifiableList(new ArrayList<NpcState>(states));
+    }
+
+    // ---- NPC fleets: client side
+
+    /** Client: the star system whose fleets the host is sending, or "". */
+    public String getNpcLocation() {
+        return npcLocation;
+    }
+
+    /** Client: the host's fleets in that system, by handle. */
+    public Map<Integer, NpcInfo> getNpcInfos() {
+        return Collections.unmodifiableMap(npcInfos);
+    }
+
+    /** Client: their latest positions, by handle. */
+    public Map<Integer, NpcState.Received> getNpcStates() {
+        return Collections.unmodifiableMap(npcReceived);
+    }
+
+    private static ByteBuffer npcResetMessage(String loc) {
+        ByteBuffer bb = Protocol.begin(Protocol.NPC_RESET, Protocol.stringSize(loc));
+        Protocol.putString(bb, loc);
+        bb.flip();
+        return bb;
+    }
+
+    private static ByteBuffer npcInfoMessage(String loc, NpcInfo info) {
+        ByteBuffer bb = Protocol.begin(Protocol.NPC_INFO, Protocol.stringSize(loc) + info.size());
+        Protocol.putString(bb, loc);
+        info.write(bb);
+        bb.flip();
+        return bb;
+    }
+
     /** A player's name from the player list, or "Someone". */
     public String playerName(int id) {
         for (Player p : players) if (p.id == id) return p.name;
@@ -230,6 +309,7 @@ public final class Session {
         clock.reset();
         comps.clear();
         outbox.clear();
+        clearNpc();
         this.port = port;
         remote = null;
         myId = HOST_ID;
@@ -342,6 +422,10 @@ public final class Session {
             for (Map.Entry<Integer, FleetComp> e : comps.entrySet()) {
                 if (e.getKey() != id) conn.send(compMessage(e.getKey(), e.getValue()));
             }
+            // And the NPC fleets in the host's system.
+            String npcLoc = npcLocation;
+            conn.send(npcResetMessage(npcLoc));
+            for (NpcInfo i : npcInfos.values()) conn.send(npcInfoMessage(npcLoc, i));
             notices.add(name + " joined (" + from + ")");
             if (clock.release(name, System.nanoTime())) {
                 notices.add(clock.isRunning() ? "Everyone's in, so the game carries on." : name + " is in.");
@@ -502,6 +586,7 @@ public final class Session {
                     }
                 }
             }
+            if (cu != null) sendNpcStates(cu);
             List<FleetState> all = new ArrayList<FleetState>();
             FleetState mine = localFleet;
             if (mine != null) {
@@ -518,6 +603,41 @@ public final class Session {
                 List<FleetState> others = new ArrayList<FleetState>();
                 for (FleetState s : all) if (s.playerId != e.getKey()) others.add(s);
                 sendWorldState(u, e.getValue(), others);
+            }
+        }
+    }
+
+    /** NPC fleet positions, only to the players who are in the host's star system. */
+    private void sendNpcStates(DatagramSocket u) {
+        String loc = npcLocation;
+        List<NpcState> states = npcStates;
+        if (loc.isEmpty() || states.isEmpty()) return;
+        List<SocketAddress> targets = new ArrayList<SocketAddress>();
+        for (Map.Entry<Integer, SocketAddress> e : udpAddresses.entrySet()) {
+            FleetState.Received r = remoteFleets.get(e.getKey());
+            if (r != null && loc.equals(r.state.location)) targets.add(e.getValue());
+        }
+        if (targets.isEmpty()) return;
+        int i = 0;
+        while (i < states.size()) {
+            ByteBuffer bb = ByteBuffer.allocate(NetConfig.MAX_DATAGRAM);
+            bb.putInt(NetConfig.MAGIC).putShort(NetConfig.PROTOCOL_VERSION).put(Protocol.NPC_STATE);
+            Protocol.putString(bb, loc);
+            int countPos = bb.position();
+            bb.putShort((short) 0);
+            short count = 0;
+            while (i < states.size() && bb.remaining() >= NpcState.SIZE) {
+                states.get(i++).write(bb);
+                count++;
+            }
+            if (count == 0) return; // a location id too long to leave room; never in practice
+            bb.putShort(countPos, count);
+            for (SocketAddress to : targets) {
+                try {
+                    u.send(new DatagramPacket(bb.array(), bb.position(), to));
+                } catch (IOException ignored) {
+                    // the next tick sends them again
+                }
             }
         }
     }
@@ -660,6 +780,22 @@ public final class Session {
                 } else if (type == Protocol.FLEET_COMP) {
                     int pid = msg.getInt();
                     comps.put(pid, FleetComp.read(msg));
+                } else if (type == Protocol.NPC_RESET) {
+                    String loc = Protocol.getString(msg);
+                    npcInfos.clear();
+                    npcReceived.clear();
+                    npcLocation = loc;
+                } else if (type == Protocol.NPC_INFO) {
+                    String loc = Protocol.getString(msg);
+                    NpcInfo info = NpcInfo.read(msg);
+                    if (loc.equals(npcLocation)) npcInfos.put(info.handle, info);
+                } else if (type == Protocol.NPC_GONE) {
+                    String loc = Protocol.getString(msg);
+                    int handle = msg.getInt();
+                    if (loc.equals(npcLocation)) {
+                        npcInfos.remove(handle);
+                        npcReceived.remove(handle);
+                    }
                 } else if (type == Protocol.BYE) {
                     endReason = "Host: " + Protocol.getString(msg);
                     break;
@@ -765,6 +901,16 @@ public final class Session {
                     if (old == null || cs.seq > old.state.seq || old.state.seq - cs.seq > 1000) {
                         remoteClock = new ClockState.Received(cs, System.nanoTime());
                     }
+                } else if (type == Protocol.NPC_STATE) {
+                    String loc = Protocol.getString(r);
+                    if (!loc.equals(npcLocation)) continue; // from before the host changed systems
+                    long arrived = System.nanoTime();
+                    int n = r.getShort();
+                    for (int i = 0; i < n; i++) {
+                        NpcState ns = NpcState.read(r);
+                        // Only fleets we have details for; a late packet mustn't bring back a gone one.
+                        if (npcInfos.containsKey(ns.handle)) npcReceived.put(ns.handle, new NpcState.Received(ns, arrived));
+                    }
                 } else if (type == Protocol.WORLD_STATE) {
                     long arrived = System.nanoTime();
                     int n = r.getShort();
@@ -813,6 +959,7 @@ public final class Session {
         outbox.clear();
         remoteClock = null;
         clock.reset();
+        clearNpc();
         SaveRequest pending;
         while ((pending = saveRequests.poll()) != null) pending.complete(false, "hosting stopped");
         pingMs = -1;
@@ -820,6 +967,13 @@ public final class Session {
         state = State.IDLE;
         lastError = error;
         status = newStatus;
+    }
+
+    private void clearNpc() {
+        npcLocation = "";
+        npcInfos.clear();
+        npcStates = Collections.emptyList();
+        npcReceived.clear();
     }
 
     private static void sendBye(Conn c, String reason) {

@@ -35,12 +35,15 @@ public final class FleetState {
     public String place = "";
     public short level;
     public int credits;
+    /** Id of the planet or station the player is docked at, or ""; dockX/dockY: their offset from it. */
+    public String dockedAt = "";
+    public float dockX, dockY;
 
     public static final String HYPERSPACE = "hyperspace";
 
     public int size() {
         return 4 + 4 + Protocol.stringSize(location) + 5 * 4 + Protocol.stringSize(name) + Protocol.stringSize(hull)
-                + 4 + 1 + Protocol.stringSize(place) + 2 + 4;
+                + 4 + 1 + Protocol.stringSize(place) + 2 + 4 + Protocol.stringSize(dockedAt) + 8;
     }
 
     public void write(ByteBuffer bb) {
@@ -53,6 +56,8 @@ public final class FleetState {
         bb.put(activity);
         Protocol.putString(bb, place);
         bb.putShort(level).putInt(credits);
+        Protocol.putString(bb, dockedAt);
+        bb.putFloat(dockX).putFloat(dockY);
     }
 
     public static FleetState read(ByteBuffer bb) {
@@ -72,6 +77,9 @@ public final class FleetState {
         s.place = Protocol.getString(bb);
         s.level = bb.getShort();
         s.credits = bb.getInt();
+        s.dockedAt = Protocol.getString(bb);
+        s.dockX = bb.getFloat();
+        s.dockY = bb.getFloat();
         return s;
     }
 
@@ -92,6 +100,9 @@ public final class FleetState {
         s.place = place;
         s.level = level;
         s.credits = credits;
+        s.dockedAt = dockedAt;
+        s.dockX = dockX;
+        s.dockY = dockY;
         return s;
     }
 

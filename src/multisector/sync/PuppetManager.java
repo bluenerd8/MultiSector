@@ -3,6 +3,7 @@ package multisector.sync;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
+import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.combat.ShipHullSpecAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
@@ -54,6 +55,9 @@ public final class PuppetManager {
         CampaignFleetAPI fleet;
         /** The hull list the puppet's ships were built from. */
         List<String> hulls;
+        /** What the player is docked at, looked up once per change. */
+        String dockId;
+        SectorEntityToken dock;
         String name;
     }
 
@@ -104,9 +108,19 @@ public final class PuppetManager {
                 f.setLocation(s.x, s.y);
             }
 
-            float ahead = Math.min((now - r.arrivedNanos) / 1e9f, MAX_PREDICT_SECONDS);
-            float tx = s.x + s.vx * ahead;
-            float ty = s.y + s.vy * ahead;
+            float tx, ty, vx = s.vx, vy = s.vy;
+            SectorEntityToken dock = dockOf(p, s, loc);
+            if (dock != null) {
+                // Docked: their game is paused in the dialog, but the planet keeps orbiting here.
+                tx = dock.getLocation().x + s.dockX;
+                ty = dock.getLocation().y + s.dockY;
+                vx = 0f;
+                vy = 0f;
+            } else {
+                float ahead = Math.min((now - r.arrivedNanos) / 1e9f, MAX_PREDICT_SECONDS);
+                tx = s.x + s.vx * ahead;
+                ty = s.y + s.vy * ahead;
+            }
             Vector2f pos = f.getLocation();
             float dx = tx - pos.x;
             float dy = ty - pos.y;
@@ -116,9 +130,19 @@ public final class PuppetManager {
                 float k = Math.min(1f, FOLLOW_RATE * frameDt);
                 f.setLocation(pos.x + dx * k, pos.y + dy * k);
             }
-            f.getVelocity().set(s.vx, s.vy);
+            f.getVelocity().set(vx, vy);
             f.setFacing(s.facing);
         }
+    }
+
+    /** The planet or station that player is docked at, in this game's copy of the world, or null. */
+    private static SectorEntityToken dockOf(Puppet p, FleetState s, LocationAPI loc) {
+        if (s.dockedAt == null || s.dockedAt.isEmpty()) return null;
+        if (!s.dockedAt.equals(p.dockId) || p.dock == null || p.dock.getContainingLocation() != loc) {
+            p.dockId = s.dockedAt;
+            p.dock = loc.getEntityById(s.dockedAt); // null if this copy doesn't have it (made after the save)
+        }
+        return p.dock;
     }
 
     private static Puppet spawn(FleetState s, List<String> hulls, LocationAPI loc) {
@@ -215,6 +239,7 @@ public final class PuppetManager {
     /** Forgets puppets from a previous save without touching the (already unloaded) world. */
     public static void forget() {
         puppets.clear();
+        Docking.forget(); // same moment: the remembered planet belonged to the old world
         lastFrameNanos = 0;
     }
 }

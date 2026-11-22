@@ -250,7 +250,7 @@ What layer 3 does *not* fix: if the save was behind, the friend's NPC fleets, ma
 - Positions: unchanged (`FLEET_STATE` / `WORLD_STATE`, 10 Hz UDP, dead-reckoned puppets).
 - Ships: each fleet's hull list (flagship first) goes over TCP as `FLEET_COMP`, only when it changes. The host relays it and sends everyone's to a new joiner. Position packets carry its hash, so a puppet rebuilds its ships when they buy, sell or lose one. Hulls a game doesn't have are skipped, and an unknown flagship gets a stand-in.
 
-### Next: NPC fleets and the rest of the world
+### Next: NPC fleets and the rest of the world (first part done: section 14)
 
 Each copy still simulates its own NPC fleets, with its own randomness, so after a join they drift: different patrols spawn, and fleets wander differently. The plan, in order:
 
@@ -260,3 +260,49 @@ Each copy still simulates its own NPC fleets, with its own randomness, so after 
 4. Later tiers from section 4: markets on open, faction relations on change, battle outcomes.
 
 Interacting with an NPC fleet on a friend's copy (talking to it, fighting it) is where this gets hard, because the host must resolve it. That comes after the position sync works.
+
+---
+
+## 14. Planets and NPC fleets
+
+### Planets
+
+Planets, stations, moons and asteroids exist identically in every copy, since they come from the save. Their orbits don't follow the date, though: each frame the game turns every orbit by that frame's time (`CircularOrbit.advance`). So whenever the clock sync jumps a game's date (catching up after a menu, or on joining), `ClockAccess` also turns every non-fleet orbit by the same game time. Every copy starts from the same angles in the save, so planets then sit in the same place on every player's game. Jumps under one game hour skip this pass.
+
+### How the game makes NPC fleets (why this is narrow)
+
+- `RouteManager` keeps most NPC traffic (patrols, traders, raiders) as abstract routes. It turns a route into a real fleet only within **1.6 ly of the local player's fleet** and removes it beyond 3-4 ly. Other managers (for example `DisposableFleetManager`) also spawn near the local player only.
+- So the host's game has no fleets at all around a friend who is somewhere else, and each copy rolls its own fleets around its own player.
+- A fleet spawned after the save gets a new random id on each copy. Only fleets that were already in the save share an id.
+
+### What syncs now: star systems shared with the host
+
+While a friend is in the **same star system as the host** (`NpcSync`):
+
+| | Host | Friend |
+|---|---|---|
+| Fleet details | `NPC_INFO` over TCP when a fleet appears or changes (id, faction, name, variant and hull per ship), `NPC_GONE` when it leaves, `NPC_RESET` when the host changes system. All re-sent every 15 s as a safety net. | Kept per handle |
+| Positions | `NPC_STATE` over UDP, 10 Hz, only to friends in that system | Glide toward them, predicted with the shared clock's speed |
+| Fleet in the save (same id) | - | The friend's own copy is steered: AI off, orbit detached, moved to the host's position. Restored afterwards. |
+| Host fleet the friend doesn't have | - | A stand-in fleet ("mirror") with the same faction, name and ships |
+| Friend's own extra fleets | - | Hidden: detected range x0 (the stat "Go Dark" lowers), AI off, held in place. Given back untouched afterwards, so routes and managers never notice. |
+
+Safety rules:
+- Nothing is saved. `beforeGameSave` releases everything; the next frame sets it up again.
+- Stations, player fleets and puppets are never touched, and a fleet in a battle is never hidden or taken over.
+- Host-driven fleets open a short note instead of the talk/fight dialog (`NpcInteractionGuard`), because the host can't resolve those interactions yet. In shared systems NPCs also leave friends alone: on the host, friends are puppets that NPCs ignore.
+- `syncNpcFleets: false` turns all of it off.
+
+### Not covered yet
+
+- **Hyperspace.** The host's fleets there only exist within a few ly of the host, so the shared area needs a distance rule rather than "same system". Next after this is tested.
+- **Systems the host isn't in.** Each friend's game still runs its own fleets there.
+- **Interacting** with host fleets (fights, trades, hails). Step 2: the friend fights on their own PC and the host applies the outcome.
+
+### Dialogs: the world keeps running
+
+Decision: a dialog (market, planet, hail, cargo or refit screen) pauses only the player who opened it. The shared clock keeps going, and their game catches up when they close it. Pausing everyone would stall the group most of the time, because Starsector opens a dialog for nearly everything.
+
+- **Docked at something that orbits** (planet, station): the player's position packets carry `dockedAt` (the entity id, the same in every copy) plus their offset from it. Other games draw that player's fleet riding along with the planet. When the dialog closes and the date catches up, `Docking.reattach` puts their own fleet back at the same offset after the orbit catch-up.
+- **Talking to a fleet:** if the host is the one talking, the host's whole game pauses, so every NPC fleet it sends freezes for everyone, and both sides stay put. Friends can't open host-driven fleets yet. Letting them would need the host to apply battle results; otherwise a fleet a friend destroyed would reappear. A per-fleet claim (freeze only that fleet, and tell a second player someone is already dealing with it) comes with battle results.
+- Known effect: while the host is in any dialog, all NPC fleets in the host's system stop for friends there, until the host closes it.

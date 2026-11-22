@@ -34,6 +34,13 @@ public final class Protocol {
     /** client -> host: FleetComp of my fleet. host -> clients: playerId(int), FleetComp. */
     public static final byte FLEET_COMP = 8;
 
+    /** host -> clients: locationId. "The NPC fleets I'm sending are now for this star system" ("" = none). */
+    public static final byte NPC_RESET = 9;
+    /** host -> clients: locationId, NpcInfo. A fleet appeared or changed. */
+    public static final byte NPC_INFO = 15;
+    /** host -> clients: locationId, handle. That fleet left the system or is gone. */
+    public static final byte NPC_GONE = 16;
+
     // TCP from the host's own launcher (loopback only) to the host's game
     /** launcher -> game: friendName. "A friend is about to download: save now (and hold the clock)." */
     public static final byte LOCAL_SAVE = 30;
@@ -85,6 +92,8 @@ public final class Protocol {
     public static final byte WORLD_STATE = 13;
     /** host -> client: ClockState, the shared campaign clock */
     public static final byte CLOCK = 14;
+    /** host -> client in the same star system: locationId, count(short), NpcStates */
+    public static final byte NPC_STATE = 17;
     /** offset of the type byte inside a packet, so the host can flip PING to PONG in place */
     public static final int TYPE_OFFSET = 6;
     /** header + seq(4) + sentNanos(8) */

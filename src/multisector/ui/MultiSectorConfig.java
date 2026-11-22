@@ -17,6 +17,7 @@ public final class MultiSectorConfig {
     private static int port = NetConfig.DEFAULT_PORT;
     private static boolean showHintOnLoad = true;
     private static boolean holdWhileJoining = true;
+    private static boolean syncNpcFleets = true;
     private static boolean showPlayersHud = true;
     private static int hudHotkey = Keyboard.KEY_F7;
     private static String hudHotkeyName = "F7";
@@ -44,6 +45,7 @@ public final class MultiSectorConfig {
             showHintOnLoad = json.optBoolean("showHintOnLoad", true);
             holdWhileJoining = json.optBoolean("holdWhileJoining", true);
 
+            syncNpcFleets = json.optBoolean("syncNpcFleets", true);
             showPlayersHud = json.optBoolean("showPlayersHud", true);
             String hk = json.optString("hudHotkey", "F7").trim().toUpperCase();
             int hidx = Keyboard.getKeyIndex(hk);
@@ -73,6 +75,8 @@ public final class MultiSectorConfig {
     public static boolean isShowHintOnLoad() { return showHintOnLoad; }
     /** Host: pause the shared world from a friend's download until they connect. */
     public static boolean isHoldWhileJoining() { return holdWhileJoining; }
+    /** In a star system shared with the host, show the host's NPC fleets instead of this game's own. */
+    public static boolean isSyncNpcFleets() { return syncNpcFleets; }
     /** Whether the players panel starts shown. */
     public static boolean isShowPlayersHud() { return showPlayersHud; }
     public static int getHudHotkey() { return hudHotkey; }

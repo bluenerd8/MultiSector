@@ -15,6 +15,12 @@
 	# game carries on by itself.
 	"holdWhileJoining":true,
 
+	# In a star system you share with the host, show the host's NPC fleets
+	# (patrols, traders, pirates) instead of your game's own. Each player's
+	# game still runs its own fleets everywhere else. Turn off if fleets
+	# behave strangely, and please report it.
+	"syncNpcFleets":true,
+
 	# The players panel on the campaign map: who's where and doing what.
 	# The hotkey shows or hides it; more detail is in the Multiplayer window.
 	"showPlayersHud":true,

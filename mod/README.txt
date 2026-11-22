@@ -52,7 +52,9 @@ PLAYING OVER HAMACHI
   - Fast-forward follows the host. Turn yours on when they do.
   - When you download, the host's game saves a fresh copy, and everyone
     waits (paused) until you're in. Unpause to stop waiting.
-  NPC fleets, markets and battles aren't synced yet.
+  - In a star system you share with the host, you see the host's NPC
+    fleets. You can't talk to or fight those yet.
+  Hyperspace fleets, markets and battles aren't synced yet.
 
   The players panel (top right of the map, F7 hides it) shows where the
   others are and what they're doing. F8 shows their fleet, level and
@@ -67,6 +69,7 @@ IF JOINING FAILS
 SETTINGS
   data\config\multisector.json : hotkey (default F8) and port (default 7777)
     holdWhileJoining: pause everyone while a friend joins (default on)
+    syncNpcFleets: show the host's NPC fleets in shared systems (default on)
     showPlayersHud, hudHotkey, hudCorner, hudOffsetX/Y: the players panel
 
 UNINSTALL

@@ -66,6 +66,12 @@ public class FleetSync implements EveryFrameScript {
         s.y = fleet.getLocation().y;
         s.facing = fleet.getFacing();
         activity(fleet, s);
+        SectorEntityToken dock = Docking.current();
+        if (dock != null && dock.getId() != null) {
+            s.dockedAt = dock.getId();
+            s.dockX = s.x - dock.getLocation().x;
+            s.dockY = s.y - dock.getLocation().y;
+        }
         s.level = (short) Math.min(Short.MAX_VALUE, Global.getSector().getPlayerStats().getLevel());
         s.credits = (int) Math.min(Integer.MAX_VALUE, fleet.getCargo().getCredits().get());
         FleetMemberAPI flag = fleet.getFlagship();

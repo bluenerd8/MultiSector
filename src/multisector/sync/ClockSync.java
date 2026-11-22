@@ -70,6 +70,7 @@ public class ClockSync implements EveryFrameScript {
     public void advance(float amount) {
         Session session = Session.get();
         Session.State state = session.getState();
+        if (state != Session.State.IDLE) Docking.track(); // before any catch-up below moves the planets
         if (state != lastState) {
             lastState = state;
             resetFriendState();

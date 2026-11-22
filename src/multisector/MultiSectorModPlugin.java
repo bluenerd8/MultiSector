@@ -10,6 +10,8 @@ import multisector.probe.SandboxProbe;
 import multisector.sync.ClockSync;
 import multisector.sync.FleetSync;
 import multisector.sync.HostSaver;
+import multisector.sync.NpcInteractionGuard;
+import multisector.sync.NpcSync;
 import multisector.sync.PuppetManager;
 import multisector.ui.AutoConnect;
 import multisector.ui.MultiSectorConfig;
@@ -54,6 +56,12 @@ public class MultiSectorModPlugin extends BaseModPlugin {
         Global.getSector().getListenerManager().addListener(new HostSaver(), true);
         Global.getSector().getListenerManager().addListener(new PlayersHud(), true);
         PlayerInfo.forget(); // location names belonged to the previous world
+        NpcSync.forget();
+        Global.getSector().addTransientScript(new NpcSync());
+        // Transient plugins aren't saved, but unregister first in case this sector already has one.
+        NpcInteractionGuard guard = new NpcInteractionGuard();
+        Global.getSector().unregisterPlugin(guard.getId());
+        Global.getSector().registerPlugin(guard);
         try {
             ensureAbilityOnBar();
         } catch (Exception e) {
@@ -66,10 +74,15 @@ public class MultiSectorModPlugin extends BaseModPlugin {
         }
     }
 
-    /** Other players' puppet fleets must never be written into the save; FleetSync re-adds them next frame. */
+    /**
+     * Nothing of ours may be written into the save: other players' puppet
+     * fleets, the host's mirrored NPC fleets, and the hidden/steered state
+     * of this game's own fleets. All of it is set up again next frame.
+     */
     @Override
     public void beforeGameSave() {
         PuppetManager.removeAll();
+        NpcSync.releaseForSave();
     }
 
     /** Gives the player the Multiplayer ability and puts it in the first free ability-bar slot. */
