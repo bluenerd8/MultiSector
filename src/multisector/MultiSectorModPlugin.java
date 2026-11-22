@@ -7,12 +7,16 @@ import com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotAPI;
 import com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotsAPI;
 import multisector.net.AddressFinder;
 import multisector.probe.SandboxProbe;
+import multisector.sync.ClockSync;
 import multisector.sync.FleetSync;
+import multisector.sync.HostSaver;
 import multisector.sync.PuppetManager;
 import multisector.ui.AutoConnect;
 import multisector.ui.MultiSectorConfig;
 import multisector.ui.MultiplayerAbility;
 import multisector.ui.MultiplayerHotkey;
+import multisector.ui.PlayerInfo;
+import multisector.ui.PlayersHud;
 import multisector.ui.SessionNoticeScript;
 import org.apache.log4j.Logger;
 
@@ -46,6 +50,10 @@ public class MultiSectorModPlugin extends BaseModPlugin {
         Global.getSector().getListenerManager().addListener(new MultiplayerHotkey(), true);
         Global.getSector().addTransientScript(new SessionNoticeScript(MultiSectorConfig.isShowHintOnLoad()));
         Global.getSector().addTransientScript(new FleetSync());
+        Global.getSector().addTransientScript(new ClockSync());
+        Global.getSector().getListenerManager().addListener(new HostSaver(), true);
+        Global.getSector().getListenerManager().addListener(new PlayersHud(), true);
+        PlayerInfo.forget(); // location names belonged to the previous world
         try {
             ensureAbilityOnBar();
         } catch (Exception e) {

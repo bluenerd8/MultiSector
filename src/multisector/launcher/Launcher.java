@@ -366,7 +366,7 @@ public final class Launcher {
         downloadButton.setEnabled(false);
         checkButton.setEnabled(false);
         progress.setValue(0);
-        progress.setString("Starting...");
+        progress.setString("Waiting for the host to save a fresh copy...");
         log("Downloading " + info.hostName + "'s save...");
         background(new Runnable() {
             public void run() {
@@ -392,7 +392,7 @@ public final class Launcher {
                     final String label = labelDownload(result.folder, info.hostName);
                     String[] hp = LobbyClient.splitAddress(info.address);
                     writeSession("join", hp[0], info.gamePort, name, info.characterName,
-                            GameInstall.readSeed(result.folder), info.zipHash);
+                            GameInstall.readSeed(result.folder), result.zipHash);
                     ui(new Runnable() {
                         public void run() {
                             progress.setValue(1000);
@@ -404,8 +404,8 @@ public final class Launcher {
                             } else {
                                 progress.setString("Done");
                                 log(String.format(Locale.ROOT, "Downloaded %s in %.1f s (%s) over %s.",
-                                        GameInstall.megabytes(info.zipBytes), elapsed / 1000.0,
-                                        speed(info.zipBytes, elapsed), LobbyClient.lastMethod));
+                                        GameInstall.megabytes(result.zipBytes), elapsed / 1000.0,
+                                        speed(result.zipBytes, elapsed), LobbyClient.lastMethod));
                             }
                             log("In the game's Load list it's \"" + label + "\". Click Launch Starsector, then "
                                     + "Continue (or Load it).");

@@ -2,7 +2,22 @@
 
 Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), aimed at small friend groups (2–8 players). One player hosts and runs the real game; everyone else connects to them.
 
-> **Status: early prototype.** Players can host and join from inside the game and see each other in a player list with ping. Game state isn't synced yet, so everyone still plays their own campaign.
+> **Status: early prototype.** Players share the host's world. Everyone sees the other players' fleets (with all their ships) on the map. Everyone stays on the host's date, pause is shared, and fast-forward follows the host. NPC fleets, markets and battles aren't synced yet, so each copy of the world still runs those on its own.
+
+## Time and pause
+
+- **Pause** on the map pauses everyone, and anyone can resume. Your own menus, markets and dialogs only pause your game. The shared clock keeps going, and your date catches up when you close them.
+- **Fast-forward** follows the host. When the host fast-forwards, turn yours on too. Yours does nothing while the host isn't.
+- **Joining:** when you click Download, the host's game saves a fresh copy for you. By default everyone waits, paused, until you're in the game, so you start in exactly the world you downloaded. The host (or anyone) can unpause to stop waiting. Turn this off with `holdWhileJoining` in `data/config/multisector.json`.
+- If your save is older or newer than the host's world, your date is set to the host's when you connect.
+
+## Seeing the other players
+
+- A **players panel** in the top-right of the campaign map lists everyone else: where they are, what they're doing (travelling, at a market, in the refit screen, fighting a fleet), and ping. **F7** hides or shows it.
+- The **Multiplayer window (F8)** shows more for each player: distance from you, fleet size and flagship, level and credits.
+- Move or turn off the panel with `showPlayersHud`, `hudHotkey`, `hudCorner`, `hudOffsetX` and `hudOffsetY` in `data/config/multisector.json`.
+
+How time sync works: [docs/design.md, section 13](docs/design.md#13-shared-time-pause-and-joining).
 
 ## Download
 

@@ -192,6 +192,9 @@ final class LobbyServer {
             if (hello == null || Protocol.readHeader(hello, null) != Protocol.LOBBY_HELLO) return;
             String name = Protocol.cleanName(Protocol.getString(hello));
             who = name;
+            if (hello.remaining() >= 2) Protocol.getString(hello); // their build (checked on their side)
+            byte purpose = hello.remaining() >= 1 ? hello.get() : Protocol.HELLO_FOR_CHECK;
+            if (purpose == Protocol.HELLO_FOR_DOWNLOAD) freshSave(name);
 
             Snapshot snap = ensureBlob();
             Frames.write(c.getOutputStream(), info(snap));
@@ -234,6 +237,74 @@ final class LobbyServer {
                 c.close();
             } catch (IOException ignored) {
             }
+        }
+    }
+
+    /**
+     * Before a friend downloads: ask this PC's game to save now, so they get
+     * the world as it is rather than as it was at the last save, then wait
+     * for the files to settle. If the game isn't hosting, or can't save,
+     * they get the last save, and the shared clock catches them up anyway.
+     * One at a time, so two friends joining together don't save twice at once.
+     */
+    private void freshSave(String friend) {
+        // Not the object's own lock: ensureBlob uses that, and other friends'
+        // downloads must keep going while this waits.
+        synchronized (saveLock) {
+            freshSaveLocked(friend);
+        }
+    }
+
+    private final Object saveLock = new Object();
+
+    private void freshSaveLocked(String friend) {
+        long before;
+        try {
+            before = stamp(saveFiles());
+        } catch (IOException e) {
+            return;
+        }
+        listener.log(friend + " wants to download. Asking the game for a fresh save...");
+        GameLink.Result r = GameLink.requestSave(gamePort, friend);
+        if (!r.saved) {
+            listener.log("Sharing the last save instead: " + r.message + ".");
+            return;
+        }
+        // The game may still be writing. Wait for the files to change, then to stop changing.
+        long deadline = System.currentTimeMillis() + 30000;
+        long last = before;
+        long stableSince = 0;
+        while (System.currentTimeMillis() < deadline) {
+            sleepQuietly(250);
+            long now;
+            try {
+                now = stamp(saveFiles());
+            } catch (IOException e) {
+                continue; // mid-write
+            }
+            if (now != last) {
+                last = now;
+                stableSince = System.currentTimeMillis();
+            } else if (now != before && System.currentTimeMillis() - stableSince >= 1500) {
+                listener.log("Fresh save ready.");
+                return;
+            }
+        }
+        listener.log(last == before ? "The game said it saved, but the files didn't change; sharing them as they are."
+                : "The save is still changing after 30 s; sharing it as it is now.");
+    }
+
+    private static long stamp(File[] files) {
+        long stamp = 0;
+        for (File f : files) stamp = Math.max(stamp, f.lastModified()) * 31 + f.length();
+        return stamp;
+    }
+
+    private static void sleepQuietly(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 

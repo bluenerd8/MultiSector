@@ -59,10 +59,15 @@ final class LobbyClient {
     static final class Result {
         final File folder;
         final boolean skipped;
+        /** The save actually downloaded (the host saves a fresh copy for each download). */
+        final String zipHash;
+        final long zipBytes;
 
-        Result(File folder, boolean skipped) {
+        Result(File folder, boolean skipped, String zipHash, long zipBytes) {
             this.folder = folder;
             this.skipped = skipped;
+            this.zipHash = zipHash;
+            this.zipBytes = zipBytes;
         }
     }
 
@@ -102,7 +107,7 @@ final class LobbyClient {
     static Info fetchInfo(String address, String myName) throws IOException {
         Socket s = connect(address);
         try {
-            return hello(s, address, myName);
+            return hello(s, address, myName, Protocol.HELLO_FOR_CHECK);
         } finally {
             s.close();
         }
@@ -118,14 +123,14 @@ final class LobbyClient {
         final List<Socket> sockets = new ArrayList<Socket>();
         sockets.add(first);
         try {
-            final Info info = hello(first, address, myName);
+            final Info info = hello(first, address, myName, Protocol.HELLO_FOR_DOWNLOAD);
             String folderName = SAVE_PREFIX + safeName(info.hostName);
             File target = new File(game.saves, folderName);
 
             if (target.isDirectory() && info.zipHash.equals(downloadedHash(game, folderName))) {
                 GameInstall.touchSaveDate(target);
                 progress.update(info.zipBytes, info.zipBytes);
-                return new Result(target, true);
+                return new Result(target, true, info.zipHash, info.zipBytes);
             }
 
             final long total = info.zipBytes;
@@ -161,7 +166,7 @@ final class LobbyClient {
             moveIntoPlace(partial, target);
             GameInstall.touchSaveDate(target);
             rememberDownload(game, folderName, info.zipHash);
-            return new Result(target, false);
+            return new Result(target, false, info.zipHash, info.zipBytes);
         } finally {
             synchronized (sockets) {
                 for (Socket s : sockets) closeQuietly(s);
@@ -200,7 +205,7 @@ final class LobbyClient {
                             synchronized (sockets) {
                                 sockets.add(s);
                             }
-                            hello(s, addr, me);
+                            hello(s, addr, me, Protocol.HELLO_FOR_EXTRA);
                         }
                         fetchRange(s, info.zipHash, off, len, data, done, progress, total);
                     } catch (IOException e) {
@@ -348,13 +353,16 @@ final class LobbyClient {
         }
     }
 
-    private static Info hello(Socket s, String address, String myName) throws IOException {
+    private static Info hello(Socket s, String address, String myName, byte purpose) throws IOException {
         ByteBuffer hello = Protocol.begin(Protocol.LOBBY_HELLO,
-                Protocol.stringSize(myName) + Protocol.stringSize(BuildInfo.VERSION));
+                Protocol.stringSize(myName) + Protocol.stringSize(BuildInfo.VERSION) + 1);
         Protocol.putString(hello, myName);
         Protocol.putString(hello, BuildInfo.VERSION);
+        hello.put(purpose);
         hello.flip();
         Frames.write(s.getOutputStream(), hello);
+        // A download first waits for the host's game to save a fresh copy.
+        if (purpose == Protocol.HELLO_FOR_DOWNLOAD) s.setSoTimeout(90000);
         ByteBuffer bb = Frames.read(s.getInputStream());
         short[] ver = new short[1];
         if (bb == null) throw new IOException("The host closed the connection. Their launcher may be a different MultiSector version.");

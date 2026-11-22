@@ -203,7 +203,7 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate implements Dialo
         Color good = Misc.getPositiveHighlightColor();
         float pad = 10f;
 
-        TooltipMakerAPI t = panel.createUIElement(WIDTH, HEIGHT, false);
+        TooltipMakerAPI t = panel.createUIElement(WIDTH, HEIGHT, true);
 
         // Status
         t.addSectionHeading("Status", Alignment.MID, 0f);
@@ -266,8 +266,9 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate implements Dialo
                 + "Colonies, reputation and story progress stay in this save.", gray, 8f);
         t.addButton("Export character", BTN_EXPORT, BUTTON_W, BUTTON_H, pad);
 
-        t.addPara("MultiSector %s. Shortcut: %s. Fleets are visible to each other; more sync comes next.", 18f,
-                gray, Misc.getHighlightColor(), BuildInfo.VERSION, MultiSectorConfig.getHotkeyName());
+        t.addPara("MultiSector %s. Shortcut: %s. The players panel on the map: %s.", 18f,
+                gray, Misc.getHighlightColor(), BuildInfo.VERSION, MultiSectorConfig.getHotkeyName(),
+                MultiSectorConfig.getHudHotkeyName());
 
         panel.addUIElement(t).inTL(0f, 0f);
         content = t;
@@ -294,12 +295,22 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate implements Dialo
         List<Session.Player> players = s.getPlayers();
         if (players.isEmpty()) return "Nobody yet. Host a game or join one.";
         StringBuilder sb = new StringBuilder();
-        for (Session.Player p : players) {
-            if (sb.length() > 0) sb.append('\n');
+        for (PlayerInfo p : PlayerInfo.all(true)) {
+            if (sb.length() > 0) sb.append("\n\n");
             sb.append(p.name);
             if (p.isHost) sb.append("  [host]");
-            if (p.id == s.getMyId()) sb.append("  (you)");
-            if (!p.isHost) sb.append("  -  ").append(p.pingMs >= 0 ? p.pingMs + " ms" : "...");
+            if (p.isMe) sb.append("  (you)");
+            if (!p.isHost && p.pingMs >= 0) sb.append("  -  ").append(p.pingMs).append(" ms");
+            if (p.isMe) continue;
+            // Where and what
+            sb.append("\n    ").append(p.where);
+            if (!p.distance.isEmpty()) sb.append(", ").append(p.distance);
+            if (!p.doing.isEmpty()) sb.append("  -  ").append(p.doing);
+            // Fleet and character
+            if (!p.flagship.isEmpty()) {
+                sb.append("\n    ").append(p.fleetText()).append("  -  level ").append(p.level)
+                        .append("  -  ").append(Misc.getWithDGS(p.credits)).append(" credits");
+            }
         }
         return sb.toString();
     }

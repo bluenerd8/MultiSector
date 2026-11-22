@@ -22,11 +22,13 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * The one multiplayer session for this game instance: idle, hosting, or
- * joined to a host. Right now it handles connecting, the player list and
- * ping. Game-state sync comes later and builds on top of this.
+ * joined to a host. It handles connecting, the player list, ping, fleet
+ * positions and ships, and the shared campaign clock (pause, speed, date).
  *
  * Networking runs on background threads. The game thread only reads the
  * volatile fields and drains {@link #pollNotice()}, so nothing here blocks
@@ -99,6 +101,24 @@ public final class Session {
     private static final int SYNC_INTERVAL_MS = 100;
     private int hostSeq;
 
+    // ---- shared clock
+    /** Host: the clock everyone follows. */
+    private final SharedClock clock = new SharedClock();
+    /** Client: the host's clock as last received. */
+    private volatile ClockState.Received remoteClock;
+
+    // ---- fleet ships (both sides)
+    private volatile FleetComp localComp;
+    /** Other players' ships, by player id. */
+    private final ConcurrentHashMap<Integer, FleetComp> comps = new ConcurrentHashMap<Integer, FleetComp>();
+    /** TCP messages from the game thread. Client: sent to the host. Host: sent to every client. */
+    private final ConcurrentLinkedQueue<ByteBuffer> outbox = new ConcurrentLinkedQueue<ByteBuffer>();
+
+    // ---- host: the host's own launcher asking for a fresh save
+    private final ConcurrentLinkedQueue<SaveRequest> saveRequests = new ConcurrentLinkedQueue<SaveRequest>();
+    /** How long the launcher waits for the game to save. */
+    private static final int SAVE_WAIT_MS = 20000;
+
     private Session() {
     }
 
@@ -125,6 +145,52 @@ public final class Session {
     /** Other players' latest fleet positions, by player id. Read by the game thread. */
     public Map<Integer, FleetState.Received> getRemoteFleets() {
         return Collections.unmodifiableMap(remoteFleets);
+    }
+
+    /** Host: the shared campaign clock. */
+    public SharedClock getSharedClock() {
+        return clock;
+    }
+
+    /** Client: the host's clock as last received, or null before the first one arrives. */
+    public ClockState.Received getRemoteClock() {
+        return remoteClock;
+    }
+
+    /** Client: ask the host to pause or resume the game for everyone. */
+    public void requestPause(boolean paused) {
+        if (state != State.CONNECTED) return;
+        ByteBuffer bb = Protocol.begin(Protocol.PAUSE_REQUEST, 1);
+        bb.put((byte) (paused ? 1 : 0)).flip();
+        outbox.add(bb);
+    }
+
+    /** The game thread reports which ships this player's fleet has. Sent only when it changes. */
+    public void setLocalComposition(FleetComp c) {
+        FleetComp old = localComp;
+        if (old != null && old.hash == c.hash) return;
+        localComp = c;
+        if (state == State.HOSTING || state == State.CONNECTED) outbox.add(compMessage(myId, c));
+    }
+
+    /** Another player's ships, or null if they haven't arrived yet. */
+    public FleetComp getComposition(int playerId) {
+        return comps.get(playerId);
+    }
+
+    /** A player's name from the player list, or "Someone". */
+    public String playerName(int id) {
+        for (Player p : players) if (p.id == id) return p.name;
+        return "Someone";
+    }
+
+    /** Host: next fresh-save request from the launcher, for the game thread to carry out. */
+    public SaveRequest pollSaveRequest() {
+        SaveRequest r;
+        while ((r = saveRequests.poll()) != null) {
+            if (!r.isExpired()) return r;
+        }
+        return null;
     }
 
     /** Queues a message for the game to show, next to the session's own ones. */
@@ -161,6 +227,9 @@ public final class Session {
         hostUdp = u;
         nextId = 1;
         conns.clear();
+        clock.reset();
+        comps.clear();
+        outbox.clear();
         this.port = port;
         remote = null;
         myId = HOST_ID;
@@ -234,7 +303,12 @@ public final class Session {
             ByteBuffer hello = Frames.read(s.getInputStream());
             if (hello == null) return;
             short[] ver = new short[1];
-            if (Protocol.readHeader(hello, ver) != Protocol.HELLO) return; // not us: drop silently
+            int first = Protocol.readHeader(hello, ver);
+            if (first == Protocol.LOCAL_SAVE && ver[0] == NetConfig.PROTOCOL_VERSION) {
+                localSave(s, hello);
+                return;
+            }
+            if (first != Protocol.HELLO) return; // not us: drop silently
             String name = Protocol.cleanName(hello.remaining() >= 2 ? Protocol.getString(hello) : "Player");
             String theirBuild = ver[0] == NetConfig.PROTOCOL_VERSION && hello.remaining() >= 2
                     ? Protocol.getString(hello) : "an older build";
@@ -262,7 +336,16 @@ public final class Session {
             Protocol.putString(welcome, localName);
             welcome.flip();
             conn.send(welcome);
+            // Everyone's ships so far, so their puppets look right straight away.
+            FleetComp mine = localComp;
+            if (mine != null) conn.send(compMessage(HOST_ID, mine));
+            for (Map.Entry<Integer, FleetComp> e : comps.entrySet()) {
+                if (e.getKey() != id) conn.send(compMessage(e.getKey(), e.getValue()));
+            }
             notices.add(name + " joined (" + from + ")");
+            if (clock.release(name, System.nanoTime())) {
+                notices.add(clock.isRunning() ? "Everyone's in, so the game carries on." : name + " is in.");
+            }
             refreshHostPlayers();
             broadcastPlayers();
 
@@ -273,6 +356,26 @@ public final class Session {
                 int type = Protocol.readHeader(msg, null);
                 if (type == Protocol.PING_REPORT && msg.remaining() >= 4) {
                     conn.pingMs = msg.getInt();
+                } else if (type == Protocol.PAUSE_REQUEST && msg.remaining() >= 1) {
+                    boolean p = msg.get() != 0;
+                    boolean waited = clock.isHeld();
+                    if (clock.setPaused(p, conn.id, System.nanoTime())) {
+                        notices.add(conn.name + (p ? " paused the game." : waited
+                                ? " resumed the game, so it stopped waiting for joining players." : " resumed the game."));
+                    }
+                } else if (type == Protocol.FLEET_COMP) {
+                    msg.getInt(); // the sender's id: we already know who they are
+                    FleetComp c = FleetComp.read(msg);
+                    comps.put(conn.id, c);
+                    ByteBuffer relay = compMessage(conn.id, c);
+                    for (Conn other : conns) {
+                        if (other == conn) continue;
+                        try {
+                            other.send(relay.duplicate());
+                        } catch (IOException e) {
+                            closeQuietly(other.socket);
+                        }
+                    }
                 } else if (type == Protocol.BYE) {
                     break;
                 }
@@ -286,6 +389,7 @@ public final class Session {
             if (conn != null) {
                 remoteFleets.remove(conn.id);
                 udpAddresses.remove(conn.id);
+                comps.remove(conn.id);
             }
             if (conn != null && conns.remove(conn) && alive(gen)) {
                 notices.add(conn.name + " left");
@@ -293,6 +397,34 @@ public final class Session {
                 broadcastPlayers();
             }
         }
+    }
+
+    /**
+     * The host's own launcher: a friend is about to download the save. The
+     * game thread saves a fresh copy (and may hold the clock until they
+     * join); we answer when it's done so the launcher shares the new file.
+     */
+    private void localSave(Socket s, ByteBuffer msg) throws IOException {
+        if (!s.getInetAddress().isLoopbackAddress()) return; // only this PC's launcher
+        String friend = Protocol.cleanName(msg.remaining() >= 2 ? Protocol.getString(msg) : "A friend");
+        SaveRequest r = new SaveRequest(friend, System.nanoTime() + SAVE_WAIT_MS * 1000000L);
+        saveRequests.add(r);
+        boolean answered = r.await(SAVE_WAIT_MS);
+        boolean ok = answered && r.ok;
+        String text = answered ? r.message : "the game didn't get to it in time (is it in a battle?)";
+        ByteBuffer bb = Protocol.begin(Protocol.LOCAL_SAVE_DONE, 1 + Protocol.stringSize(text));
+        bb.put((byte) (ok ? 1 : 0));
+        Protocol.putString(bb, text);
+        bb.flip();
+        Frames.write(s.getOutputStream(), bb);
+    }
+
+    private static ByteBuffer compMessage(int playerId, FleetComp c) {
+        ByteBuffer bb = Protocol.begin(Protocol.FLEET_COMP, 4 + c.size());
+        bb.putInt(playerId);
+        c.write(bb);
+        bb.flip();
+        return bb;
     }
 
     private void reject(Socket s, String reason) {
@@ -347,6 +479,29 @@ public final class Session {
         while (alive(gen)) {
             sleep(SYNC_INTERVAL_MS);
             if (!alive(gen)) return;
+            ByteBuffer out;
+            while ((out = outbox.poll()) != null) {
+                for (Conn c : conns) {
+                    try {
+                        c.send(out.duplicate());
+                    } catch (IOException e) {
+                        closeQuietly(c.socket); // its reader thread cleans up
+                    }
+                }
+            }
+            DatagramSocket cu = hostUdp;
+            if (cu != null && clock.isStarted()) {
+                ClockState cs = clock.snapshot(System.nanoTime());
+                ByteBuffer cb = Protocol.begin(Protocol.CLOCK, cs.size());
+                cs.write(cb);
+                for (SocketAddress to : udpAddresses.values()) {
+                    try {
+                        cu.send(new DatagramPacket(cb.array(), cb.position(), to));
+                    } catch (IOException ignored) {
+                        // the next tick sends it again
+                    }
+                }
+            }
             List<FleetState> all = new ArrayList<FleetState>();
             FleetState mine = localFleet;
             if (mine != null) {
@@ -485,6 +640,8 @@ public final class Session {
                 status = "Connected to " + hostName + " (" + host + ")";
             }
             notices.add("Connected to " + hostName);
+            FleetComp mine = localComp;
+            if (mine != null) outbox.add(compMessage(id, mine));
             final InetSocketAddress udpTarget = target;
             udp.setSoTimeout(1000);
             startThread("MultiSector-send", new Runnable() { public void run() { clientSendLoop(gen, udpTarget); } });
@@ -500,6 +657,9 @@ public final class Session {
                 type = Protocol.readHeader(msg, null);
                 if (type == Protocol.PLAYER_LIST) {
                     players = readPlayerList(msg);
+                } else if (type == Protocol.FLEET_COMP) {
+                    int pid = msg.getInt();
+                    comps.put(pid, FleetComp.read(msg));
                 } else if (type == Protocol.BYE) {
                     endReason = "Host: " + Protocol.getString(msg);
                     break;
@@ -552,6 +712,9 @@ public final class Session {
         while (alive(gen)) {
             long now = System.nanoTime();
             try {
+                Conn host = toHost;
+                ByteBuffer queued;
+                while (host != null && (queued = outbox.poll()) != null) host.send(queued);
                 FleetState mine = localFleet;
                 if (mine != null && myId >= 0) {
                     FleetState s = mine.copy();
@@ -596,6 +759,12 @@ public final class Session {
                 if (type == Protocol.PONG && p.getLength() >= Protocol.PING_SIZE) {
                     r.getInt(); // seq
                     pingMs = (int) ((System.nanoTime() - r.getLong()) / 1000000L);
+                } else if (type == Protocol.CLOCK) {
+                    ClockState cs = ClockState.read(r);
+                    ClockState.Received old = remoteClock;
+                    if (old == null || cs.seq > old.state.seq || old.state.seq - cs.seq > 1000) {
+                        remoteClock = new ClockState.Received(cs, System.nanoTime());
+                    }
                 } else if (type == Protocol.WORLD_STATE) {
                     long arrived = System.nanoTime();
                     int n = r.getShort();
@@ -640,6 +809,12 @@ public final class Session {
         players = Collections.emptyList();
         remoteFleets.clear();
         udpAddresses.clear();
+        comps.clear();
+        outbox.clear();
+        remoteClock = null;
+        clock.reset();
+        SaveRequest pending;
+        while ((pending = saveRequests.poll()) != null) pending.complete(false, "hosting stopped");
         pingMs = -1;
         myId = -1;
         state = State.IDLE;
@@ -706,6 +881,43 @@ public final class Session {
 
         synchronized void send(ByteBuffer msg) throws IOException {
             Frames.write(socket.getOutputStream(), msg);
+        }
+    }
+
+    /**
+     * The launcher asking the host's game to save before a friend downloads.
+     * The game thread calls {@link #complete} once it has saved (or can't).
+     */
+    public static final class SaveRequest {
+        public final String friend;
+        private final long deadlineNanos;
+        private final CountDownLatch done = new CountDownLatch(1);
+        private volatile boolean ok;
+        private volatile String message = "";
+
+        SaveRequest(String friend, long deadlineNanos) {
+            this.friend = friend;
+            this.deadlineNanos = deadlineNanos;
+        }
+
+        /** The launcher stopped waiting: too late to be useful. */
+        public boolean isExpired() {
+            return System.nanoTime() - deadlineNanos > 0;
+        }
+
+        public void complete(boolean saved, String text) {
+            ok = saved;
+            message = text == null ? "" : text;
+            done.countDown();
+        }
+
+        boolean await(long ms) {
+            try {
+                return done.await(ms, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
         }
     }
 

@@ -44,8 +44,19 @@ PLAYING OVER HAMACHI
   In the game, F8 (or the Multiplayer button on the ability bar) shows
   the connection and players, and lets you host or join by hand.
 
-  Right now everyone loads the same world and sees each other connected
-  with ping. Fleets and events aren't synced live yet.
+  Everyone plays in the host's world, sees the other players' fleets on
+  the map, and stays on the host's date:
+  - Pause on the map pauses everyone. Anyone can unpause.
+  - Your own menus and markets only pause your game; your date catches
+    up when you close them.
+  - Fast-forward follows the host. Turn yours on when they do.
+  - When you download, the host's game saves a fresh copy, and everyone
+    waits (paused) until you're in. Unpause to stop waiting.
+  NPC fleets, markets and battles aren't synced yet.
+
+  The players panel (top right of the map, F7 hides it) shows where the
+  others are and what they're doing. F8 shows their fleet, level and
+  credits too.
 
 IF JOINING FAILS
   Double-click  tools\connection-test.cmd  on both PCs. The host presses
@@ -55,6 +66,8 @@ IF JOINING FAILS
 
 SETTINGS
   data\config\multisector.json : hotkey (default F8) and port (default 7777)
+    holdWhileJoining: pause everyone while a friend joins (default on)
+    showPlayersHud, hudHotkey, hudCorner, hudOffsetX/Y: the players panel
 
 UNINSTALL
   Saves made with the mod contain its Multiplayer button. Back up saves

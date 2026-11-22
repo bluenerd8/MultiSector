@@ -10,17 +10,21 @@ import com.fs.starfarer.api.fleet.FleetMemberType;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.loading.VariantSource;
+import com.fs.starfarer.api.campaign.FleetDataAPI;
+import multisector.net.FleetComp;
 import multisector.net.FleetState;
+import multisector.net.Session;
 import org.lwjgl.util.vector.Vector2f;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Shows other players as "puppet" fleets on the campaign map: a stand-in
- * fleet with their flagship, moved to wherever their real fleet is.
+ * fleet with their ships (flagship first), moved to wherever their real fleet is.
  *
  * Puppets are display only. They never fight or get chased, other fleets
  * ignore them, and they're removed before every save so they never end up
@@ -48,7 +52,8 @@ public final class PuppetManager {
 
     private static final class Puppet {
         CampaignFleetAPI fleet;
-        String hull;
+        /** The hull list the puppet's ships were built from. */
+        List<String> hulls;
         String name;
     }
 
@@ -56,7 +61,8 @@ public final class PuppetManager {
     }
 
     /** Called every frame with the latest remote states. */
-    static void update(Map<Integer, FleetState.Received> remote) {
+    static void update(Session session) {
+        Map<Integer, FleetState.Received> remote = session.getRemoteFleets();
         long now = System.nanoTime();
         float frameDt = lastFrameNanos == 0 ? 0f : Math.min((now - lastFrameNanos) / 1e9f, 0.25f);
         lastFrameNanos = now;
@@ -77,14 +83,18 @@ public final class PuppetManager {
             if (loc == null) continue; // a place this copy of the world doesn't have
 
             Puppet p = puppets.get(e.getKey());
-            if (p != null && (!s.hull.equals(p.hull) || !s.name.equals(p.name))) {
-                remove(e.getKey()); // flagship or name changed: rebuild
+            List<String> hulls = hullsFor(s, session.getComposition(e.getKey()));
+            if (p != null && !s.name.equals(p.name)) {
+                remove(e.getKey()); // renamed: rebuild
                 p = null;
             }
             if (p == null) {
-                p = spawn(s, loc);
+                p = spawn(s, hulls, loc);
                 if (p == null) continue;
                 puppets.put(e.getKey(), p);
+            } else if (!hulls.equals(p.hulls)) {
+                fill(p.fleet, hulls); // ships bought, sold or lost
+                p.hulls = hulls;
             }
 
             CampaignFleetAPI f = p.fleet;
@@ -111,12 +121,9 @@ public final class PuppetManager {
         }
     }
 
-    private static Puppet spawn(FleetState s, LocationAPI loc) {
+    private static Puppet spawn(FleetState s, List<String> hulls, LocationAPI loc) {
         CampaignFleetAPI f = Global.getFactory().createEmptyFleet(Factions.PLAYER, s.name + "'s fleet", false);
-        FleetMemberAPI m = flagship(s.hull);
-        if (m == null) return null;
-        f.getFleetData().addFleetMember(m);
-        f.getFleetData().setFlagship(m);
+        if (!fill(f, hulls)) return null;
         f.setName(s.name + "'s fleet");
         f.setNoAutoDespawn(true);
         f.setDoNotAdvanceAI(true);
@@ -133,15 +140,44 @@ public final class PuppetManager {
         f.setLocation(s.x, s.y);
         Puppet p = new Puppet();
         p.fleet = f;
-        p.hull = s.hull;
+        p.hulls = hulls;
         p.name = s.name;
         Global.getLogger(PuppetManager.class).info("[MultiSector] showing " + s.name + "'s fleet in " + s.location);
         return p;
     }
 
-    /** The other player's flagship hull, or a stand-in if this game doesn't have it. */
-    private static FleetMemberAPI flagship(String hullId) {
-        String[] tries = {hullId, "kite", "wolf"};
+    /**
+     * The ships to show: the player's whole fleet once its list has arrived
+     * (and matches what their position packets say), else just the flagship.
+     */
+    private static List<String> hullsFor(FleetState s, FleetComp comp) {
+        if (comp != null && comp.hash == s.compHash && !comp.hulls.isEmpty()) return comp.hulls;
+        return Collections.singletonList(s.hull);
+    }
+
+    /**
+     * Replaces the fleet's ships with these hulls, the first as flagship.
+     * Ships this game doesn't have are skipped; an unknown flagship gets a
+     * stand-in. Returns false if not even a stand-in could be made.
+     */
+    private static boolean fill(CampaignFleetAPI f, List<String> hulls) {
+        FleetDataAPI data = f.getFleetData();
+        List<FleetMemberAPI> built = new ArrayList<FleetMemberAPI>();
+        for (int i = 0; i < hulls.size(); i++) {
+            FleetMemberAPI m = ship(hulls.get(i), i == 0);
+            if (m != null) built.add(m);
+        }
+        if (built.isEmpty()) return false;
+        for (FleetMemberAPI old : data.getMembersListCopy()) data.removeFleetMember(old);
+        for (FleetMemberAPI m : built) data.addFleetMember(m);
+        data.setFlagship(built.get(0));
+        f.forceSync();
+        return true;
+    }
+
+    /** A ship of that hull, or (for the flagship) a stand-in if this game doesn't have it. */
+    private static FleetMemberAPI ship(String hullId, boolean standIn) {
+        String[] tries = standIn ? new String[]{hullId, "kite", "wolf"} : new String[]{hullId};
         for (String id : tries) {
             if (id == null || id.isEmpty()) continue;
             try {
@@ -162,6 +198,12 @@ public final class PuppetManager {
         if (p != null && p.fleet.getContainingLocation() != null) {
             p.fleet.getContainingLocation().removeEntity(p.fleet);
         }
+    }
+
+    /** The puppet fleet standing in for that player, or null if they aren't shown right now. */
+    public static CampaignFleetAPI fleetOf(int playerId) {
+        Puppet p = puppets.get(playerId);
+        return p == null ? null : p.fleet;
     }
 
     /** Removes every puppet from the map: before saving, on disconnect, and when loading another save. */

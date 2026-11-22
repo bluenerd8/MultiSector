@@ -29,10 +29,26 @@ public final class Protocol {
     public static final byte BYE = 5;
     /** client -> host: my current round-trip ms */
     public static final byte PING_REPORT = 6;
+    /** client -> host: paused(byte). Anyone can pause or resume the shared clock. */
+    public static final byte PAUSE_REQUEST = 7;
+    /** client -> host: FleetComp of my fleet. host -> clients: playerId(int), FleetComp. */
+    public static final byte FLEET_COMP = 8;
+
+    // TCP from the host's own launcher (loopback only) to the host's game
+    /** launcher -> game: friendName. "A friend is about to download: save now (and hold the clock)." */
+    public static final byte LOCAL_SAVE = 30;
+    /** game -> launcher: saved(byte), message */
+    public static final byte LOCAL_SAVE_DONE = 31;
 
     // TCP, launcher lobby (port + 1)
-    /** client -> host: name */
+    /** client -> host: name, build version, purpose (one of the HELLO_FOR_ values) */
     public static final byte LOBBY_HELLO = 20;
+    /** Just looking (the launcher's Check button). */
+    public static final byte HELLO_FOR_CHECK = 0;
+    /** Starting a download: the host saves a fresh copy first. */
+    public static final byte HELLO_FOR_DOWNLOAD = 1;
+    /** An extra connection of a download that already started. */
+    public static final byte HELLO_FOR_EXTRA = 2;
     /**
      * host -> client: hostName, characterName, saveDate, gameVersion, saveBytes(long), gamePort(int),
      * modCount(int), modIds..., zipBytes(long), zipSha256
@@ -67,6 +83,8 @@ public final class Protocol {
     public static final byte FLEET_STATE = 12;
     /** host -> client: count(short), then FleetStates of every other player */
     public static final byte WORLD_STATE = 13;
+    /** host -> client: ClockState, the shared campaign clock */
+    public static final byte CLOCK = 14;
     /** offset of the type byte inside a packet, so the host can flip PING to PONG in place */
     public static final int TYPE_OFFSET = 6;
     /** header + seq(4) + sentNanos(8) */

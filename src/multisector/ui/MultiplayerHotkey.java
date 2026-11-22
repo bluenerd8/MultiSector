@@ -5,7 +5,10 @@ import com.fs.starfarer.api.input.InputEventAPI;
 
 import java.util.List;
 
-/** Opens the Multiplayer window when the configured hotkey (F8 by default) is pressed in the campaign. */
+/**
+ * Campaign hotkeys: the Multiplayer window (F8 by default) and showing or
+ * hiding the players panel (F7 by default).
+ */
 public class MultiplayerHotkey implements CampaignInputListener {
 
     public int getListenerInputPriority() {
@@ -15,11 +18,17 @@ public class MultiplayerHotkey implements CampaignInputListener {
     public void processCampaignInputPreCore(List<InputEventAPI> events) {
         for (InputEventAPI e : events) {
             if (e.isConsumed() || !e.isKeyDownEvent() || e.isRepeat()) continue;
-            if (e.getEventValue() != MultiSectorConfig.getHotkey()) continue;
             if (e.isCtrlDown() || e.isAltDown()) continue; // leave modified combos to other mods
-            e.consume();
-            MultiplayerDialog.open();
-            return;
+            if (e.getEventValue() == MultiSectorConfig.getHotkey()) {
+                e.consume();
+                MultiplayerDialog.open();
+                return;
+            }
+            if (e.getEventValue() == MultiSectorConfig.getHudHotkey()) {
+                e.consume();
+                PlayersHud.toggle();
+                return;
+            }
         }
     }
 
