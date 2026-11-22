@@ -134,6 +134,18 @@ public final class Session {
     private final ConcurrentLinkedQueue<Object[]> directed = new ConcurrentLinkedQueue<Object[]>();
     /** Client: the host's answers to our lock requests, by handle. */
     private final ConcurrentHashMap<Integer, ClaimReply> claimReplies = new ConcurrentHashMap<Integer, ClaimReply>();
+
+    // ---- markets
+    /** Host: stock requests and trades from players, for the game thread: {kind, playerId, name, text}. */
+    private final ConcurrentLinkedQueue<Object[]> marketEvents = new ConcurrentLinkedQueue<Object[]>();
+    /** Client: market stock from the host, by market id. */
+    private final ConcurrentHashMap<String, String> marketSnapshots = new ConcurrentHashMap<String, String>();
+    public static final int MARKET_EVENT_REQUEST = 0;
+    public static final int MARKET_EVENT_TRADE = 1;
+    /** Messages from other players (hails, offers), for the game thread. */
+    private final ConcurrentLinkedQueue<PlayerMessage> playerMessages = new ConcurrentLinkedQueue<PlayerMessage>();
+    /** Sent on a player's behalf when they leave, so whoever was talking to them knows. */
+    public static final String LEFT_JSON = "{\"k\":\"left\"}";
     /** How long the launcher waits for the game to save. */
     private static final int SAVE_WAIT_MS = 20000;
 
@@ -250,6 +262,91 @@ public final class Session {
         Protocol.putLongString(bb, j);
         bb.flip();
         directed.add(new Object[]{playerId, bb});
+    }
+
+    // ---- markets
+
+    /**
+     * Host: next market event for the game thread, or null:
+     * {MARKET_EVENT_REQUEST or MARKET_EVENT_TRADE (Integer), playerId (Integer), playerName, marketId or trade json}.
+     */
+    public Object[] pollMarketEvent() {
+        return marketEvents.poll();
+    }
+
+    /** Host: sends a market's stock to one player ("" if there's no such market). */
+    public void replyMarket(int playerId, String marketId, String json) {
+        String j = json == null ? "" : json;
+        ByteBuffer bb = Protocol.begin(Protocol.MARKET_SNAPSHOT, Protocol.stringSize(marketId) + Protocol.longStringSize(j));
+        Protocol.putString(bb, marketId);
+        Protocol.putLongString(bb, j);
+        bb.flip();
+        directed.add(new Object[]{playerId, bb});
+    }
+
+    /** Client: ask the host for a market's stock; it arrives through {@link #takeMarketSnapshot}. */
+    public void requestMarket(String marketId) {
+        marketSnapshots.remove(marketId);
+        ByteBuffer bb = Protocol.begin(Protocol.MARKET_REQUEST, Protocol.stringSize(marketId));
+        Protocol.putString(bb, marketId);
+        bb.flip();
+        outbox.add(bb);
+    }
+
+    /** Client: the host's stock for that market, once (null until it arrives). */
+    public String takeMarketSnapshot(String marketId) {
+        return marketSnapshots.remove(marketId);
+    }
+
+    /** Client: one trade we made, for the host to apply to its market. */
+    public void sendMarketTrade(String json) {
+        ByteBuffer bb = Protocol.begin(Protocol.MARKET_TRADE, Protocol.longStringSize(json));
+        Protocol.putLongString(bb, json);
+        bb.flip();
+        outbox.add(bb);
+    }
+
+    // ---- player to player
+
+    /** One message from another player: a hail, an answer, an offer. */
+    public static final class PlayerMessage {
+        public final int from;
+        public final String fromName;
+        public final String json;
+
+        PlayerMessage(int from, String fromName, String json) {
+            this.from = from;
+            this.fromName = fromName;
+            this.json = json;
+        }
+    }
+
+    /** Sends a message to one other player (through the host when we're a client). */
+    public void sendPlayerMessage(int to, String json) {
+        if (state == State.HOSTING) {
+            directed.add(new Object[]{to, playerMessage(to, HOST_ID, json)});
+        } else if (state == State.CONNECTED) {
+            outbox.add(playerMessage(to, myId, json));
+        }
+    }
+
+    /** Next message from another player, or null. */
+    public PlayerMessage pollPlayerMessage() {
+        return playerMessages.poll();
+    }
+
+    /** True if that player is in the session right now. */
+    public boolean isPlayerHere(int id) {
+        for (Player p : players) if (p.id == id) return true;
+        return false;
+    }
+
+    private static ByteBuffer playerMessage(int to, int from, String json) {
+        ByteBuffer bb = Protocol.begin(Protocol.PLAYER_MSG, 4 + 4 + Protocol.longStringSize(json));
+        bb.putInt(to).putInt(from);
+        Protocol.putLongString(bb, json);
+        bb.flip();
+        return bb;
     }
 
     // ---- fleet locks: client side
@@ -549,6 +646,29 @@ public final class Session {
                         notices.add(conn.name + (p ? " paused the game." : waited
                                 ? " resumed the game, so it stopped waiting for joining players." : " resumed the game."));
                     }
+                } else if (type == Protocol.PLAYER_MSG && msg.remaining() >= 8) {
+                    int to = msg.getInt();
+                    msg.getInt(); // who they say they are: we know who they are
+                    String json = Protocol.getLongString(msg);
+                    if (to == HOST_ID) {
+                        playerMessages.add(new PlayerMessage(conn.id, conn.name, json));
+                    } else {
+                        Conn target = null;
+                        for (Conn c : conns) if (c.id == to) target = c;
+                        if (target == null) {
+                            conn.send(playerMessage(conn.id, to, LEFT_JSON)); // they're gone
+                        } else {
+                            try {
+                                target.send(playerMessage(to, conn.id, json));
+                            } catch (IOException e) {
+                                closeQuietly(target.socket);
+                            }
+                        }
+                    }
+                } else if (type == Protocol.MARKET_REQUEST) {
+                    marketEvents.add(new Object[]{MARKET_EVENT_REQUEST, conn.id, conn.name, Protocol.getString(msg)});
+                } else if (type == Protocol.MARKET_TRADE) {
+                    marketEvents.add(new Object[]{MARKET_EVENT_TRADE, conn.id, conn.name, Protocol.getLongString(msg)});
                 } else if (type == Protocol.CLAIM_REQUEST && msg.remaining() >= 4) {
                     claimEvents.add(new ClaimEvent(ClaimEvent.REQUEST, conn.id, conn.name, msg.getInt(), null));
                 } else if (type == Protocol.CLAIM_RELEASE && msg.remaining() >= 4) {
@@ -589,6 +709,9 @@ public final class Session {
                 comps.remove(conn.id);
                 // Anything they were holding is free again.
                 claimEvents.add(new ClaimEvent(ClaimEvent.LEFT, conn.id, conn.name, 0, null));
+                // And anyone talking or trading with them.
+                playerMessages.add(new PlayerMessage(conn.id, conn.name, LEFT_JSON));
+                outbox.add(playerMessage(-1, conn.id, LEFT_JSON));
             }
             if (conn != null && conns.remove(conn) && alive(gen)) {
                 notices.add(conn.name + " left");
@@ -906,6 +1029,13 @@ public final class Session {
                 } else if (type == Protocol.FLEET_COMP) {
                     int pid = msg.getInt();
                     comps.put(pid, FleetComp.read(msg));
+                } else if (type == Protocol.PLAYER_MSG && msg.remaining() >= 8) {
+                    msg.getInt(); // to: us
+                    int from = msg.getInt();
+                    playerMessages.add(new PlayerMessage(from, playerName(from), Protocol.getLongString(msg)));
+                } else if (type == Protocol.MARKET_SNAPSHOT) {
+                    String marketId = Protocol.getString(msg);
+                    marketSnapshots.put(marketId, Protocol.getLongString(msg));
                 } else if (type == Protocol.CLAIM_REPLY) {
                     int handle = msg.getInt();
                     boolean granted = msg.get() != 0;
@@ -1102,6 +1232,9 @@ public final class Session {
     }
 
     private void clearNpc() {
+        playerMessages.clear();
+        marketEvents.clear();
+        marketSnapshots.clear();
         claimEvents.clear();
         directed.clear();
         claimReplies.clear();

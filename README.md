@@ -2,7 +2,7 @@
 
 Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), aimed at small friend groups (2–8 players). One player hosts and runs the real game; everyone else connects to them.
 
-> **Status: early prototype.** Players share the host's world. Everyone sees the other players' fleets (with all their ships) on the map. Everyone stays on the host's date, pause is shared, and fast-forward follows the host. Planets line up, and in a star system you share with the host you see the host's NPC fleets. Elsewhere (hyperspace, other systems), markets and battles still run on each player's own game.
+> **Status: early prototype.** Players share the host's world. Everyone sees the other players' fleets (with all their ships) on the map. Everyone stays on the host's date, pause is shared, and fast-forward follows the host. Planets line up. In a star system you share with the host, you see the host's NPC fleets and can fight them, and the results reach the host. Markets are shared everywhere: stock, purchases and price changes go through the host. Players can hail each other's fleets to talk and trade credits, cargo and ships. Hyperspace fleets and battle wreckage still exist only on each player's own game.
 
 ## Time and pause
 
@@ -17,6 +17,12 @@ Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), ai
 - A **players panel** in the top-right of the campaign map lists everyone else: where they are, what they're doing (travelling, at a market, in the refit screen, fighting a fleet), and ping. **F7** hides or shows it.
 - The **Multiplayer window (F8)** shows more for each player: distance from you, fleet size and flagship, level and credits.
 - Move or turn off the panel with `showPlayersHud`, `hudHotkey`, `hudCorner`, `hudOffsetX` and `hudOffsetY` in `data/config/multisector.json`.
+
+## Talking and trading with other players
+
+- **Click another player's fleet** to hail them. Their game opens a dialog to answer or decline, at once if they're on the map, or as soon as they finish what they're doing. Either of you can cancel or leave at any time.
+- While you talk, both of you are in a dialog, so both fleets hold still. The world keeps going for everyone else; press Ctrl+Space if you want to pause everyone.
+- **Offer credits, cargo or ships.** What you offer leaves your fleet straight away and comes back if they turn it down, leave the conversation or leave the game. Officers stay with you, and you can't give away your flagship.
 
 How time sync works: [docs/design.md, section 13](docs/design.md#13-shared-time-pause-and-joining).
 

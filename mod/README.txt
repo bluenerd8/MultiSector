@@ -53,8 +53,12 @@ PLAYING OVER HAMACHI
   - When you download, the host's game saves a fresh copy, and everyone
     waits (paused) until you're in. Unpause to stop waiting.
   - In a star system you share with the host, you see the host's NPC
-    fleets. You can't talk to or fight those yet.
-  Hyperspace fleets, markets and battles aren't synced yet.
+    fleets and can fight them. Markets are shared through the host.
+  Hyperspace NPC fleets and battle wreckage aren't shared yet.
+
+  Click another player's fleet to hail them. They can answer or decline.
+  While you talk, both fleets hold still. You can offer each other
+  credits, cargo and ships; what you offer comes back if they say no.
 
   The players panel (top right of the map, F7 hides it) shows where the
   others are and what they're doing. F8 shows their fleet, level and

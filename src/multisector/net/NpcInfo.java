@@ -23,10 +23,23 @@ public final class NpcInfo {
     /** Per ship: the variant id, and the hull id to fall back on if this game lacks that variant. */
     public final List<String> variants;
     public final List<String> hulls;
+    /**
+     * What the fleet is doing, as its tooltip says it on the host ("travelling
+     * to Jangala", "interacting with Bob"), or "". Not part of {@link #hash},
+     * which is about who the fleet is and which ships it has.
+     */
+    public final String status;
     public final int hash;
 
     public NpcInfo(int handle, String fleetId, String faction, String name, List<String> variants, List<String> hulls) {
+        this(handle, fleetId, faction, name, variants, hulls, "");
+    }
+
+    public NpcInfo(int handle, String fleetId, String faction, String name, List<String> variants, List<String> hulls,
+                   String status) {
         this.handle = handle;
+        String st = status == null ? "" : status;
+        this.status = st.length() > 80 ? st.substring(0, 80) : st;
         this.fleetId = fleetId == null ? "" : fleetId;
         this.faction = faction == null ? "" : faction;
         this.name = name == null ? "" : name;
@@ -45,7 +58,7 @@ public final class NpcInfo {
         for (int i = 0; i < variants.size(); i++) {
             s += Protocol.stringSize(variants.get(i)) + Protocol.stringSize(hulls.get(i));
         }
-        return s;
+        return s + Protocol.stringSize(status);
     }
 
     public void write(ByteBuffer bb) {
@@ -58,6 +71,7 @@ public final class NpcInfo {
             Protocol.putString(bb, variants.get(i));
             Protocol.putString(bb, hulls.get(i));
         }
+        Protocol.putString(bb, status);
     }
 
     public static NpcInfo read(ByteBuffer bb) {
@@ -73,6 +87,7 @@ public final class NpcInfo {
             v.add(Protocol.getString(bb));
             h.add(Protocol.getString(bb));
         }
-        return new NpcInfo(handle, id, faction, name, v, h);
+        String status = bb.remaining() >= 2 ? Protocol.getString(bb) : "";
+        return new NpcInfo(handle, id, faction, name, v, h, status);
     }
 }

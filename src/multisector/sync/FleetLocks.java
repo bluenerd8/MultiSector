@@ -64,6 +64,7 @@ public final class FleetLocks {
         final CampaignFleetAPI fleet;
         final long since;
         Boolean oldAi;
+        String oldText;
         boolean applied;
         float x, y;
 
@@ -162,8 +163,13 @@ public final class FleetLocks {
             h.oldAi = f.isDoNotAdvanceAI();
             f.setDoNotAdvanceAI(true);
             f.getMemoryWithoutUpdate().set(CLAIMED_BY, h.name);
+            h.oldText = f.getAI() == null ? null : f.getAI().getActionTextOverride();
             h.applied = true;
         }
+        // What its tooltip says, instead of the order it isn't following right now. Every frame,
+        // since some fleets' own scripts set this text too.
+        String text = statusFor(h.name);
+        if (f.getAI() != null && !text.equals(f.getAI().getActionTextOverride())) f.getAI().setActionTextOverride(text);
         if (f.getOrbit() == null) {
             f.setLocation(h.x, h.y);
             f.getVelocity().set(0f, 0f);
@@ -174,6 +180,7 @@ public final class FleetLocks {
         if (!h.applied) return;
         h.fleet.setDoNotAdvanceAI(h.oldAi);
         h.fleet.getMemoryWithoutUpdate().unset(CLAIMED_BY);
+        if (h.fleet.getAI() != null) h.fleet.getAI().setActionTextOverride(h.oldText);
         h.applied = false;
     }
 
@@ -188,6 +195,17 @@ public final class FleetLocks {
             if (h.fleet.getContainingLocation() != null) unfreeze(h);
         }
         holds.clear();
+    }
+
+    /** A held fleet's tooltip text. */
+    static String statusFor(String playerName) {
+        return "interacting with " + playerName;
+    }
+
+    /** Who holds this fleet (host side), or null. */
+    static String holderOf(CampaignFleetAPI f) {
+        for (Hold h : holds.values()) if (h.fleet == f) return h.name;
+        return null;
     }
 
     /** True while some player holds this fleet (host side). */

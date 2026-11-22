@@ -102,6 +102,9 @@ public class NpcSync implements EveryFrameScript {
         int hash;
         Boolean oldAi;
         OrbitAPI oldOrbit;
+        /** Our copy's own tooltip text, put back when we stop steering it. */
+        String oldText;
+        boolean textSaved;
 
         Driven(CampaignFleetAPI fleet, boolean mirror) {
             this.fleet = fleet;
@@ -140,6 +143,13 @@ public class NpcSync implements EveryFrameScript {
 
     public void advance(float amount) {
         Session s = Session.get();
+        try {
+            // Markets are shared everywhere, whatever the fleet settings.
+            if (s.getState() == Session.State.HOSTING) MarketSync.hostFrame(s);
+            else if (s.getState() == Session.State.CONNECTED) MarketSync.friendFrame(s);
+        } catch (RuntimeException e) {
+            log.warn("[MultiSector] market sync failed this frame", e);
+        }
         try {
             if (!MultiSectorConfig.isSyncNpcFleets()) {
                 releaseAll();
@@ -189,6 +199,7 @@ public class NpcSync implements EveryFrameScript {
     public static void forget() {
         current = null;
         FleetLocks.forget();
+        MarketSync.forget();
     }
 
     // ================================================================ host
@@ -213,6 +224,7 @@ public class NpcSync implements EveryFrameScript {
             if (!locId.isEmpty()) log.info("[MultiSector] publishing NPC fleets in " + locId);
         }
         if (locId.isEmpty()) return;
+        String hostName = s.playerName(s.getMyId());
 
         boolean details = now - nextDetails >= 0;
         if (details) nextDetails = now + DETAILS_NANOS;
@@ -229,11 +241,12 @@ public class NpcSync implements EveryFrameScript {
             seen.add(h);
             byHandle.put(h, f);
             if (fresh || details) {
-                NpcInfo info = describe(h, f);
+                NpcInfo info = describe(h, f, hostName);
+                int sent = 31 * info.hash + info.status.hashCode(); // its status changing is news too
                 Integer old = sentHash.get(h);
-                if (old == null || old != info.hash) {
+                if (old == null || old != sent) {
                     s.hostNpcInfo(info);
-                    sentHash.put(h, info.hash);
+                    sentHash.put(h, sent);
                 }
             }
             NpcState st = new NpcState();
@@ -356,7 +369,7 @@ public class NpcSync implements EveryFrameScript {
         return f.getFleetData() != null && f.getFleetData().getNumMembers() > 0;
     }
 
-    private static NpcInfo describe(int handle, CampaignFleetAPI f) {
+    private static NpcInfo describe(int handle, CampaignFleetAPI f, String hostName) {
         List<String> variants = new ArrayList<String>();
         List<String> hulls = new ArrayList<String>();
         FleetMemberAPI flag = f.getFlagship();
@@ -372,7 +385,38 @@ public class NpcSync implements EveryFrameScript {
             hulls.add(m.getHullSpec().getHullId());
         }
         String faction = f.getFaction() == null ? "" : f.getFaction().getId();
-        return new NpcInfo(handle, f.getId(), faction, f.getName(), variants, hulls);
+        return new NpcInfo(handle, f.getId(), faction, f.getName(), variants, hulls, status(f, hostName));
+    }
+
+    /** What the fleet's tooltip should say it's doing, for every copy of it. */
+    private static String status(CampaignFleetAPI f, String hostName) {
+        String holder = FleetLocks.holderOf(f);
+        if (holder != null) return FleetLocks.statusFor(holder);
+        if (f == dialogTarget()) return FleetLocks.statusFor(hostName);
+        try {
+            if (f.getAI() == null) return "";
+            String o = f.getAI().getActionTextOverride();
+            if (o != null && !o.isEmpty()) return o;
+            if (f.getAI().getCurrentAssignment() != null) {
+                String t = f.getAI().getCurrentAssignment().getActionText();
+                return t == null ? "" : t;
+            }
+        } catch (Throwable ignored) {
+            // some custom fleet AI
+        }
+        return "";
+    }
+
+    /** Our copy's tooltip says what the host's fleet is doing, not what our copy was doing. */
+    private static void showStatus(Driven d, NpcInfo info) {
+        if (d.fleet.getAI() == null) return;
+        if (!d.textSaved) {
+            d.oldText = d.fleet.getAI().getActionTextOverride();
+            d.textSaved = true;
+        }
+        String want = info.status.isEmpty() ? d.oldText : info.status;
+        String now = d.fleet.getAI().getActionTextOverride();
+        if (want == null ? now != null : !want.equals(now)) d.fleet.getAI().setActionTextOverride(want);
     }
 
     // ================================================================ friend
@@ -430,6 +474,7 @@ public class NpcSync implements EveryFrameScript {
                 d.hash = info.hash;
             }
             follow(d.fleet, st, speed, now, frameDt);
+            showStatus(d, info);
             ours.add(d.fleet);
         }
 
@@ -602,6 +647,7 @@ public class NpcSync implements EveryFrameScript {
         }
         f.setDoNotAdvanceAI(d.oldAi);
         if (d.oldOrbit != null && f.getOrbit() == null) f.setOrbit(d.oldOrbit);
+        if (d.textSaved && f.getAI() != null) f.getAI().setActionTextOverride(d.oldText);
         f.getMemoryWithoutUpdate().unset(DRIVEN_FLAG);
     }
 

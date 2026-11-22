@@ -12,6 +12,7 @@ import com.fs.starfarer.api.impl.campaign.ids.Factions;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.loading.VariantSource;
 import com.fs.starfarer.api.campaign.FleetDataAPI;
+import multisector.character.ShipJson;
 import multisector.net.FleetComp;
 import multisector.net.FleetState;
 import multisector.net.Session;
@@ -27,7 +28,7 @@ import java.util.Map;
  * Shows other players as "puppet" fleets on the campaign map: a stand-in
  * fleet with their ships (flagship first), moved to wherever their real fleet is.
  *
- * Puppets are display only. They never fight or get chased, other fleets
+ * Puppets are display only. They never fight or get chased (clicking one hails that player), other fleets
  * ignore them, and they're removed before every save so they never end up
  * in anyone's save file.
  *
@@ -37,10 +38,14 @@ import java.util.Map;
  */
 public final class PuppetManager {
 
-    /** Memory flag marking a fleet as a MultiSector puppet. */
+    /**
+     * Memory flag marking a fleet as a MultiSector puppet. Clicking one hails
+     * that player (see {@link PlayerTalk}).
+     */
     public static final String PUPPET_FLAG = "$multisector_puppet";
-    /** No update for this long: hide the puppet (that player is probably loading or gone). */
-    private static final long STALE_NANOS = 5_000_000_000L;
+    /** No update for this long: hide the puppet (that player is probably loading or gone). Jumps can take a few seconds. */
+    private static final long STALE_NANOS = 10_000_000_000L;
+    private static final String VISIBLE_ID = "multisector_player";
     /** Don't extrapolate further than this from the last update. */
     private static final float MAX_PREDICT_SECONDS = 1f;
     /** How quickly the puppet catches up with its target (per second). */
@@ -55,6 +60,8 @@ public final class PuppetManager {
         CampaignFleetAPI fleet;
         /** The hull list the puppet's ships were built from. */
         List<String> hulls;
+        /** What the ships were built from (FleetComp hash, or the flagship alone), to rebuild on change. */
+        int builtKey;
         /** What the player is docked at, looked up once per change. */
         String dockId;
         SectorEntityToken dock;
@@ -87,18 +94,22 @@ public final class PuppetManager {
             if (loc == null) continue; // a place this copy of the world doesn't have
 
             Puppet p = puppets.get(e.getKey());
-            List<String> hulls = hullsFor(s, session.getComposition(e.getKey()));
+            FleetComp comp = session.getComposition(e.getKey());
+            if (comp != null && comp.hash != s.compHash) comp = null; // not the ships it has now
+            List<String> hulls = comp != null && !comp.hulls.isEmpty() ? comp.hulls : Collections.singletonList(s.hull);
+            int key = comp != null ? comp.hash : s.hull.hashCode();
             if (p != null && !s.name.equals(p.name)) {
                 remove(e.getKey()); // renamed: rebuild
                 p = null;
             }
             if (p == null) {
-                p = spawn(s, hulls, loc);
+                p = spawn(s, comp, hulls, loc);
                 if (p == null) continue;
                 puppets.put(e.getKey(), p);
-            } else if (!hulls.equals(p.hulls)) {
-                fill(p.fleet, hulls); // ships bought, sold or lost
+            } else if (key != p.builtKey) {
+                build(p.fleet, comp, hulls); // ships bought, sold, lost or refitted
                 p.hulls = hulls;
+                p.builtKey = key;
             }
 
             CampaignFleetAPI f = p.fleet;
@@ -145,9 +156,9 @@ public final class PuppetManager {
         return p.dock;
     }
 
-    private static Puppet spawn(FleetState s, List<String> hulls, LocationAPI loc) {
+    private static Puppet spawn(FleetState s, FleetComp comp, List<String> hulls, LocationAPI loc) {
         CampaignFleetAPI f = Global.getFactory().createEmptyFleet(Factions.PLAYER, s.name + "'s fleet", false);
-        if (!fill(f, hulls)) return null;
+        if (!build(f, comp, hulls)) return null;
         f.setName(s.name + "'s fleet");
         f.setNoAutoDespawn(true);
         f.setDoNotAdvanceAI(true);
@@ -158,25 +169,52 @@ public final class PuppetManager {
         f.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORES_OTHER_FLEETS, true);
         f.getMemoryWithoutUpdate().set(MemFlags.FLEET_IGNORED_BY_OTHER_FLEETS, true);
         f.getMemoryWithoutUpdate().set(MemFlags.MEMORY_KEY_NO_JUMP, true);
-        // Visible across the whole system, like a fleet with its transponder on.
-        f.setSensorProfile(100000f);
+        // Always visible, with full details, anywhere in the system. setSensorProfile alone
+        // didn't last: the game recomputes it every frame, so a far-off player became an
+        // unidentified sensor contact. The detected-range stat is what the game reads.
+        f.setTransponderOn(true);
+        f.getStats().getDetectedRangeMod().modifyFlat(VISIBLE_ID, 1_000_000f, "MultiSector: another player");
+        f.getStats().getSensorProfileMod().modifyFlat(VISIBLE_ID, 1_000_000f, "MultiSector: another player");
         loc.addEntity(f);
         f.setLocation(s.x, s.y);
         Puppet p = new Puppet();
         p.fleet = f;
         p.hulls = hulls;
+        p.builtKey = comp != null ? comp.hash : s.hull.hashCode();
         p.name = s.name;
         Global.getLogger(PuppetManager.class).info("[MultiSector] showing " + s.name + "'s fleet in " + s.location);
         return p;
     }
 
     /**
-     * The ships to show: the player's whole fleet once its list has arrived
-     * (and matches what their position packets say), else just the flagship.
+     * The player's exact ships (loadouts included) when their list has
+     * arrived, else bare hulls. Ships this game can't build fall back to the
+     * bare hull.
      */
-    private static List<String> hullsFor(FleetState s, FleetComp comp) {
-        if (comp != null && comp.hash == s.compHash && !comp.hulls.isEmpty()) return comp.hulls;
-        return Collections.singletonList(s.hull);
+    private static boolean build(CampaignFleetAPI f, FleetComp comp, List<String> hulls) {
+        if (comp == null || comp.exact.isEmpty()) return fill(f, hulls);
+        List<FleetMemberAPI> built = new ArrayList<FleetMemberAPI>();
+        List<String> skipped = new ArrayList<String>();
+        try {
+            org.json.JSONArray a = new org.json.JSONArray(comp.exact);
+            for (int i = 0; i < a.length(); i++) {
+                FleetMemberAPI m = ShipJson.buildShip(a.getJSONObject(i), skipped);
+                if (m == null && i < hulls.size()) m = ship(hulls.get(i), i == 0);
+                if (m != null) built.add(m);
+            }
+        } catch (Exception e) {
+            return fill(f, hulls);
+        }
+        if (built.isEmpty()) return fill(f, hulls);
+        FleetDataAPI data = f.getFleetData();
+        for (FleetMemberAPI old : data.getMembersListCopy()) data.removeFleetMember(old);
+        for (FleetMemberAPI m : built) {
+            data.addFleetMember(m);
+            m.getRepairTracker().setCR(m.getRepairTracker().getMaxCR());
+        }
+        data.setFlagship(built.get(0));
+        f.forceSync();
+        return true;
     }
 
     /**
@@ -228,6 +266,14 @@ public final class PuppetManager {
     public static CampaignFleetAPI fleetOf(int playerId) {
         Puppet p = puppets.get(playerId);
         return p == null ? null : p.fleet;
+    }
+
+    /** Which player that puppet fleet stands in for, or -1 if it isn't one. */
+    public static int playerOf(CampaignFleetAPI fleet) {
+        for (Map.Entry<Integer, Puppet> e : puppets.entrySet()) {
+            if (e.getValue().fleet == fleet) return e.getKey();
+        }
+        return -1;
     }
 
     /** Removes every puppet from the map: before saving, on disconnect, and when loading another save. */

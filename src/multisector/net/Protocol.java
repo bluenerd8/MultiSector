@@ -51,6 +51,18 @@ public final class Protocol {
     /** client -> host: handle, count(int), lost member ids (strings). Applies the losses, then releases. */
     public static final byte BATTLE_RESULT = 29;
 
+    // TCP: markets (see sync.MarketSync). The host's markets are the real ones.
+    /** client -> host: marketId. "I'm at this market: send me its stock." */
+    public static final byte MARKET_REQUEST = 32;
+    /** host -> client: marketId, snapshot json (long string; "" if the host doesn't have it) */
+    public static final byte MARKET_SNAPSHOT = 33;
+    /** client -> host: one trade as json (long string): what was bought and sold, in which submarket */
+    public static final byte MARKET_TRADE = 34;
+
+    // TCP: player to player (see sync.PlayerTalk). Goes through the host, which fills in who sent it.
+    /** either way: int to, int from, json (long string). Hails, answers, offers. */
+    public static final byte PLAYER_MSG = 35;
+
     // TCP from the host's own launcher (loopback only) to the host's game
     /** launcher -> game: friendName. "A friend is about to download: save now (and hold the clock)." */
     public static final byte LOCAL_SAVE = 30;

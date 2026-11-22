@@ -325,6 +325,10 @@ When a player opens a dialog with an NPC fleet in a shared star system, that fle
 
 Safety: a player leaving frees everything they held. Holds end after 20 minutes regardless. Freezes are lifted before every save and re-applied next frame. If the request times out, it's released in case the host's yes was still on its way. The host clicking a fleet a friend holds is told who has it, and fleets the host keeps moving during its own dialogs skip held ones.
 
+### What fleets say they're doing
+
+A held fleet's tooltip used to keep its old order ("travelling to Jangala") while it sat still. Now the host sets the fleet's action text to "interacting with <player>" while it's held, and while the host itself is talking to it, then puts its own text back on release. `NpcInfo` also carries each fleet's status, so every friend's copy shows the host's text, whether it's a held fleet or just its real order. Re-sent within a second when it changes; not part of the info hash, so ships aren't rebuilt for it.
+
 ### Hidden fleets
 
 The friend's own extra fleets in a shared system were only made undetectable. Next to a planet the game could still show them, which looked like fleets spawning around a docked friend. They're now also parked 150,000 units out (orbit detached), and put back exactly where they were afterwards. The first 30 hidden per shared stretch are named in the log ("hiding this game's own ...").
@@ -334,3 +338,65 @@ The friend's own extra fleets in a shared system were only made undetectable. Ne
 - Markets: show the host's stock on open, and send purchases and sales back.
 - What a friend gains from battles (loot, XP, reputation) stays on their own game. Reputation is per player anyway: each friend has their own standing.
 - Hyperspace sharing.
+
+---
+
+## 16. Markets, exact player fleets, visibility
+
+### Markets (`MarketSync`)
+
+The host's markets are the real ones, in every star system (the economy runs everywhere, not only near players).
+
+- **A friend opens a market:** `MARKET_REQUEST(marketId)`. The host first calls each shared submarket's `updateCargoPrePlayerInteraction()`, so a friend's visit restocks it if due, just like the host docking. It then answers `MARKET_SNAPSHOT`: every stack (commodities, weapons, fighter LPCs, special items), every ship for sale (exact, with the host's member id), and each commodity's combined trade-mod quantity, which is what shifts prices after player trades.
+- **The friend's game** replaces its shared submarkets' stock and ships with that. It marks them as just restocked (`setSinceLastCargoUpdate(0)`, `setSinceSWUpdate(0)`), so opening the trade screen doesn't re-roll the stock locally. It also lines up prices with one temporary trade mod per commodity (`multisector_sync`). If the snapshot arrives after the trade screen is already open, it's skipped, so stock never changes under an open screen.
+- **Each trade a friend makes** is reported by the game (`reportPlayerMarketTransaction`, via a transient `TradeReporter`) and sent as `MARKET_TRADE`: items sold and bought, ships sold (exact) and bought (host ids). The host adds and removes the stock, then applies price impact with the same rules as `BaseSubmarketPlugin.reportPlayerMarketTransaction`, minus its reputation and smuggling bookkeeping. That bookkeeping belongs to the friend and stays on their game.
+- Storage and other free-transfer submarkets are personal, so they're never shared.
+
+Both games start each trade from the same stock and trade pressure and apply the same rules, so they end up with the same stock.
+
+### Exact player fleets
+
+`FLEET_COMP` now also carries each ship's exact loadout (`ShipJson`, minus readiness and hull damage, which change constantly). It's rebuilt at most every 2 s, and immediately when ships come or go. Puppets are built from it, so other players' fleets have the right ships, weapons and strength in tooltips, instead of bare hulls.
+
+### Visibility
+
+Puppets used `setSensorProfile`, which the game recalculates every frame, so a distant player turned into an unidentified sensor contact. Puppets now get a large flat bonus on the detected-range and sensor-profile stats, plus transponder on: always visible with full details. A puppet now hides after 10 s without updates (was 5), since jumps can take a few seconds.
+
+### Next: wreckage and other spawned objects
+
+Battles leave debris fields, derelict ships and cargo pods, but only on the game where the battle was fought. A friend's battle wreckage exists only for them, and the host's only for the host. The plan is a "shared objects" sync shaped like the NPC fleet one:
+
+1. Objects from the save have the same id everywhere and need nothing.
+2. For objects created later in a shared system (`Tags.SALVAGEABLE`; `Entities.WRECK`, debris fields, cargo pods), the host publishes their type and contents (derelict ship data, debris parameters, pod cargo). Friends show matching copies and hide their own extras, the same way NPC fleets work.
+3. A friend's battle sends its wreckage to the host along with the losses. The host creates it, so it becomes shared.
+4. Salvaging a shared object takes a lock, like fleets, and the host removes it when done.
+
+## 17. Players talking and trading (`PlayerTalk`)
+
+### Hailing
+
+Clicking another player's fleet (a puppet) never opens the game's fleet encounter, which could start a fight with a stand-in. `NpcInteractionGuard` opens a hail instead:
+
+1. The caller's dialog says it's hailing, and sends `hail` to that player (`PLAYER_MSG`, relayed by the host, which stamps the real sender).
+2. The callee's game opens a dialog straight away if they're on the map, like an NPC fleet pulling them over. If they're in a dialog, menu or battle, it answers `wait` and opens as soon as they're free. It gives up after 55 s; the caller gives up after 60 s without an answer (restarted by `wait`).
+3. The callee answers or declines. Either side can cancel or leave at any point, and the other side is told (`cancel`, `decline`, `end`). A dialog closed any other way counts as leaving.
+4. If two players hail each other at the same moment, the one with the lower id answers the other's hail.
+
+One conversation at a time: a hail to someone already talking is declined as busy.
+
+### Time while talking
+
+No shared pause. Both players sit in a dialog, so both fleets hold still: their games are paused locally, as for any dialog. Their puppets stay put on everyone else's map, and other fleets ignore puppets. The world keeps going for everyone else, which matters with 3+ players. Anyone who wants the whole world stopped can press Ctrl+Space in the dialog.
+
+### Offers
+
+Trading is by offers: credits (fixed steps), cargo (the game's cargo picker, on a copy of the cargo), or ships (any but the flagship; officers stay with the sender, unassigned, and AI cores go back to the sender's cargo).
+
+- What's offered leaves the sender's fleet at once and is held aside (escrow, in memory).
+- The receiver alone decides: `answer ok`, and it arrives, or `answer no`, and it goes back. So nothing ends up in both fleets or in neither. Ships and items the receiver's game doesn't have (a missing mod) are listed in the answer and go back.
+- When a conversation ends, the receiver turns down anything still open. If the receiver leaves the game (`left`, sent by the host for anyone who disconnects), or the session ends, the sender gets everything back.
+- Known gap: what's held aside isn't in a save made during the offer. Saves don't normally happen in dialogs.
+
+### Not yet: fighting together
+
+Battles run in the combat engine, outside the campaign, and syncing real-time combat is a separate, much larger project. A smaller step that fits the current design: when a player fights near a friend, add the friend's exact ships (already sent for puppets) as an allied AI fleet in that battle, then send the friend their losses, the same way NPC battle results reach the host.

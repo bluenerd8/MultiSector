@@ -10,7 +10,9 @@ import multisector.probe.SandboxProbe;
 import multisector.sync.ClockSync;
 import multisector.sync.FleetSync;
 import multisector.sync.HostSaver;
+import multisector.sync.MarketSync;
 import multisector.sync.NpcInteractionGuard;
+import multisector.sync.PlayerTalk;
 import multisector.sync.NpcSync;
 import multisector.sync.PuppetManager;
 import multisector.ui.AutoConnect;
@@ -58,6 +60,9 @@ public class MultiSectorModPlugin extends BaseModPlugin {
         PlayerInfo.forget(); // location names belonged to the previous world
         NpcSync.forget();
         Global.getSector().addTransientScript(new NpcSync());
+        Global.getSector().addTransientListener(new MarketSync.TradeReporter());
+        PlayerTalk.forget(); // a conversation from the previous world is over
+        Global.getSector().addTransientScript(new PlayerTalk());
         // Transient plugins aren't saved, but unregister first in case this sector already has one.
         NpcInteractionGuard guard = new NpcInteractionGuard();
         Global.getSector().unregisterPlugin(guard.getId());

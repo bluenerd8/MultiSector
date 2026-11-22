@@ -15,9 +15,11 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Decides what opens when a player clicks an NPC fleet in a shared star system.
+ * Decides what opens when a player clicks an NPC fleet in a shared star system,
+ * or another player's fleet.
  *
  * <ul>
+ * <li><b>Another player's fleet:</b> hails them ({@link PlayerTalk}).</li>
  * <li><b>Friend, host's fleet:</b> first asks the host to lock it
  *     ({@link FleetLocks}). Once granted, the fleet becomes the host's exact
  *     copy and the game's normal fleet dialog takes over: talk, fight,
@@ -46,6 +48,14 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
         CampaignFleetAPI fleet = (CampaignFleetAPI) target;
         MemoryAPI mem = fleet.getMemoryWithoutUpdate();
         Session s = Session.get();
+        if (mem.getBoolean(PuppetManager.PUPPET_FLAG)) {
+            // Another player: hail them, never the normal fleet encounter (that could start a fight).
+            int id = PuppetManager.playerOf(fleet);
+            if (!s.isActive() || id < 0 || !s.isPlayerHere(id)) {
+                return pick(new Note("That player's fleet isn't answering: they may have just left."));
+            }
+            return pick(PlayerTalk.hail(id));
+        }
         if (s.getState() == Session.State.HOSTING && mem.contains(FleetLocks.CLAIMED_BY)) {
             return pick(new Note(mem.getString(FleetLocks.CLAIMED_BY) + " is dealing with this fleet right now. "
                     + "Try again once they're done."));

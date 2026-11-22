@@ -9,6 +9,7 @@ import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.StarSystemAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
+import multisector.character.ShipJson;
 import multisector.net.FleetComp;
 import multisector.net.FleetState;
 import multisector.net.Session;
@@ -130,14 +131,44 @@ public class FleetSync implements EveryFrameScript {
     }
 
     /** The fleet's ships as hull ids, flagship first, in the fleet's own order. */
-    private static FleetComp composition(CampaignFleetAPI fleet, FleetMemberAPI flag) {
-        List<String> hulls = new ArrayList<String>();
-        if (flag != null) hulls.add(flag.getHullSpec().getHullId());
+    private List<String> exactHulls;
+    private String exactJson = "";
+    private long exactAt;
+    /** Loadouts change rarely; re-check them this often (or at once when ships come or go). */
+    private static final long EXACT_NANOS = 2_000_000_000L;
+
+    /**
+     * The fleet's ships, flagship first, with exact loadouts so other games
+     * draw the fleet as it really is. Readiness and hull damage are left out,
+     * since they change all the time and would make it resend constantly.
+     */
+    private FleetComp composition(CampaignFleetAPI fleet, FleetMemberAPI flag) {
+        List<FleetMemberAPI> members = new ArrayList<FleetMemberAPI>();
+        if (flag != null) members.add(flag);
         for (FleetMemberAPI m : fleet.getFleetData().getMembersListCopy()) {
             if (m == flag || m.isFighterWing()) continue;
-            hulls.add(m.getHullSpec().getHullId());
+            members.add(m);
         }
-        return new FleetComp(hulls);
+        List<String> hulls = new ArrayList<String>();
+        for (FleetMemberAPI m : members) hulls.add(m.getHullSpec().getHullId());
+        long now = System.nanoTime();
+        if (!hulls.equals(exactHulls) || now - exactAt > EXACT_NANOS) {
+            exactHulls = hulls;
+            exactAt = now;
+            try {
+                org.json.JSONArray a = new org.json.JSONArray();
+                for (FleetMemberAPI m : members.subList(0, Math.min(members.size(), FleetComp.MAX_SHIPS))) {
+                    org.json.JSONObject js = ShipJson.ship(m);
+                    js.remove("cr");
+                    js.remove("hullFraction");
+                    a.put(js);
+                }
+                exactJson = a.toString();
+            } catch (Exception e) {
+                exactJson = ""; // the hull list alone still works
+            }
+        }
+        return new FleetComp(hulls, exactJson);
     }
 
     /** Star system id, or "hyperspace". Same in every copy of the shared save. */
