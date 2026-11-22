@@ -63,10 +63,12 @@ PLAYING OVER HAMACHI
   While you talk, both fleets hold still. You can offer each other
   credits, cargo and ships; what you offer comes back if they say no.
 
-  When a friend nearby is in a battle, you're asked to join. Your own
-  ships then fight beside theirs (controlled by the battle AI), you see
-  how each one does, and you can order a retreat. Losses and damage are
-  applied to your fleet afterwards.
+  When a friend nearby is in a battle, you're asked to join (or offer to
+  join, if you reach a fleet they're already fighting). A live view of
+  the battle opens and you fly one of your own ships: WASD move, Q/E
+  strafe, mouse aims, left button fires group 1-7, right button shields,
+  F system, V vent. Your other ships fight beside theirs under the battle
+  AI. Losses and damage are applied to your fleet afterwards.
 
   The players panel (top right of the map, F7 hides it) shows where the
   others are and what they're doing. F8 shows their fleet, level and

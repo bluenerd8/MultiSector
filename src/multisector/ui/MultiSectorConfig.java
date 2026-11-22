@@ -20,6 +20,8 @@ public final class MultiSectorConfig {
     private static boolean syncNpcFleets = true;
     private static boolean moveFleetsDuringHostDialogs = true;
     private static boolean showPlayersHud = true;
+    private static boolean jointBattleView = true;
+    private static boolean jointBattleDeployAll = true;
     private static int hudHotkey = Keyboard.KEY_F7;
     private static String hudHotkeyName = "F7";
     private static String hudCorner = "topRight";
@@ -49,6 +51,8 @@ public final class MultiSectorConfig {
             syncNpcFleets = json.optBoolean("syncNpcFleets", true);
             moveFleetsDuringHostDialogs = json.optBoolean("moveFleetsDuringHostDialogs", true);
             showPlayersHud = json.optBoolean("showPlayersHud", true);
+            jointBattleView = json.optBoolean("jointBattleView", true);
+            jointBattleDeployAll = json.optBoolean("jointBattleDeployAll", true);
             String hk = json.optString("hudHotkey", "F7").trim().toUpperCase();
             int hidx = Keyboard.getKeyIndex(hk);
             if (hidx != Keyboard.KEY_NONE) {
@@ -83,6 +87,10 @@ public final class MultiSectorConfig {
     public static boolean isMoveFleetsDuringHostDialogs() { return moveFleetsDuringHostDialogs; }
     /** Whether the players panel starts shown. */
     public static boolean isShowPlayersHud() { return showPlayersHud; }
+    /** Joining someone's battle opens a live view of it, where you pilot one of your ships. */
+    public static boolean isJointBattleView() { return jointBattleView; }
+    /** The leader's game deploys every combat-ready ship of a player who joined (not just what fits). */
+    public static boolean isJointBattleDeployAll() { return jointBattleDeployAll; }
     public static int getHudHotkey() { return hudHotkey; }
     public static String getHudHotkeyName() { return hudHotkeyName; }
     /** topLeft, topRight, bottomLeft or bottomRight. */

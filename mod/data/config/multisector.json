@@ -27,6 +27,13 @@
 	# your dialogs.
 	"moveFleetsDuringHostDialogs":true,
 
+	# Joining another player's battle opens a live view of it on your game, where you pilot
+	# one of your ships (your flagship unless you pick another). Off: you only get a report.
+	"jointBattleView":true,
+	# The battle's game deploys every combat-ready ship of a player who joined, even beyond
+	# the battle's deployment limit, so their fleet always takes part.
+	"jointBattleDeployAll":true,
+
 	# The players panel on the campaign map: who's where and doing what.
 	# The hotkey shows or hides it; more detail is in the Multiplayer window.
 	"showPlayersHud":true,

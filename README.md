@@ -26,11 +26,12 @@ Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), ai
 
 ## Fighting together
 
-- When you're in a battle, any other player whose fleet is close by is asked to join. Give them a moment before you engage.
-- If they join, their own ships fight beside yours, controlled by the battle AI on your game. You can't pilot, recover or keep them.
-- They see how each of their ships is doing, and can order them all to retreat.
+- When you're in a battle, any other player whose fleet is close by is asked to join. Give them a moment before you engage. If you reach a fleet someone is already fighting, you can offer to join their battle.
+- If they join, a live view of the battle opens on their game. They **fly one of their own ships** (their flagship unless they pick another), and the rest of their fleet fights beside you under the battle AI. All their combat-ready ships are deployed. You can't pilot, recover or keep their ships.
+- Controls in the view: WASD to move, Q/E to strafe, X to decelerate, mouse to aim, left button to fire the selected group (1-7), right button for shields, F system, V vent, Z fighters, T autofire, R to target.
 - When the battle is over, their losses, hull damage and readiness are applied to their real fleet. Nobody is left without a ship.
-- Not yet: piloting your own ship in someone else's battle, and sharing loot and experience.
+- The view follows the battle's combat speed, so a speed-up mod (2x combat speed and the like) on the battle's game shows at the same speed.
+- Not yet: loot and experience go to the battle's leader. `jointBattleView` and `jointBattleDeployAll` in `data/config/multisector.json` turn the view and full deployment off.
 
 How time sync works: [docs/design.md, section 13](docs/design.md#13-shared-time-pause-and-joining).
 

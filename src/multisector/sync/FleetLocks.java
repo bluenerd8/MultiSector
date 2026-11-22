@@ -76,7 +76,7 @@ public final class FleetLocks {
                     if (asked != null && asked == m.from) {
                         pending.remove(h);
                         replies.put(h, new Reply(m.from, j.optBoolean("ok"), j.optString("holder", ""),
-                                j.optString("fleet", "")));
+                                j.optInt("holderId", -1), j.optString("fleet", "")));
                     }
                 } else if ("left".equals(k)) {
                     playerLeft(m.from);
@@ -99,7 +99,7 @@ public final class FleetLocks {
         for (Iterator<Map.Entry<Integer, Integer>> it = pending.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<Integer, Integer> e = it.next();
             if (e.getValue() != id) continue;
-            replies.put(e.getKey(), new Reply(id, false, "", ""));
+            replies.put(e.getKey(), new Reply(id, false, "", -1, ""));
             it.remove();
         }
         if (active != null && active.owner == id) active = null;
@@ -161,13 +161,15 @@ public final class FleetLocks {
         if ("claim".equals(k)) {
             CampaignFleetAPI f = byHandle.get(handle);
             if (f == null || f.getContainingLocation() == null) {
-                reply(s, m.from, handle, false, "", null); // gone, or we're not the owner any more
+                reply(s, m.from, handle, false, "", -1, null); // gone, or we're not the owner any more
             } else if (cur != null && cur.playerId != m.from) {
-                reply(s, m.from, handle, false, cur.name, null);
+                reply(s, m.from, handle, false, cur.name, cur.playerId, null);
             } else if (f == NpcSync.dialogTarget()) {
-                reply(s, m.from, handle, false, myName, null);
+                reply(s, m.from, handle, false, myName, s.getMyId(), null);
             } else if (f.getBattle() != null) {
-                reply(s, m.from, handle, false, "a battle", null);
+                CampaignFleetAPI me = Global.getSector().getPlayerFleet();
+                boolean mine = me != null && f.getBattle() == me.getBattle();
+                reply(s, m.from, handle, false, mine ? myName : "a battle", mine ? s.getMyId() : -1, null);
             } else {
                 if (cur == null) {
                     cur = new Hold(m.from, m.fromName, f);
@@ -175,7 +177,7 @@ public final class FleetLocks {
                     freeze(cur);
                     log.info("[MultiSector] " + m.fromName + " is dealing with " + f.getName());
                 }
-                reply(s, m.from, handle, true, "", exactCopy(f).toString());
+                reply(s, m.from, handle, true, "", -1, exactCopy(f).toString());
             }
         } else if ("release".equals(k)) {
             if (cur != null && cur.playerId == m.from) {
@@ -194,8 +196,9 @@ public final class FleetLocks {
         }
     }
 
-    private static void reply(Session s, int to, int handle, boolean ok, String holder, String fleet) throws Exception {
-        JSONObject j = msg("reply", handle).put("ok", ok).put("holder", holder);
+    private static void reply(Session s, int to, int handle, boolean ok, String holder, int holderId, String fleet)
+            throws Exception {
+        JSONObject j = msg("reply", handle).put("ok", ok).put("holder", holder).put("holderId", holderId);
         if (fleet != null) j.put("fleet", fleet);
         s.sendLockMessage(to, j.toString());
     }
@@ -250,6 +253,12 @@ public final class FleetLocks {
     static String holderOf(CampaignFleetAPI f) {
         for (Hold h : holds.values()) if (h.fleet == f) return h.name;
         return null;
+    }
+
+    /** The id of the player who holds this fleet (owner side), or -1. */
+    static int holderIdOf(CampaignFleetAPI f) {
+        for (Hold h : holds.values()) if (h.fleet == f) return h.playerId;
+        return -1;
     }
 
     /** True while some player holds this fleet (owner side). */
@@ -314,13 +323,16 @@ public final class FleetLocks {
         final boolean granted;
         /** Who holds it, when refused ("" if it's gone). */
         final String holder;
+        /** Their player id, if it's a player whose battle could be joined; else -1. */
+        final int holderId;
         /** The fleet's exact copy, when granted. */
         final String fleetJson;
 
-        Reply(int owner, boolean granted, String holder, String fleetJson) {
+        Reply(int owner, boolean granted, String holder, int holderId, String fleetJson) {
             this.owner = owner;
             this.granted = granted;
             this.holder = holder;
+            this.holderId = holderId;
             this.fleetJson = fleetJson;
         }
     }

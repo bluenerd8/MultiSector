@@ -147,6 +147,10 @@ public final class Session {
     private final ConcurrentLinkedQueue<PlayerMessage> battleMessages = new ConcurrentLinkedQueue<PlayerMessage>();
     /** Objects in space that appeared, changed or went on another player's game, for the game thread. */
     private final ConcurrentLinkedQueue<String> worldEvents = new ConcurrentLinkedQueue<String>();
+    /** Joint battle datagrams from other players (live battle state, pilot controls), for the combat plugins. */
+    private final ConcurrentLinkedQueue<CombatPacket> combatPackets = new ConcurrentLinkedQueue<CombatPacket>();
+    /** Client: where the host's UDP is, so combat datagrams can be sent from any thread. */
+    private volatile InetSocketAddress udpToHost;
     /** PLAYER_MSG channels. */
     public static final byte CHANNEL_TALK = 0;
     public static final byte CHANNEL_LOCK = 1;
@@ -283,6 +287,16 @@ public final class Session {
             if (e.getValue() == playerId && e.getKey() != playerId) return true;
         }
         return false;
+    }
+
+    /** The players who follow that player's world, sorted, as a short text (to notice changes). */
+    public String followersOf(int playerId) {
+        List<Integer> ids = new ArrayList<Integer>();
+        for (Map.Entry<Integer, Integer> e : follows.entrySet()) {
+            if (e.getValue() == playerId && e.getKey() != playerId) ids.add(e.getKey());
+        }
+        Collections.sort(ids);
+        return ids.toString();
     }
 
     /** What another player publishes (empty if nothing). */
@@ -466,6 +480,51 @@ public final class Session {
         Protocol.putLongString(bb, json);
         bb.flip();
         outbox.add(bb); // host: to every client; client: to the host, which applies and relays it
+    }
+
+    /** One joint battle datagram from another player. */
+    public static final class CombatPacket {
+        public final int from;
+        public final ByteBuffer data;
+
+        CombatPacket(int from, ByteBuffer data) {
+            this.from = from;
+            this.data = data;
+        }
+    }
+
+    /**
+     * Sends a joint battle datagram to one other player (through the host
+     * when we're a client). From any thread; the payload must fit a datagram.
+     */
+    public void sendCombatPacket(int to, ByteBuffer payload) {
+        ByteBuffer bb = Protocol.begin(Protocol.COMBAT_UDP, 8 + payload.remaining());
+        bb.putInt(to).putInt(publisherId()).put(payload.duplicate());
+        try {
+            if (state == State.HOSTING) {
+                SocketAddress a = udpAddresses.get(to);
+                DatagramSocket u = hostUdp;
+                if (a != null && u != null) u.send(new DatagramPacket(bb.array(), bb.position(), a));
+            } else if (state == State.CONNECTED) {
+                InetSocketAddress a = udpToHost;
+                DatagramSocket u = clientUdp;
+                if (a != null && u != null) u.send(new DatagramPacket(bb.array(), bb.position(), a));
+            }
+        } catch (IOException ignored) {
+            // UDP: the next one replaces it
+        }
+    }
+
+    /** Next joint battle datagram, or null. */
+    public CombatPacket pollCombatPacket() {
+        return combatPackets.poll();
+    }
+
+    private void receivedCombat(int from, ByteBuffer bb) {
+        byte[] copy = new byte[bb.remaining()];
+        bb.get(copy);
+        combatPackets.add(new CombatPacket(from, ByteBuffer.wrap(copy)));
+        while (combatPackets.size() > 400) combatPackets.poll(); // nobody reading: drop the oldest
     }
 
     /** Next object change from another player's game, or null. */
@@ -884,6 +943,8 @@ public final class Session {
                     receiveFleetState(bb, p);
                 } else if (type == Protocol.NPC_STATE) {
                     relayNpcStates(u, bb, p);
+                } else if (type == Protocol.COMBAT_UDP) {
+                    relayCombat(u, bb, p);
                 }
             } catch (IOException e) {
                 if (!alive(gen)) return; // socket closed by stop()
@@ -931,6 +992,26 @@ public final class Session {
             } catch (IOException ignored) {
                 // the next tick sends them again
             }
+        }
+    }
+
+    /** A joint battle datagram from a client: ours, or forwarded as is to the player it's for. */
+    private void relayCombat(DatagramSocket u, ByteBuffer bb, DatagramPacket p) {
+        int to = bb.getInt();
+        int from = bb.getInt();
+        Conn owner = null;
+        for (Conn c : conns) if (c.id == from) owner = c;
+        if (owner == null || !owner.socket.getInetAddress().equals(p.getAddress())) return;
+        if (to == HOST_ID) {
+            receivedCombat(from, bb);
+            return;
+        }
+        SocketAddress a = udpAddresses.get(to);
+        if (a == null) return;
+        try {
+            u.send(new DatagramPacket(p.getData(), p.getOffset(), p.getLength(), a));
+        } catch (IOException ignored) {
+            // the next one replaces it
         }
     }
 
@@ -1175,6 +1256,7 @@ public final class Session {
             FleetComp mine = localComp;
             if (mine != null) outbox.add(compMessage(id, mine));
             final InetSocketAddress udpTarget = target;
+            udpToHost = target;
             udp.setSoTimeout(1000);
             startThread("MultiSector-send", new Runnable() { public void run() { clientSendLoop(gen, udpTarget); } });
             startThread("MultiSector-recv", new Runnable() { public void run() { clientReceiveLoop(gen); } });
@@ -1335,6 +1417,9 @@ public final class Session {
                     if (old == null || cs.seq > old.state.seq || old.state.seq - cs.seq > 1000) {
                         remoteClock = new ClockState.Received(cs, System.nanoTime());
                     }
+                } else if (type == Protocol.COMBAT_UDP) {
+                    r.getInt(); // to: us
+                    receivedCombat(r.getInt(), r);
                 } else if (type == Protocol.NPC_STATE) {
                     int pub = r.getInt();
                     String loc = Protocol.getString(r);
@@ -1403,6 +1488,7 @@ public final class Session {
         playerMessages.clear();
         lockMessages.clear();
         battleMessages.clear();
+        combatPackets.clear();
         worldEvents.clear();
         marketEvents.clear();
         marketSnapshots.clear();

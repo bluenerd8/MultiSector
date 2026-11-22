@@ -60,8 +60,11 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
         }
         if (!s.isActive()) return null;
         if (mem.contains(FleetLocks.CLAIMED_BY)) {
-            return pick(new Note(mem.getString(FleetLocks.CLAIMED_BY) + " is dealing with this fleet right now. "
-                    + "Try again once they're done."));
+            // Our fleet, and another player is fighting or talking to it: offer to join them.
+            int holder = FleetLocks.holderIdOf(fleet);
+            String name = mem.getString(FleetLocks.CLAIMED_BY);
+            if (holder >= 0) return pick(new Busy(holder, name, fleet.getName()));
+            return pick(new Note(name + " is dealing with this fleet right now. Try again once they're done."));
         }
         if (!mem.getBoolean(NpcSync.MIRROR_FLAG) && !mem.getBoolean(NpcSync.DRIVEN_FLAG)) return null;
         int handle = NpcSync.handleOf(fleet);
@@ -79,6 +82,8 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
      */
     @Override
     public PluginPick<BattleCreationPlugin> pickBattleCreationPlugin(SectorEntityToken opponent) {
+        BattleCreationPlugin view = JointBattle.viewFor(opponent);
+        if (view != null) return new PluginPick<BattleCreationPlugin>(view, PickPriority.HIGHEST); // our view of a friend's battle
         if (!(opponent instanceof CampaignFleetAPI) || !JointBattle.hasJoiners()) return null;
         return new PluginPick<BattleCreationPlugin>(new JointBattle.Creation(), PickPriority.MOD_GENERAL);
     }
@@ -135,6 +140,36 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
         }
     }
 
+    /** Another player has this fleet: say so, and offer to join their battle. */
+    private static final class Busy extends Base {
+        private final int holder;
+        private final String name;
+        private final String enemy;
+
+        Busy(int holder, String name, String enemy) {
+            this.holder = holder;
+            this.name = name;
+            this.enemy = enemy;
+        }
+
+        public void init(InteractionDialogAPI dialog) {
+            this.dialog = dialog;
+            dialog.getTextPanel().addPara(name + " is dealing with " + enemy + " right now.");
+            dialog.getOptionPanel().clearOptions();
+            dialog.getOptionPanel().addOption("Offer to join their battle", "join");
+            dialog.getOptionPanel().addOption("Leave", "leave");
+            dialog.setOptionOnEscape("Leave", "leave");
+        }
+
+        public void optionSelected(String optionText, Object optionData) {
+            if ("join".equals(optionData)) {
+                JointBattle.offerToJoin(dialog, holder, name, enemy);
+                return;
+            }
+            dialog.dismiss();
+        }
+    }
+
     /** Asks the host for the fleet, then hands over to the normal fleet dialog. */
     private static final class Ask extends Base {
         private static final float TIMEOUT_SECONDS = 8f;
@@ -145,6 +180,8 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
         private float waited;
         private boolean answered;
         private boolean granted;
+        private int holderId = -1;
+        private String holderName = "";
 
         Ask(int owner, int handle, CampaignFleetAPI fleet) {
             this.owner = owner;
@@ -177,7 +214,15 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
             if (!r.granted) {
                 dialog.getTextPanel().addPara(r.holder.isEmpty()
                         ? "That fleet is gone from the shared world."
-                        : r.holder + " is already dealing with this fleet. Try again once they're done.");
+                        : r.holder + " is already dealing with this fleet.");
+                if (r.holderId >= 0 && r.holderId != Session.get().getMyId()) {
+                    holderId = r.holderId;
+                    holderName = r.holder;
+                    dialog.getOptionPanel().clearOptions();
+                    dialog.getOptionPanel().addOption("Offer to join their battle", "join");
+                    dialog.getOptionPanel().addOption("Leave", "leave");
+                    dialog.setOptionOnEscape("Leave", "leave");
+                }
                 return;
             }
             if (!FleetLocks.takeOver(owner, handle, fleet, r.fleetJson)) {
@@ -194,6 +239,10 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
         }
 
         public void optionSelected(String optionText, Object optionData) {
+            if ("join".equals(optionData) && holderId >= 0) {
+                JointBattle.offerToJoin(dialog, holderId, holderName, fleet.getName());
+                return;
+            }
             if ("continue".equals(optionData) && granted) {
                 // The game's own fleet dialog, exactly as for any fleet. Our watcher reports the outcome.
                 FleetInteractionDialogPluginImpl normal = new FleetInteractionDialogPluginImpl();

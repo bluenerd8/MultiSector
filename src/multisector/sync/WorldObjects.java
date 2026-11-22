@@ -84,6 +84,10 @@ public final class WorldObjects implements EveryFrameScript {
     private static LocationAPI scanned;
     private static final Map<String, String> known = new HashMap<String, String>();
     private long nextScan;
+    /** Owner: when we last sent followers everything around us, and to whom (to resend when that changes). */
+    private long nextSnapshot;
+    private String snapshotFor = "";
+    private static final long SNAPSHOT_NANOS = 20_000_000_000L;
     /** Changes to the object this player is in a dialog with right now: applied once the dialog closes. */
     private static final List<JSONObject> deferred = new ArrayList<JSONObject>();
 
@@ -125,9 +129,40 @@ public final class WorldObjects implements EveryFrameScript {
         if (here == null) return;
         try {
             scan(s, here);
+            snapshot(s, me, here, now);
         } catch (RuntimeException e) {
             log.warn("[MultiSector] world object scan failed", e);
         }
+    }
+
+    /**
+     * Owner: everything around us that others follow, now and then. Changes
+     * only reach players who were there when they happened, so a player
+     * arriving later wouldn't have, say, a derelict that was already here.
+     * Their game adds what it's missing (and updates what it has).
+     */
+    private void snapshot(Session s, CampaignFleetAPI me, LocationAPI here, long now) {
+        int myId = s.getMyId();
+        if (s.ownerOf(myId) != myId || !s.hasFollowers(myId)) {
+            snapshotFor = "";
+            return;
+        }
+        String key = FleetSync.locationId(here) + s.followersOf(myId);
+        if (key.equals(snapshotFor) && now - nextSnapshot < 0) return;
+        snapshotFor = key;
+        nextSnapshot = now + SNAPSHOT_NANOS;
+        String locId = FleetSync.locationId(here);
+        int sent = 0;
+        for (SectorEntityToken e : objects(here).values()) {
+            String k = kind(e);
+            if (OTHER.equals(k)) continue; // can't be rebuilt elsewhere anyway
+            if (here.isHyperspace() && Misc.getDistance(e.getLocation(), me.getLocation()) > NpcSync.PUB_RADIUS) continue;
+            JSONObject j = describe(e, locId, "add");
+            if (j == null) continue;
+            s.sendWorldEvent(j.toString());
+            sent++;
+        }
+        if (sent > 0) log.info("[MultiSector] sent " + sent + " objects around us in " + locId + " to the players here");
     }
 
     /** What changed here since last time goes to everyone. Arriving somewhere just takes stock. */

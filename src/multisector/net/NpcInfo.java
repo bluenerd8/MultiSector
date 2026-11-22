@@ -29,6 +29,12 @@ public final class NpcInfo {
      * which is about who the fleet is and which ships it has.
      */
     public final String status;
+    /**
+     * Details that change: each ship's hull, readiness and mothballing (in
+     * the same order as the ships), and the commander's name, portrait and
+     * rank, as JSON, or "". Not part of {@link #hash} either.
+     */
+    public final String extra;
     public final int hash;
 
     public NpcInfo(int handle, String fleetId, String faction, String name, List<String> variants, List<String> hulls) {
@@ -37,7 +43,13 @@ public final class NpcInfo {
 
     public NpcInfo(int handle, String fleetId, String faction, String name, List<String> variants, List<String> hulls,
                    String status) {
+        this(handle, fleetId, faction, name, variants, hulls, status, "");
+    }
+
+    public NpcInfo(int handle, String fleetId, String faction, String name, List<String> variants, List<String> hulls,
+                   String status, String extra) {
         this.handle = handle;
+        this.extra = extra == null || extra.length() > 8000 ? "" : extra;
         String st = status == null ? "" : status;
         this.status = st.length() > 80 ? st.substring(0, 80) : st;
         this.fleetId = fleetId == null ? "" : fleetId;
@@ -58,7 +70,7 @@ public final class NpcInfo {
         for (int i = 0; i < variants.size(); i++) {
             s += Protocol.stringSize(variants.get(i)) + Protocol.stringSize(hulls.get(i));
         }
-        return s + Protocol.stringSize(status);
+        return s + Protocol.stringSize(status) + Protocol.stringSize(extra);
     }
 
     public void write(ByteBuffer bb) {
@@ -72,6 +84,7 @@ public final class NpcInfo {
             Protocol.putString(bb, hulls.get(i));
         }
         Protocol.putString(bb, status);
+        Protocol.putString(bb, extra);
     }
 
     public static NpcInfo read(ByteBuffer bb) {
@@ -88,6 +101,7 @@ public final class NpcInfo {
             h.add(Protocol.getString(bb));
         }
         String status = bb.remaining() >= 2 ? Protocol.getString(bb) : "";
-        return new NpcInfo(handle, id, faction, name, v, h, status);
+        String extra = bb.remaining() >= 2 ? Protocol.getString(bb) : "";
+        return new NpcInfo(handle, id, faction, name, v, h, status, extra);
     }
 }

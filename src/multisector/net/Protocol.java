@@ -114,6 +114,9 @@ public final class Protocol {
     public static final byte CLOCK = 14;
     /** publisher(int), locationId, count(short), NpcStates. Publisher -> host -> the players following it there. */
     public static final byte NPC_STATE = 17;
+    /** to(int), from(int), payload: a joint battle's live state (leader -> joiners) or a pilot's controls
+     *  (joiner -> leader), see sync.JointCombat. Client -> host, which keeps it or forwards it as is. */
+    public static final byte COMBAT_UDP = 18;
     /** offset of the type byte inside a packet, so the host can flip PING to PONG in place */
     public static final int TYPE_OFFSET = 6;
     /** header + seq(4) + sentNanos(8) */

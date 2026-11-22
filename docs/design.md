@@ -474,3 +474,37 @@ Both players sit in dialogs meanwhile, so neither fleet moves.
 
 - **Piloting your own ship** in someone else's battle. That's what the Co-op mod gets from screen sharing. Here it would need the battle running (or at least shown) on both games, with controls sent across: a project of its own.
 - **Loot and experience** go to the leader, as with any allied fleet. Reputation effects with the enemy's faction apply to the leader only.
+
+## 20. Battle view, piloting, and more of the world shared
+
+### Seeing and piloting a joint battle (`JointCombat`)
+
+Like the Co-op mod, but across two games instead of one shared screen. The battle still only happens on the leader's game; the joiner gets a live view of it and flies their own ship.
+
+**Leader's game** (`JointCombat.Leader`, a combat plugin added while someone has joined):
+
+- Announces each ship as it enters the battle (`cship`: exact loadout, side, whether it's the joiner's, whether it's the one they pilot) and drops ships that leave (`cgone`). Fighters and station modules come with their ship.
+- Streams every ship's state 20 times a second over UDP (`COMBAT_UDP`, relayed by the host): position, velocity, heading, turn rate, hull, flux, hard flux, shield on and facing, phased, system active, overload, venting, hulk, retreating, which engines are firing, and which weapons are firing at what angle. Also its combat speed (time multiplier) and whether it's paused.
+- About 1.5 s into the battle, deploys every combat-ready ship of each joiner (not mothballed, not civilian, readiness 20%+), even beyond the battle's deployment limit (`jointBattleDeployAll`). The ship a joiner pilots always goes in. Before, allied ships only deployed if there was room, which is likely why a host who joined a friend's battle didn't show up.
+- Gives the piloted ship to `RemotePilot`, a ship AI that flies it from the joiner's controls (`COMBAT_UDP` input packets, about 30 a second). Held keys: accelerate, back, turn, strafe, decelerate, fire. Counted toggles: shield, system, vent, fighters, autofire. Plus weapon group, target, and the mouse position (the selected group's weapons aim at it within their arcs). Without input for 1.5 s it falls back to the ship's own AI.
+
+**Joiner's game:** when the leader's combat starts (`cstart`, with the map size), the join dialog starts a battle of its own (`MirrorCreation`, picked only for that one start): an empty field of the same size, with `JointCombat.Mirror`. That plugin:
+
+- spawns each announced ship (its own ships on the player side, the leader's as allies, the enemy as enemies), with an AI that does nothing, and makes them unable to take damage;
+- puts each ship where the stream says, predicted forward by its velocity and the leader's speed, with hull, flux, shields, overloads and hulks. Engines and systems fire with the same commands as on the leader's game, and weapons fire where the leader's fire. Shots fly and hit visually, but nothing is damaged; only the leader's game decides what happened;
+- makes the piloted ship the player's ship (camera, HUD), blocks its local controls, and sends them to the leader instead: WASD to move, Q/E to strafe, X to decelerate, mouse to aim, left button to fire the selected group (1-7), right button for shields, F system, V vent, Z fighters, T autofire, R to target the enemy nearest the mouse;
+- follows the leader's combat speed and pause. A speed-up mod on the leader shows at the same speed on the joiner's game, and one on the joiner's game is cancelled out;
+- closes when the leader's combat ends (`cend`), when the result arrives, or after 20 s without a packet.
+
+Without the view (`jointBattleView: false`, or if it can't open) the joiner gets the report and retreat order from 0.0.25.
+
+Known limits of the view: fighters and missiles on the joiner's game are its own (launched and fired locally, cosmetic); weapons that aren't firing keep their own aim; phase cloaks aren't shown; piloting has the network delay of a round trip; keys are Starsector's defaults, not your own bindings.
+
+### Both players on one fleet
+
+When you reach a fleet another player is already dealing with, you're no longer only told to wait: **Offer to join their battle** sends a join request (`join` with battle 0, "whatever you're fighting"). That covers both a fleet from the world you follow (the owner's refusal now carries the holder's id) and one from your own world that a follower holds. The leader takes it if they're still in the battle dialog and combat hasn't started.
+
+### More of the world shared
+
+- **NPC fleet details:** `NpcInfo.extra` carries each ship's hull, readiness (both to 5%) and mothballing, and the commander's name, portrait, rank and post. Followers apply them to stand-ins and their own copies; it's re-sent when it changes.
+- **Objects already there:** an owner with followers sends everything rebuildable around it (debris, wrecks, pods, objectives, stable locations; within 8,000 units in hyperspace) when followers arrive and every 20 s. Followers add what they're missing. Before, only changes were shared, so a derelict that existed before a friend arrived never reached them.

@@ -115,6 +115,8 @@ public class NpcSync implements EveryFrameScript {
         final boolean mirror;
         /** The owner's details last matched (0: not yet). */
         int hash;
+        /** The owner's changing details (damage, readiness, commander) last applied (0: not yet). */
+        int extraHash;
         Boolean oldAi;
         OrbitAPI oldOrbit;
         /** Our copy's own tooltip text, put back when we stop steering it. */
@@ -267,7 +269,7 @@ public class NpcSync implements EveryFrameScript {
             byHandle.put(h, f);
             if (fresh || details) {
                 NpcInfo info = describe(h, f, myName);
-                int sent = 31 * info.hash + info.status.hashCode(); // its status changing is news too
+                int sent = 31 * (31 * info.hash + info.status.hashCode()) + info.extra.hashCode(); // and details
                 Integer old = sentHash.get(h);
                 if (old == null || old != sent) {
                     s.publishInfo(info);
@@ -311,20 +313,91 @@ public class NpcSync implements EveryFrameScript {
     private static NpcInfo describe(int handle, CampaignFleetAPI f, String myName) {
         List<String> variants = new ArrayList<String>();
         List<String> hulls = new ArrayList<String>();
+        org.json.JSONArray ships = new org.json.JSONArray();
+        for (FleetMemberAPI m : ordered(f)) {
+            String v = m.getVariant().getHullVariantId();
+            variants.add(v == null ? "" : v);
+            hulls.add(m.getHullSpec().getHullId());
+            // To the nearest 5%, so small drifts don't resend.
+            org.json.JSONArray st = new org.json.JSONArray();
+            st.put(Math.round(m.getStatus().getHullFraction() * 20f));
+            st.put(Math.round(m.getRepairTracker().getCR() * 20f));
+            st.put(m.getRepairTracker().isMothballed() ? 1 : 0);
+            ships.put(st);
+        }
+        String faction = f.getFaction() == null ? "" : f.getFaction().getId();
+        String extra = "";
+        try {
+            org.json.JSONObject x = new org.json.JSONObject().put("s", ships);
+            com.fs.starfarer.api.characters.PersonAPI c = f.getCommander();
+            if (c != null && !c.isDefault() && c.getName() != null) {
+                x.put("c", new org.json.JSONObject().put("f", c.getName().getFirst()).put("l", c.getName().getLast())
+                        .put("g", c.getName().getGender() == null ? "ANY" : c.getName().getGender().name())
+                        .put("p", c.getPortraitSprite()).put("r", c.getRankId()).put("po", c.getPostId()));
+            }
+            extra = x.toString();
+        } catch (Exception e) {
+            // the ships alone still work
+        }
+        return new NpcInfo(handle, f.getId(), faction, f.getName(), variants, hulls, status(f, myName), extra);
+    }
+
+    /** A fleet's ships the way we describe them: flagship first, then in the fleet's order, no fighter wings. */
+    private static List<FleetMemberAPI> ordered(CampaignFleetAPI f) {
         FleetMemberAPI flag = f.getFlagship();
         List<FleetMemberAPI> members = f.getFleetData().getMembersListCopy();
         if (flag != null) {
             members.remove(flag);
             members.add(0, flag);
         }
+        List<FleetMemberAPI> out = new ArrayList<FleetMemberAPI>();
         for (FleetMemberAPI m : members) {
-            if (m.isFighterWing() || m.getVariant() == null) continue;
-            String v = m.getVariant().getHullVariantId();
-            variants.add(v == null ? "" : v);
-            hulls.add(m.getHullSpec().getHullId());
+            if (!m.isFighterWing() && m.getVariant() != null) out.add(m);
         }
-        String faction = f.getFaction() == null ? "" : f.getFaction().getId();
-        return new NpcInfo(handle, f.getId(), faction, f.getName(), variants, hulls, status(f, myName));
+        return out;
+    }
+
+    /** Each ship's hull, readiness and mothballing, and the commander, as the owner has them. */
+    private static void applyExtra(CampaignFleetAPI f, NpcInfo info) {
+        if (info.extra.isEmpty()) return;
+        try {
+            org.json.JSONObject x = new org.json.JSONObject(info.extra);
+            org.json.JSONArray ships = x.optJSONArray("s");
+            List<FleetMemberAPI> members = ordered(f);
+            for (int i = 0; ships != null && i < ships.length() && i < members.size(); i++) {
+                org.json.JSONArray st = ships.optJSONArray(i);
+                if (st == null) continue;
+                FleetMemberAPI m = members.get(i);
+                m.getStatus().setHullFraction(Math.max(0.01f, st.optInt(0, 20) / 20f));
+                m.getRepairTracker().setCR(st.optInt(1, 14) / 20f);
+                boolean moth = st.optInt(2, 0) == 1;
+                if (moth != m.getRepairTracker().isMothballed()) m.getRepairTracker().setMothballed(moth);
+            }
+            org.json.JSONObject c = x.optJSONObject("c");
+            if (c != null) {
+                com.fs.starfarer.api.characters.PersonAPI p = f.getCommander();
+                if (p == null || p.isDefault()) {
+                    p = Global.getFactory().createPerson();
+                    p.setFaction(f.getFaction().getId());
+                    f.setCommander(p);
+                    FleetMemberAPI flag = f.getFlagship();
+                    if (flag != null) flag.setCaptain(p);
+                }
+                com.fs.starfarer.api.characters.FullName.Gender g;
+                try {
+                    g = com.fs.starfarer.api.characters.FullName.Gender.valueOf(c.optString("g", "ANY"));
+                } catch (IllegalArgumentException e) {
+                    g = com.fs.starfarer.api.characters.FullName.Gender.ANY;
+                }
+                p.setName(new com.fs.starfarer.api.characters.FullName(c.optString("f", ""), c.optString("l", ""), g));
+                if (!c.optString("p", "").isEmpty()) p.setPortraitSprite(c.optString("p"));
+                if (!c.optString("r", "").isEmpty()) p.setRankId(c.optString("r"));
+                if (!c.optString("po", "").isEmpty()) p.setPostId(c.optString("po"));
+            }
+            f.forceSync();
+        } catch (Exception e) {
+            // keep what we have
+        }
     }
 
     /** What the fleet's tooltip should say it's doing, for every copy of it. */
@@ -498,6 +571,11 @@ public class NpcSync implements EveryFrameScript {
             if (d.hash != info.hash && d.fleet != FleetLocks.activeFleet()) {
                 match(d, info); // ships lost or gained on the owner's game, or never matched yet
                 d.hash = info.hash;
+                d.extraHash = 0; // the ships may be new: put their damage back on
+            }
+            if (d.extraHash != info.extra.hashCode() && d.fleet != FleetLocks.activeFleet()) {
+                applyExtra(d.fleet, info);
+                d.extraHash = info.extra.hashCode();
             }
             follow(d.fleet, st, speed, now, frameDt);
             showStatus(d, info);
