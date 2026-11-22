@@ -1,0 +1,6 @@
+{
+	"plugins":{
+		# MultiSector: lets other players join your battles once the fighting starts
+		"multisector_JointCombat":"multisector.sync.JointCombatHook"
+	}
+}

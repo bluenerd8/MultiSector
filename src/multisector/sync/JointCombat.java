@@ -57,9 +57,9 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  *     and streams every ship's state 20 times a second (position, speed,
  *     heading, hull, flux, shield, system, engines, which weapons are firing
  *     and where), to each player who joined;</li>
- * <li>makes sure joiners' ships take part: their combat-ready ships are
- *     deployed even beyond the battle's limit (config), and the ship a joiner
- *     pilots always is;</li>
+ * <li>brings joiners in as reinforcements once combat is under way: their
+ *     combat-ready ships (config) and always the one they pilot arrive at the
+ *     leader's edge of the map as allies, and the leader is told in combat;</li>
  * <li>hands that ship to {@link RemotePilot}, which flies it from the joiner's
  *     controls (falling back to the ship's own AI if they stop coming).</li>
  * </ul>
@@ -117,35 +117,50 @@ final class JointCombat {
         long arrived;
     }
 
-    /** On the leader's game, for the battle's whole length. */
+    /** On the leader's game, for the battle's whole length (from {@link JointCombatHook}). */
     static final class Leader extends BaseEveryFrameCombatPlugin {
+        /** The one running now, if we're leading a battle's combat. */
+        static volatile Leader active;
+
         private CombatEngineAPI engine;
         private final Map<ShipAPI, Integer> ids = new IdentityHashMap<ShipAPI, Integer>();
         private final Map<Integer, ShipAPI> byId = new HashMap<Integer, ShipAPI>();
         private int nextId = 1;
         private int seq;
         private long nextState, nextStatus;
-        private boolean deployed, ended;
+        private boolean ended;
+        private int slot;
         private final Map<Integer, Input> inputs = new ConcurrentHashMap<Integer, Input>();
         /** Ships flown from a joiner's controls right now (the rest of the time they have their own AI). */
         private final Set<ShipAPI> piloted = java.util.Collections.newSetFromMap(new IdentityHashMap<ShipAPI, Boolean>());
-        private final Set<Integer> announcedJoiners = new HashSet<Integer>();
 
         @Override
         public void init(CombatEngineAPI engine) {
             this.engine = engine;
-            JointBattle.inCombat = true;
+            active = this;
+            JointBattle.combatStarted();
+            log.info("[MultiSector] combat started: other players can join it now");
+        }
+
+        /**
+         * A player joins mid-fight: they see the battle as it is, and their
+         * ships arrive as reinforcements.
+         */
+        void welcome(JointBattle.Joiner jn) throws Exception {
             Session s = Session.get();
-            for (JointBattle.Joiner jn : JointBattle.joiners()) {
-                try {
-                    s.sendBattleMessage(jn.id, JointBattle.msg("cstart").put("w", engine.getMapWidth())
-                            .put("h", engine.getMapHeight()).toString());
-                } catch (Exception ignored) {
-                    // they'll just get the report
-                }
+            s.sendBattleMessage(jn.id, JointBattle.msg("cstart").put("w", engine.getMapWidth())
+                    .put("h", engine.getMapHeight()).toString());
+            for (Map.Entry<ShipAPI, Integer> e : ids.entrySet()) {
+                s.sendBattleMessage(jn.id, cship(e.getKey(), e.getValue(), jn).toString());
             }
-            JointBattle.engaged = true;
-            log.info("[MultiSector] joint battle started with " + JointBattle.joiners().size() + " other player(s)");
+            int n = deploy(jn);
+            message(jn.name + " joins your battle with " + n + (n == 1 ? " ship" : " ships")
+                    + (jn.pilotPuppetId != null ? ", flying " + jn.names.get(jn.pilotPuppetId) + " themselves" : ""));
+            try {
+                Global.getSoundPlayer().playUISound("ui_noise_static_message", 1f, 1f);
+            } catch (RuntimeException ignored) {
+                // no sound
+            }
         }
 
         @Override
@@ -156,14 +171,8 @@ final class JointCombat {
                 JointBattle.handleMessages(s); // campaign scripts are stopped during combat
                 readInputs(s);
                 track(s);
-                if (!deployed && engine.getTotalElapsedTime(false) > 1.5f) {
-                    deployed = true;
-                    deployJoiners();
-                }
+                JointBattle.tellFight(s, !ended);
                 for (JointBattle.Joiner jn : JointBattle.joiners()) {
-                    if (announcedJoiners.add(jn.id)) {
-                        banner(jn.name + " joins the fight with " + jn.toOwner.size() + " ships");
-                    }
                     if (jn.retreat) retreat(jn);
                     pilot(jn);
                 }
@@ -182,6 +191,9 @@ final class JointCombat {
                 if (over && !ended) {
                     ended = true;
                     for (JointBattle.Joiner jn : JointBattle.joiners()) s.sendBattleMessage(jn.id, JointBattle.msg("cend").toString());
+                    JointBattle.finishJoiners(s);
+                    JointBattle.tellFightSoon();
+                    JointBattle.tellFight(s, false);
                 }
             } catch (Exception e) {
                 log.warn("[MultiSector] joint battle frame failed", e);
@@ -198,15 +210,8 @@ final class JointCombat {
                 int id = nextId++;
                 ids.put(ship, id);
                 byId.put(id, ship);
-                FleetMemberAPI m = ship.getFleetMember();
-                JSONObject spec = ShipJson.ship(m);
                 for (JointBattle.Joiner jn : JointBattle.joiners()) {
-                    String owner = jn.toOwner.get(m.getId());
-                    JSONObject j = JointBattle.msg("cship").put("id", id).put("owner", ship.getOwner())
-                            .put("ally", ship.isAlly()).put("ship", spec).put("name", m.getShipName())
-                            .put("mine", owner != null).put("pilot", m.getId().equals(jn.pilotPuppetId))
-                            .put("x", ship.getLocation().x).put("y", ship.getLocation().y).put("f", ship.getFacing());
-                    s.sendBattleMessage(jn.id, j.toString());
+                    s.sendBattleMessage(jn.id, cship(ship, id, jn).toString());
                 }
             }
             for (ShipAPI gone : new ArrayList<ShipAPI>(ids.keySet())) {
@@ -217,6 +222,16 @@ final class JointCombat {
                     s.sendBattleMessage(jn.id, JointBattle.msg("cgone").put("id", id).toString());
                 }
             }
+        }
+
+        /** A ship, announced to a joiner: its exact loadout, side, and whether it's theirs. */
+        private static JSONObject cship(ShipAPI ship, int id, JointBattle.Joiner jn) throws Exception {
+            FleetMemberAPI m = ship.getFleetMember();
+            String owner = jn.toOwner.get(m.getId());
+            return JointBattle.msg("cship").put("id", id).put("owner", ship.getOwner())
+                    .put("ally", ship.isAlly()).put("ship", ShipJson.ship(m)).put("name", m.getShipName())
+                    .put("mine", owner != null).put("pilot", m.getId().equals(jn.pilotPuppetId))
+                    .put("x", ship.getLocation().x).put("y", ship.getLocation().y).put("f", ship.getFacing());
         }
 
         /** Every ship's state, packed into datagrams, to every joiner. */
@@ -329,33 +344,35 @@ final class JointCombat {
             }
         }
 
-        /** Joiners' fleets take part: their combat-ready ships go in, and the ship they pilot always does. */
-        private void deployJoiners() {
+        /**
+         * A joiner's ships arrive as reinforcements at our edge of the map:
+         * their combat-ready ships (config), and always the one they pilot.
+         * Their fleet is no part of the campaign battle, so the game leaves
+         * them out of its outcome; we report it to the joiner instead.
+         */
+        private int deploy(JointBattle.Joiner jn) {
             CombatFleetManagerAPI fm = engine.getFleetManager(0);
-            if (fm == null) return;
-            Set<String> inBattle = new HashSet<String>();
-            for (ShipAPI ship : engine.getShips()) if (ship.getFleetMember() != null) inBattle.add(ship.getFleetMember().getId());
-            for (FleetMemberAPI m : fm.getDestroyedCopy()) inBattle.add(m.getId());
-            for (FleetMemberAPI m : fm.getDisabledCopy()) inBattle.add(m.getId());
-            for (FleetMemberAPI m : fm.getRetreatedCopy()) inBattle.add(m.getId());
-            float y = -engine.getMapHeight() / 2f + 600f;
-            int slot = 0;
-            for (JointBattle.Joiner jn : JointBattle.joiners()) {
-                for (FleetMemberAPI m : jn.fleet.getFleetData().getMembersListCopy()) {
-                    if (inBattle.contains(m.getId()) || m.isFighterWing() || m.getRepairTracker().isMothballed()) continue;
-                    boolean pilot = m.getId().equals(jn.pilotPuppetId);
-                    boolean ready = !m.isCivilian() && m.getRepairTracker().getCR() >= 0.2f;
-                    if (!pilot && !(ready && MultiSectorConfig.isJointBattleDeployAll())) continue;
-                    float x = (slot % 2 == 0 ? 1 : -1) * (400f + 450f * (slot / 2));
-                    slot++;
-                    try {
-                        ShipAPI ship = fm.spawnFleetMember(m, new Vector2f(x, y), 90f, 1.5f);
-                        if (ship != null) ship.setAlly(true);
-                    } catch (RuntimeException e) {
-                        log.warn("[MultiSector] couldn't deploy " + jn.name + "'s " + m.getShipName(), e);
+            if (fm == null) return 0;
+            float y = -engine.getMapHeight() / 2f + 500f;
+            int n = 0;
+            for (FleetMemberAPI m : jn.fleet.getFleetData().getMembersListCopy()) {
+                if (m.isFighterWing() || m.getRepairTracker().isMothballed()) continue;
+                boolean pilot = m.getId().equals(jn.pilotPuppetId);
+                boolean ready = !m.isCivilian() && m.getRepairTracker().getCR() >= 0.2f;
+                if (!pilot && !(ready && MultiSectorConfig.isJointBattleDeployAll())) continue;
+                float x = (slot % 2 == 0 ? 1 : -1) * (300f + 400f * (slot / 2));
+                slot++;
+                try {
+                    ShipAPI ship = fm.spawnFleetMember(m, new Vector2f(x, y), 90f, 2f);
+                    if (ship != null) {
+                        ship.setAlly(true);
+                        n++;
                     }
+                } catch (RuntimeException e) {
+                    log.warn("[MultiSector] couldn't deploy " + jn.name + "'s " + m.getShipName(), e);
                 }
             }
+            return n;
         }
 
         /**
@@ -390,6 +407,12 @@ final class JointCombat {
             }
         }
 
+        /** A line in the battle's message log, for the leader, from anywhere in combat. */
+        static void message(String text) {
+            Leader l = active;
+            if (l != null && l.engine != null) l.banner(text);
+        }
+
         /** A line in the battle's message log, for the leader. */
         private void banner(String text) {
             try {
@@ -399,7 +422,7 @@ final class JointCombat {
             }
         }
 
-        private void retreat(JointBattle.Joiner jn) {
+        void retreat(JointBattle.Joiner jn) {
             for (ShipAPI ship : engine.getShips()) {
                 FleetMemberAPI m = ship.getFleetMember();
                 if (m == null || !jn.toOwner.containsKey(m.getId())) continue;
@@ -626,6 +649,8 @@ final class JointCombat {
                 return;
             }
             if (shown.containsKey(id)) return;
+            int side = j.optInt("owner");
+            if (side != 0 && side != 1) return; // a wreck (owner 100): neither side's, and nothing to show moving
             FleetMemberAPI m = ShipJson.buildShip(j.getJSONObject("ship"), new ArrayList<String>());
             if (m == null) return; // a ship this game doesn't have
             if (j.has("name")) m.setShipName(j.optString("name"));

@@ -56,7 +56,9 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
             if (!s.isActive() || id < 0 || !s.isPlayerHere(id)) {
                 return pick(new Note("That player's fleet isn't answering: they may have just left."));
             }
-            return pick(PlayerTalk.hail(id));
+            // In a battle: join it (once the fighting starts) rather than hail.
+            InteractionDialogPlugin join = JointBattle.joinDialogFor(id);
+            return pick(join != null ? join : PlayerTalk.hail(id));
         }
         if (!s.isActive()) return null;
         if (mem.contains(FleetLocks.CLAIMED_BY)) {
@@ -76,16 +78,15 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
     }
 
     /**
-     * While another player's fleet has joined our battle, the battle is set
-     * up as usual plus a live report for them ({@link JointBattle}). Any
-     * other time we leave battle set-up to the game (and other mods).
+     * Only our view of a friend's battle ({@link JointBattle}). Real battles
+     * are set up by the game (and other mods); joining them happens in
+     * combat ({@link JointCombatHook}).
      */
     @Override
     public PluginPick<BattleCreationPlugin> pickBattleCreationPlugin(SectorEntityToken opponent) {
         BattleCreationPlugin view = JointBattle.viewFor(opponent);
-        if (view != null) return new PluginPick<BattleCreationPlugin>(view, PickPriority.HIGHEST); // our view of a friend's battle
-        if (!(opponent instanceof CampaignFleetAPI) || !JointBattle.hasJoiners()) return null;
-        return new PluginPick<BattleCreationPlugin>(new JointBattle.Creation(), PickPriority.MOD_GENERAL);
+        if (view != null) return new PluginPick<BattleCreationPlugin>(view, PickPriority.HIGHEST);
+        return null;
     }
 
     private static PluginPick<InteractionDialogPlugin> pick(InteractionDialogPlugin p) {
@@ -156,7 +157,7 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
             this.dialog = dialog;
             dialog.getTextPanel().addPara(name + " is dealing with " + enemy + " right now.");
             dialog.getOptionPanel().clearOptions();
-            dialog.getOptionPanel().addOption("Offer to join their battle", "join");
+            dialog.getOptionPanel().addOption("Join their battle", "join");
             dialog.getOptionPanel().addOption("Leave", "leave");
             dialog.setOptionOnEscape("Leave", "leave");
         }
@@ -219,7 +220,7 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
                     holderId = r.holderId;
                     holderName = r.holder;
                     dialog.getOptionPanel().clearOptions();
-                    dialog.getOptionPanel().addOption("Offer to join their battle", "join");
+                    dialog.getOptionPanel().addOption("Join their battle", "join");
                     dialog.getOptionPanel().addOption("Leave", "leave");
                     dialog.setOptionOnEscape("Leave", "leave");
                 }

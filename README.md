@@ -26,8 +26,8 @@ Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), ai
 
 ## Fighting together
 
-- When you're in a battle, any other player whose fleet is close by is asked to join. Give them a moment before you engage. If you reach a fleet someone is already fighting, you can offer to join their battle.
-- If they join, a live view of the battle opens on their game. They **fly one of their own ships** (their flagship unless they pick another), and the rest of their fleet fights beside you under the battle AI. All their combat-ready ships are deployed. You can't pilot, recover or keep their ships.
+- Nobody is pulled into a battle. To help a friend who's fighting, fly to the fight and click the enemy fleet (or your friend's fleet). You can join once the fighting has begun; until then the dialog tells you to wait.
+- Your ships arrive as reinforcements at your friend's side of the battlefield, and they get a message in combat. A live view of the battle opens on your game: you **fly one of your own ships** (your flagship unless you pick another), and the rest of your combat-ready ships fight under the battle AI. Your friend can't pilot, recover or keep your ships.
 - Controls in the view: WASD to move, Q/E to strafe, X to decelerate, mouse to aim, left button to fire the selected group (1-7), right button for shields, F system, V vent, Z fighters, T autofire, R to target.
 - When the battle is over, their losses, hull damage and readiness are applied to their real fleet. Nobody is left without a ship.
 - The view follows the battle's combat speed, so a speed-up mod (2x combat speed and the like) on the battle's game shows at the same speed.

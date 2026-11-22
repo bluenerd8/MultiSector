@@ -3,7 +3,6 @@ package multisector.sync;
 import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.BattleAPI;
-import com.fs.starfarer.api.campaign.BattleAPI.BattleSide;
 import com.fs.starfarer.api.campaign.BattleCreationPlugin;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
@@ -23,8 +22,6 @@ import com.fs.starfarer.api.combat.ShipAPI;
 import com.fs.starfarer.api.fleet.FleetGoal;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
-import com.fs.starfarer.api.impl.combat.BattleCreationPluginImpl;
-import com.fs.starfarer.api.mission.MissionDefinitionAPI;
 import multisector.character.ShipJson;
 import multisector.net.Session;
 import multisector.ui.MultiSectorConfig;
@@ -36,6 +33,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -45,36 +43,43 @@ import java.util.Set;
  * Fighting together: another player's real ships join your battle.
  *
  * <p>The battle runs on one game, the <b>leader's</b>: whoever's fleet is in
- * it. While the leader is in a battle dialog, every other player whose fleet
- * is within {@link #JOIN_RANGE} is asked to join; a player who runs into a
- * fleet someone is already fighting can ask to join too. A player who joins
- * (a <b>joiner</b>) picks the ship they'll pilot (their flagship by default)
- * and sends their fleet exactly: loadouts, officers, their own character on
- * the flagship, readiness, damage. The leader's game puts it into the battle
- * on the leader's side.
+ * it. Nobody is pulled in. While the leader is in a battle, every other
+ * player is told about it ({@code fight}, every 2 s: what they're fighting,
+ * and whether combat has begun). A player who wants to help clicks the fight
+ * (the enemy fleet, or the leader's fleet) and gets the join dialog.
  *
- * <p>During combat ({@link JointCombat}) the joiner's game opens a live view
- * of the battle, where they fly their chosen ship; their other ships fight
- * under the battle AI. Without the view (config, or if it can't open) they
- * get a report of each ship and can order a retreat.
+ * <p><b>Joining only opens once combat has begun.</b> The battle's sides,
+ * deployment and enemies are settled on the leader's game first, exactly as
+ * in single player; nothing about the campaign battle is changed. A joiner
+ * then comes in as reinforcements: they pick the ship they'll pilot (their
+ * flagship by default) and send their fleet exactly (loadouts, officers,
+ * their own character on the flagship, readiness, damage). The leader's
+ * combat ({@link JointCombat.Leader}) spawns their combat-ready ships at the
+ * leader's edge of the map as allies, in a fleet of their own that's never
+ * part of the campaign battle (the game leaves ships like that out of the
+ * battle's outcome). The leader gets a message in combat when someone joins.
+ *
+ * <p>During combat the joiner's game opens a live view of the battle, where
+ * they fly their chosen ship; their other ships fight under the battle AI.
+ * Without the view (config, or if it can't open) they get a report of each
+ * ship and can order a retreat.
  *
  * <p><b>The ships stay the joiner's.</b> The leader can't pilot, recover or
- * keep them. When the battle is over, what happened to each ship (lost, hull
- * damage, readiness) goes back to the joiner's game and is applied to their
- * real fleet. A joiner is never left without a ship: if every ship was lost,
- * the flagship limps away instead.
- *
- * <p>Both sides wait in a dialog meanwhile, so neither fleet moves. Loot and
- * experience go to the leader, as with any allied fleet.
+ * keep them. When the engagement is over, what happened to each ship (lost,
+ * hull damage, readiness) goes back to the joiner's game and is applied to
+ * their real fleet. A joiner is never left without a ship: if every ship was
+ * lost, the flagship limps away instead. Loot and experience go to the leader.
  *
  * Transient: added on each load.
  */
 public final class JointBattle implements EveryFrameScript {
 
-    /** Players this close to the battle are asked to join. */
-    static final float JOIN_RANGE = 2000f;
     /** A joiner can stop waiting if they hear nothing for this long. */
     private static final long QUIET_NANOS = 120_000_000_000L;
+    /** How often the leader tells everyone about their battle. */
+    private static final long FIGHT_NANOS = 2_000_000_000L;
+    /** A battle we haven't heard about for this long is over (or its leader is gone). */
+    private static final long FIGHT_STALE_NANOS = 7_000_000_000L;
 
     private static final Logger log = Global.getLogger(JointBattle.class);
     private static final Random random = new Random();
@@ -118,7 +123,7 @@ public final class JointBattle implements EveryFrameScript {
                 if ("left".equals(k)) {
                     leaderLost(m.from);
                     joinerLost(m.from);
-                } else if ("join".equals(k) || "decline".equals(k) || "retreat".equals(k) || "seen".equals(k)) {
+                } else if ("join".equals(k) || "retreat".equals(k) || "seen".equals(k)) {
                     toLeader(s, m, k, j);
                 } else {
                     toJoiner(s, m, k, j);
@@ -144,17 +149,21 @@ public final class JointBattle implements EveryFrameScript {
 
     // ================================================================ leader
 
-    /** A player whose ships are in our battle. */
+    /** A player whose ships are in our combat. */
     static final class Joiner {
         final int id;
         final String name;
+        /** Their ships, in a fleet of their own: never part of the campaign battle. */
         final CampaignFleetAPI fleet;
-        /** The puppet's member id -> the joiner's real member id. */
+        /** Our member id -> the joiner's real member id. */
         final Map<String, String> toOwner = new HashMap<String, String>();
         final Map<String, String> names = new HashMap<String, String>();
-        /** The puppet member they pilot, or null. */
+        /** The member they pilot (our id), or null. */
         String pilotPuppetId;
         volatile boolean retreat;
+        /** Their member id -> how it was doing when we last looked (state; hull and readiness). */
+        final Map<String, String> lastState = new HashMap<String, String>();
+        final Map<String, float[]> lastHullCr = new HashMap<String, float[]>();
 
         Joiner(int id, String name, CampaignFleetAPI fleet) {
             this.id = id;
@@ -165,121 +174,140 @@ public final class JointBattle implements EveryFrameScript {
 
     private static BattleAPI battle;
     private static int battleId;
-    private static final Set<Integer> asked = new HashSet<Integer>();
-    private static final Map<Integer, Joiner> joiners = new HashMap<Integer, Joiner>();
-    /** True while a battle is being fought: nobody can join a fight already under way. */
+    private static final Map<Integer, Joiner> joiners = new LinkedHashMap<Integer, Joiner>();
+    /** True while a battle is being fought (set by our combat plugin, cleared by any campaign frame). */
     static volatile boolean inCombat;
-    /** True once this battle has had an engagement. */
-    static volatile boolean engaged;
-    /** Players we asked and haven't heard back from, with when we asked. */
-    private static final Map<Integer, Long> waiting = new HashMap<Integer, Long>();
-    private static final long ANSWER_NANOS = 30_000_000_000L;
+    private static long nextFight;
+    /** Players we've told about our battle, to tell when it's over. */
+    private static final Set<Integer> told = new HashSet<Integer>();
 
     static Collection<Joiner> joiners() {
         return joiners.values();
     }
 
     private static void leaderFrame(Session s) {
+        if (!joiners.isEmpty()) finishJoiners(s); // combat ended without our combat plugin seeing it end
+        JointCombat.Leader.active = null;
         CampaignFleetAPI me = Global.getSector().getPlayerFleet();
         BattleAPI b = me == null ? null : me.getBattle();
-        if (battle != null && (b != battle || battle.isDone())) finish(s);
+        if (battle != null && (b != battle || battle.isDone())) {
+            battle = null;
+            fightOver(s);
+        }
         if (b == null || b.isDone()) return;
         if (b != battle) {
             battle = b;
             battleId = 1 + random.nextInt(Integer.MAX_VALUE - 1);
-            asked.clear();
-            joiners.clear();
-            waiting.clear();
-            engaged = false;
+            nextFight = 0;
         }
-        for (java.util.Iterator<Map.Entry<Integer, Long>> it = waiting.entrySet().iterator(); it.hasNext(); ) {
-            Map.Entry<Integer, Long> w = it.next();
-            if (System.nanoTime() - w.getValue() < ANSWER_NANOS) continue;
-            it.remove();
-            say("No answer from " + s.playerName(w.getKey()) + " yet. If they join, you'll see it here.");
+        tellFight(s, false);
+    }
+
+    /** Combat began: make sure there's a battle id even if no campaign frame saw the battle. */
+    static void combatStarted() {
+        inCombat = true;
+        if (battleId == 0) battleId = 1 + random.nextInt(Integer.MAX_VALUE - 1);
+        nextFight = 0;
+    }
+
+    /** Every other player hears about our battle, and whether they can join yet. */
+    static void tellFight(Session s, boolean live) {
+        long now = System.nanoTime();
+        if (now - nextFight < 0) return;
+        nextFight = now + FIGHT_NANOS;
+        String text;
+        try {
+            text = msg("fight").put("live", live).put("enemy", enemyName()).toString();
+        } catch (Exception e) {
+            return;
         }
-        if (ClockSync.isMapView()) return; // asked from the battle's dialog
-        List<CampaignFleetAPI> enemies = b.getNonPlayerSide();
-        if (enemies == null || enemies.isEmpty()) return;
         for (Integer id : s.getRemoteFleets().keySet()) {
-            if (asked.contains(id) || joiners.containsKey(id) || !s.isPlayerHere(id)) continue;
-            CampaignFleetAPI f = PuppetManager.fleetOf(id);
-            if (f == null || f.getContainingLocation() != me.getContainingLocation() || f.getBattle() != null) continue;
-            if (distance(f, me) > JOIN_RANGE) continue;
-            asked.add(id);
-            try {
-                s.sendBattleMessage(id, msg("ask").put("enemy", enemies.get(0).getName()).toString());
-            } catch (Exception e) {
-                continue;
-            }
-            waiting.put(id, System.nanoTime());
-            say(s.playerName(id) + "'s fleet is close by: asking them to join you. Give them a moment before you engage.");
-            log.info("[MultiSector] asking " + s.playerName(id) + " to join the battle with " + enemies.get(0).getName());
+            if (id == s.getMyId() || !s.isPlayerHere(id)) continue;
+            s.sendBattleMessage(id, text);
+            told.add(id);
         }
+    }
+
+    /** The next {@link #tellFight} goes out straight away. */
+    static void tellFightSoon() {
+        nextFight = 0;
+    }
+
+    private static void fightOver(Session s) {
+        String text = msg("fightover").toString();
+        for (Integer id : told) if (s.isPlayerHere(id)) s.sendBattleMessage(id, text);
+        told.clear();
+    }
+
+    private static String enemyName() {
+        try {
+            BattleAPI b = battle;
+            if (b == null) {
+                CampaignFleetAPI me = Global.getSector().getPlayerFleet();
+                b = me == null ? null : me.getBattle();
+            }
+            List<CampaignFleetAPI> enemies = b == null ? null : b.getNonPlayerSide();
+            if (enemies != null && !enemies.isEmpty()) return enemies.get(0).getName();
+        } catch (RuntimeException ignored) {
+            // a generic name
+        }
+        return "a hostile fleet";
     }
 
     private static void toLeader(Session s, Session.PlayerMessage m, String k, JSONObject j) throws Exception {
         int b = j.optInt("b");
-        boolean live = battle != null && !battle.isDone();
-        boolean ours = live && (b == battleId || (b == 0 && "join".equals(k))); // 0: "whatever you're fighting"
+        boolean live = battleId != 0 && (inCombat || (battle != null && !battle.isDone()));
+        boolean ours = live && (b == battleId || b == 0); // 0: "whatever you're fighting"
         if ("seen".equals(k)) {
-            if (ours) say(m.fromName + " got your call and is deciding whether to join...");
-            return;
-        }
-        if ("decline".equals(k)) {
-            waiting.remove(m.from);
-            if (ours) say(m.fromName + (j.optBoolean("busy") ? " is busy and can't join." : " stays out of the battle."));
+            if (!ours || joiners.containsKey(m.from)) return;
+            if (inCombat) {
+                JointCombat.Leader.message(m.fromName + " is getting ready to join your battle");
+            } else {
+                say(m.fromName + " wants to join your battle. They can come in once the fighting starts.");
+            }
             return;
         }
         if ("retreat".equals(k)) {
             Joiner jn = joiners.get(m.from);
             if (ours && jn != null) {
                 jn.retreat = true;
-                say(m.fromName + " orders their ships to retreat.");
+                JointCombat.Leader.message(m.fromName + " orders their ships to retreat");
             }
             return;
         }
         // join
-        if (ours && !joiners.containsKey(m.from)) say(m.fromName + " is bringing their fleet in...");
-        if (!ours || inCombat || joiners.containsKey(m.from)) {
-            s.sendBattleMessage(m.from, msg(live ? "late" : "nobattle", b).toString());
+        if (!ours) {
+            s.sendBattleMessage(m.from, msg("nobattle", b).toString());
             return;
         }
-        CampaignFleetAPI f = PuppetManager.holdForBattle(m.from);
-        if (f == null) {
-            s.sendBattleMessage(m.from, msg("late", b).toString());
+        JointCombat.Leader lead = JointCombat.Leader.active;
+        if (!inCombat || lead == null) {
+            s.sendBattleMessage(m.from, msg("notyet").toString());
             return;
         }
-        Joiner jn = new Joiner(m.from, m.fromName, f);
-        CampaignFleetAPI me = Global.getSector().getPlayerFleet();
-        BattleSide side = battle.getSideOne().contains(me) ? BattleSide.ONE : BattleSide.TWO;
-        if (!buildExact(jn, j.optString("fleet", ""), j.optString("pilot", "")) || !battle.join(f, side)) {
-            PuppetManager.releaseBattle(m.from);
-            s.sendBattleMessage(m.from, msg("late", b).toString());
-            log.warn("[MultiSector] couldn't add " + m.fromName + "'s fleet to the battle");
+        if (joiners.containsKey(m.from)) return;
+        Joiner jn = new Joiner(m.from, m.fromName, ownFleet(m.from, m.fromName));
+        if (!buildExact(jn, j.optString("fleet", ""), j.optString("pilot", ""))) {
+            s.sendBattleMessage(m.from, msg("failed").toString());
+            log.warn("[MultiSector] couldn't bring " + m.fromName + "'s fleet into the battle");
             return;
-        }
-        // The dialog built each side's combined fleet when it opened, and the battle is fought with those:
-        // rebuild them, or the joiner's ships never reach combat.
-        try {
-            battle.genCombined();
-            if (!engaged) battle.takeSnapshots();
-        } catch (RuntimeException e) {
-            log.warn("[MultiSector] couldn't refresh the battle's sides after a join", e);
         }
         joiners.put(m.from, jn);
-        asked.add(m.from);
-        waiting.remove(m.from);
         s.sendBattleMessage(m.from, msg("joined").toString());
-        say(m.fromName + "'s fleet joins the battle on your side (" + jn.toOwner.size() + " ships)."
-                + (jn.pilotPuppetId != null ? " They'll pilot " + jn.names.get(jn.pilotPuppetId) + " themselves." : "")
-                + " All their combat-ready ships will deploy alongside yours.");
-        CampaignUIAPI ui = Global.getSector().getCampaignUI();
-        if (ui != null) ui.addMessage(m.fromName + " joined your battle with " + jn.toOwner.size() + " ships");
+        lead.welcome(jn);
         log.info("[MultiSector] " + m.fromName + " joined the battle with " + jn.toOwner.size() + " ships");
     }
 
-    /** The joiner's exact fleet, into their puppet: ships, loadouts, officers, readiness, damage. */
+    /** A fleet for a joiner's ships, outside any location and any battle. */
+    private static CampaignFleetAPI ownFleet(int id, String name) {
+        CampaignFleetAPI puppet = PuppetManager.fleetOf(id);
+        String faction = puppet != null && puppet.getFaction() != null ? puppet.getFaction().getId() : Factions.PLAYER;
+        CampaignFleetAPI f = Global.getFactory().createEmptyFleet(faction, name + "'s fleet", true);
+        f.setNoFactionInName(true);
+        return f;
+    }
+
+    /** The joiner's exact fleet: ships, loadouts, officers, readiness, damage. */
     private static boolean buildExact(Joiner jn, String json, String pilot) {
         List<String> skipped = new ArrayList<String>();
         List<FleetMemberAPI> built = new ArrayList<FleetMemberAPI>();
@@ -308,7 +336,6 @@ public final class JointBattle implements EveryFrameScript {
         }
         if (built.isEmpty()) return false;
         FleetDataAPI data = jn.fleet.getFleetData();
-        for (FleetMemberAPI old : data.getMembersListCopy()) data.removeFleetMember(old);
         for (int i = 0; i < built.size(); i++) {
             FleetMemberAPI m = built.get(i);
             JSONObject sj = source.get(i);
@@ -316,6 +343,7 @@ public final class JointBattle implements EveryFrameScript {
             m.getRepairTracker().setCR((float) sj.optDouble("cr", m.getRepairTracker().getMaxCR()));
             m.getStatus().setHullFraction((float) sj.optDouble("hullFraction", 1));
             if (sj.optBoolean("mothballed")) m.getRepairTracker().setMothballed(true);
+            m.setAlly(true);
             String owner = sj.optString("id", "");
             jn.toOwner.put(m.getId(), owner);
             jn.names.put(m.getId(), m.getShipName());
@@ -325,53 +353,47 @@ public final class JointBattle implements EveryFrameScript {
         data.setFlagship(flagship);
         if (flagship.getCaptain() != null && !flagship.getCaptain().isDefault()) jn.fleet.setCommander(flagship.getCaptain());
         data.setSyncNeeded();
-        jn.fleet.forceSync();
         if (!skipped.isEmpty()) log.info("[MultiSector] " + jn.name + "'s fleet is missing " + skipped + " here (mods?)");
         return true;
     }
 
-    /** The battle is over: each joiner gets what happened to their ships. */
-    private static void finish(Session s) {
+    /** The engagement is over: each joiner gets what happened to their ships. */
+    static void finishJoiners(Session s) {
         for (Joiner jn : joiners.values()) {
             try {
-                Set<String> survivors = new HashSet<String>();
-                JSONArray ships = new JSONArray();
-                if (jn.fleet.getFleetData() != null) {
-                    for (FleetMemberAPI m : jn.fleet.getFleetData().getMembersListCopy()) {
-                        String owner = jn.toOwner.get(m.getId());
-                        if (owner == null || owner.isEmpty()) continue;
-                        survivors.add(owner);
-                        ships.put(new JSONObject().put("id", owner).put("hull", m.getStatus().getHullFraction())
-                                .put("cr", m.getRepairTracker().getCR()));
-                    }
-                }
                 JSONArray lost = new JSONArray();
-                for (String owner : jn.toOwner.values()) {
-                    if (!owner.isEmpty() && !survivors.contains(owner)) lost.put(owner);
+                JSONArray ships = new JSONArray();
+                int back = 0;
+                for (Map.Entry<String, String> e : jn.lastState.entrySet()) {
+                    String owner = e.getKey();
+                    String state = e.getValue();
+                    if ("destroyed".equals(state) || "disabled".equals(state)) {
+                        lost.put(owner);
+                        continue;
+                    }
+                    float[] hc = jn.lastHullCr.get(owner);
+                    if (hc == null) continue; // never deployed: as it was
+                    ships.put(new JSONObject().put("id", owner).put("hull", hc[0]).put("cr", hc[1]));
+                    back++;
                 }
                 s.sendBattleMessage(jn.id, msg("result").put("lost", lost).put("ships", ships).toString());
                 log.info("[MultiSector] " + jn.name + "'s part in the battle: " + lost.length() + " ships lost, "
-                        + survivors.size() + " came back");
+                        + back + " came back");
             } catch (Exception e) {
                 log.warn("[MultiSector] couldn't report the battle to " + jn.name, e);
             }
-            PuppetManager.releaseBattle(jn.id);
         }
         joiners.clear();
-        asked.clear();
-        waiting.clear();
-        battle = null;
-        engaged = false;
     }
 
     private static void leaderLost(int id) {
         Joiner jn = joiners.remove(id);
-        if (jn != null) PuppetManager.releaseBattle(id);
-    }
-
-    /** Only while a joint battle is set up: then our battle creation adds the live side. */
-    static boolean hasJoiners() {
-        return !joiners.isEmpty();
+        told.remove(id);
+        JointCombat.Leader lead = JointCombat.Leader.active;
+        if (jn != null && lead != null) {
+            lead.retreat(jn); // nobody to report back to: their ships pull out
+            JointCombat.Leader.message(jn.name + " left the game; their ships pull out");
+        }
     }
 
     /** Into the leader's battle dialog. */
@@ -379,29 +401,10 @@ public final class JointBattle implements EveryFrameScript {
         CampaignUIAPI ui = Global.getSector().getCampaignUI();
         InteractionDialogAPI d = ui == null ? null : ui.getCurrentInteractionDialog();
         if (d != null && d.getTextPanel() != null) d.getTextPanel().addPara(text);
+        else if (ui != null) ui.addMessage(text);
     }
 
-    private static float distance(SectorEntityToken a, SectorEntityToken b) {
-        float dx = a.getLocation().x - b.getLocation().x;
-        float dy = a.getLocation().y - b.getLocation().y;
-        return (float) Math.sqrt(dx * dx + dy * dy);
-    }
-
-    /** The game's own battle set-up, plus the live side for joiners. Picked only while someone has joined. */
-    static final class Creation implements BattleCreationPlugin {
-        private final BattleCreationPluginImpl impl = new BattleCreationPluginImpl();
-
-        public void initBattle(BattleCreationContext context, MissionDefinitionAPI api) {
-            impl.initBattle(context, api);
-            api.addPlugin(new JointCombat.Leader());
-        }
-
-        public void afterDefinitionLoad(CombatEngineAPI engine) {
-            impl.afterDefinitionLoad(engine);
-        }
-    }
-
-    /** How each of a joiner's ships is doing right now. */
+    /** How each of a joiner's ships is doing right now; also kept for the result. */
     static JSONArray status(CombatEngineAPI engine, Joiner jn) throws Exception {
         Map<String, ShipAPI> byId = new HashMap<String, ShipAPI>();
         for (ShipAPI ship : engine.getShips()) {
@@ -423,6 +426,7 @@ public final class JointBattle implements EveryFrameScript {
         JSONArray a = new JSONArray();
         for (Map.Entry<String, String> e : jn.toOwner.entrySet()) {
             String id = e.getKey();
+            String owner = e.getValue();
             ShipAPI ship = byId.get(id);
             String state;
             if (destroyed.contains(id)) state = "destroyed";
@@ -432,7 +436,13 @@ public final class JointBattle implements EveryFrameScript {
             else if (ship.isHulk() || !ship.isAlive()) state = "disabled";
             else if (ship.isRetreating()) state = "retreating";
             else state = "fighting";
-            JSONObject o = new JSONObject().put("id", e.getValue()).put("name", jn.names.get(id)).put("state", state);
+            if (!owner.isEmpty()) {
+                jn.lastState.put(owner, state);
+                if (ship != null && ship.isAlive() && !ship.isHulk()) {
+                    jn.lastHullCr.put(owner, new float[]{ship.getHullLevel(), ship.getCurrentCR()});
+                }
+            }
+            JSONObject o = new JSONObject().put("id", owner).put("name", jn.names.get(id)).put("state", state);
             if (ship != null && ship.isAlive()) o.put("hull", ship.getHullLevel()).put("cr", ship.getCurrentCR());
             a.put(o);
         }
@@ -442,6 +452,17 @@ public final class JointBattle implements EveryFrameScript {
     // ================================================================ joiner
 
     private enum Phase { NONE, ASKED, JOINING, IN, DONE }
+
+    /** A battle another player is in, as they last told us. */
+    static final class Fight {
+        boolean live;
+        String enemy = "a hostile fleet";
+        int b;
+        long heard;
+    }
+
+    /** Battles other players are in right now, by player. */
+    private static final Map<Integer, Fight> fights = new HashMap<Integer, Fight>();
 
     private static Phase phase = Phase.NONE;
     private static int leader = -1;
@@ -458,48 +479,61 @@ public final class JointBattle implements EveryFrameScript {
     private static CampaignFleetAPI viewDummy;
     private static JointCombat.MirrorCreation viewCreation;
 
-    /**
-     * We ran into a fleet someone is already dealing with: ask to join their
-     * battle instead. Switches the dialog over to the join dialog.
-     */
-    static void offerToJoin(InteractionDialogAPI dialog, int leaderId, String name, String enemyName) {
-        if (phase != Phase.NONE) return;
-        phase = Phase.ASKED;
+    /** The battle this player is in, if we've heard about it lately. */
+    static Fight fightOf(int player) {
+        Fight f = fights.get(player);
+        if (f == null || System.nanoTime() - f.heard > FIGHT_STALE_NANOS) return null;
+        return f;
+    }
+
+    /** Sets up joining this player's battle. False if we're already in one. */
+    private static boolean prepare(int leaderId, String name, String enemyName) {
+        if (phase == Phase.JOINING || phase == Phase.IN) return false;
         leader = leaderId;
         leaderName = name;
-        joinBattle = 0; // whatever they're fighting
-        enemy = enemyName;
+        Fight f = fightOf(leaderId);
+        joinBattle = f != null ? f.b : 0; // 0: whatever they're fighting
+        enemy = enemyName != null ? enemyName : f != null ? f.enemy : "a hostile fleet";
         lastHeard = System.nanoTime();
         shown.clear();
-        JoinDialog jd = new JoinDialog(true);
+        return true;
+    }
+
+    /**
+     * We ran into a fleet someone is already dealing with: offer to join
+     * their battle. Switches the dialog over to the join dialog.
+     */
+    static void offerToJoin(InteractionDialogAPI dialog, int leaderId, String name, String enemyName) {
+        if (!prepare(leaderId, name, enemyName)) {
+            dialog.getTextPanel().addPara("You're already part of a battle.");
+            return;
+        }
+        JoinDialog jd = new JoinDialog();
         dialog.setPlugin(jd);
         jd.init(dialog);
     }
 
+    /** Clicking a player who's in a battle: the join dialog instead of a hail. Null if they aren't. */
+    static InteractionDialogPlugin joinDialogFor(int leaderId) {
+        Fight f = fightOf(leaderId);
+        if (f == null || !prepare(leaderId, Session.get().playerName(leaderId), f.enemy)) return null;
+        return new JoinDialog();
+    }
+
     private static void toJoiner(Session s, Session.PlayerMessage m, String k, JSONObject j) throws Exception {
         int b = j.optInt("b");
-        if ("ask".equals(k)) {
-            CampaignFleetAPI me = Global.getSector().getPlayerFleet();
-            boolean free = phase == Phase.NONE && ClockSync.isMapView() && me != null && me.getBattle() == null;
-            if (!free) {
-                s.sendBattleMessage(m.from, msg("decline", b).put("busy", true).toString());
-                return;
-            }
-            phase = Phase.ASKED;
-            leader = m.from;
-            leaderName = m.fromName;
-            joinBattle = b;
-            enemy = j.optString("enemy", "a hostile fleet");
-            lastHeard = System.nanoTime();
-            shown.clear();
-            SectorEntityToken target = PuppetManager.fleetOf(m.from);
-            if (target == null) target = me;
-            if (!Global.getSector().getCampaignUI().showInteractionDialog(new JoinDialog(false), target)) {
-                phase = Phase.NONE;
-                s.sendBattleMessage(m.from, msg("decline", b).put("busy", true).toString());
-            } else {
-                s.sendBattleMessage(m.from, msg("seen", b).toString());
-            }
+        if ("fight".equals(k)) {
+            Fight f = fights.get(m.from);
+            if (f == null) fights.put(m.from, f = new Fight());
+            f.live = j.optBoolean("live");
+            f.enemy = j.optString("enemy", f.enemy);
+            f.b = b;
+            f.heard = System.nanoTime();
+            if (m.from == leader && (phase == Phase.ASKED || phase == Phase.JOINING)) joinBattle = b;
+            return;
+        }
+        if ("fightover".equals(k)) {
+            fights.remove(m.from);
             return;
         }
         if (m.from != leader) return; // not ours
@@ -508,13 +542,16 @@ public final class JointBattle implements EveryFrameScript {
         lastHeard = System.nanoTime();
         if ("joined".equals(k) && phase == Phase.JOINING) {
             phase = Phase.IN;
-            say2("You've joined " + leaderName + "'s battle."
-                    + (MultiSectorConfig.isJointBattleView() ? " When it begins, a view of it opens here and you fly "
-                    + "your chosen ship; your other ships fight under the battle AI." : " Your ships fight under the battle AI."));
-        } else if (("late".equals(k) || "nobattle".equals(k)) && (phase == Phase.JOINING || phase == Phase.ASKED)) {
+            say2("You've joined " + leaderName + "'s battle. Your ships arrive at their side of the battlefield."
+                    + (MultiSectorConfig.isJointBattleView() ? " A view of it opens here and you fly your chosen ship;"
+                    + " your other ships fight under the battle AI." : " Your ships fight under the battle AI."));
+        } else if ("notyet".equals(k) && phase == Phase.JOINING) {
+            phase = Phase.ASKED;
+            say2(leaderName + " hasn't started the fighting yet. You can join as soon as it begins.");
+        } else if (("nobattle".equals(k) || "failed".equals(k)) && (phase == Phase.JOINING || phase == Phase.ASKED)) {
             phase = Phase.DONE;
             say2("nobattle".equals(k) ? leaderName + " isn't in a battle (any more). Your fleet is as it was."
-                    : "The fighting had already begun without you. Your fleet is as it was.");
+                    : "Your fleet couldn't be brought into " + leaderName + "'s battle. Your fleet is as it was.");
         } else if ("status".equals(k) && (phase == Phase.IN || phase == Phase.JOINING)) {
             phase = Phase.IN;
             showStatus(j.optJSONArray("ships"));
@@ -535,7 +572,7 @@ public final class JointBattle implements EveryFrameScript {
         refresh();
     }
 
-    /** The leader's combat started: open our view of it, from the join dialog. */
+    /** The leader's combat is under way and we're in it: open our view of it, from the join dialog. */
     private static void openView(float w, float h) {
         if (!MultiSectorConfig.isJointBattleView() || open == null || open.dialog == null) return;
         CampaignFleetAPI me = Global.getSector().getPlayerFleet();
@@ -563,24 +600,25 @@ public final class JointBattle implements EveryFrameScript {
     }
 
     private static void joinerLost(int id) {
+        fights.remove(id);
         if (id != leader || phase == Phase.NONE || phase == Phase.DONE) return;
+        boolean wasIn = phase == Phase.JOINING || phase == Phase.IN;
         phase = Phase.DONE;
         JointCombat.Mirror v = JointCombat.view;
         if (v != null) v.end();
-        say2(leaderName + " left the game before the battle ended. Your fleet is as it was.");
+        say2(leaderName + " left the game" + (wasIn ? " before the battle ended" : "") + ". Your fleet is as it was.");
         refresh();
     }
 
     private static void joinerFrame(Session s) {
         if (open == null) {
-            if (phase == Phase.DONE) phase = Phase.NONE;
+            if (phase == Phase.DONE || phase == Phase.ASKED) phase = Phase.NONE;
             return;
         }
         CampaignUIAPI ui = Global.getSector().getCampaignUI();
         InteractionDialogAPI d = ui == null ? null : ui.getCurrentInteractionDialog();
         if (d == null || d.getPlugin() != open) {
             // Closed some other way. A battle we joined still reports back; we apply it whenever it comes.
-            if (phase == Phase.ASKED) s.sendBattleMessage(leader, msg("decline", joinBattle).toString());
             open = null;
             if (phase == Phase.ASKED || phase == Phase.DONE) phase = Phase.NONE;
         }
@@ -690,18 +728,18 @@ public final class JointBattle implements EveryFrameScript {
     }
 
     private static void reset() {
-        for (Integer id : new ArrayList<Integer>(joiners.keySet())) PuppetManager.releaseBattle(id);
         forget();
     }
 
     /** A save is loading (or the session ended): nothing carries over. */
     public static void forget() {
         joiners.clear();
-        asked.clear();
-        waiting.clear();
-        engaged = false;
+        told.clear();
+        fights.clear();
         battle = null;
+        battleId = 0;
         inCombat = false;
+        JointCombat.Leader.active = null;
         phase = Phase.NONE;
         open = null;
         leader = -1;
@@ -711,43 +749,50 @@ public final class JointBattle implements EveryFrameScript {
         JointCombat.pending.clear();
     }
 
-    /** The joiner's dialog: asked (or asking), joining, watching, and the outcome. */
+    /** The joiner's dialog: waiting for the fight to start, joining, watching, and the outcome. */
     private static final class JoinDialog implements InteractionDialogPlugin {
-        private final boolean weAsked;
         InteractionDialogAPI dialog;
         private boolean quietOffered;
-
-        JoinDialog(boolean weAsked) {
-            this.weAsked = weAsked;
-        }
+        /** What we last showed about the leader's battle: 0 over/unknown, 1 not fighting yet, 2 fighting. */
+        private int shownState = -1;
 
         public void init(InteractionDialogAPI dialog) {
             this.dialog = dialog;
             open = this;
+            phase = Phase.ASKED;
             CampaignFleetAPI me = Global.getSector().getPlayerFleet();
             pilotId = me != null && me.getFlagship() != null ? me.getFlagship().getId() : null;
-            if (weAsked) {
-                dialog.getTextPanel().addPara(leaderName + " is already dealing with " + enemy
-                        + ". You can ask to join their battle.");
-            } else {
-                dialog.getTextPanel().addPara(leaderName + " is fighting " + enemy + " close by, and asks for your help.");
-            }
-            dialog.getTextPanel().addPara("If you join, your ships fight beside theirs on " + leaderName
-                    + "'s game. What happens to them is real: ships lost are lost, and damage stays."
+            dialog.getTextPanel().addPara(leaderName + " is in a battle with " + enemy + ".");
+            dialog.getTextPanel().addPara("You can bring your fleet in once the fighting has begun: your ships "
+                    + "arrive as reinforcements on " + leaderName + "'s side, on their game. What happens to them is real: "
+                    + "ships lost are lost, and damage stays."
                     + (MultiSectorConfig.isJointBattleView()
                     ? " You fly one ship yourself in a live view of the battle; the rest fight under the battle AI."
                     : " They fight under the battle AI, and you can order them to retreat at any time."));
+            Session.get().sendBattleMessage(leader, msg("seen", joinBattle).toString());
+            shownState = fightState();
+            dialog.getTextPanel().addPara(shownState == 2 ? "The fighting has begun. You can join now."
+                    : shownState == 1 ? "They haven't started fighting yet. Wait here: you can join as soon as they do."
+                    : "You haven't heard from " + leaderName + " about it yet. Wait a moment.");
             menu();
+        }
+
+        /** 0 over/unknown, 1 not fighting yet, 2 fighting. */
+        private int fightState() {
+            Fight f = fightOf(leader);
+            return f == null ? 0 : f.live ? 2 : 1;
         }
 
         void menu() {
             OptionPanelAPI op = dialog.getOptionPanel();
             op.clearOptions();
             if (phase == Phase.ASKED) {
-                op.addOption(weAsked ? "Ask to join " + leaderName + "'s battle" : "Join the battle", "join");
-                if (MultiSectorConfig.isJointBattleView()) op.addOption("Ship you'll pilot: " + pilotName(), "pick");
-                op.addOption(weAsked ? "Leave" : "Stay out", "out");
-                dialog.setOptionOnEscape("Stay out", "out");
+                if (fightState() == 2) {
+                    op.addOption("Join " + leaderName + "'s battle", "join");
+                    if (MultiSectorConfig.isJointBattleView()) op.addOption("Ship you'll pilot: " + pilotName(), "pick");
+                }
+                op.addOption("Leave", "out");
+                dialog.setOptionOnEscape("Leave", "out");
             } else if (phase == Phase.JOINING || phase == Phase.IN) {
                 op.addOption("Order your ships to retreat", "retreat");
                 if (quietOffered) op.addOption("Stop waiting (anything still to come is applied when it arrives)", "leave");
@@ -786,7 +831,6 @@ public final class JointBattle implements EveryFrameScript {
                 pickPilot();
                 return;
             } else if ("out".equals(id)) {
-                if (phase == Phase.ASKED && !weAsked) s.sendBattleMessage(leader, msg("decline", joinBattle).toString());
                 phase = Phase.NONE;
                 open = null;
                 dialog.dismiss();
@@ -827,6 +871,18 @@ public final class JointBattle implements EveryFrameScript {
         }
 
         public void advance(float amount) {
+            if (phase == Phase.ASKED) {
+                int st = fightState();
+                if (st != shownState) {
+                    if (st == 2) dialog.getTextPanel().addPara(leaderName + " has started fighting. You can join now.");
+                    else if (st == 1 && shownState == 2) dialog.getTextPanel().addPara("That engagement is over; "
+                            + leaderName + " is deciding what to do next. You can join if they fight again.");
+                    else if (st == 1) dialog.getTextPanel().addPara(leaderName + " hasn't started fighting yet. Wait here.");
+                    else dialog.getTextPanel().addPara(leaderName + "'s battle is over.");
+                    shownState = st;
+                    menu();
+                }
+            }
             if (!quietOffered && (phase == Phase.JOINING || phase == Phase.IN)
                     && System.nanoTime() - lastHeard > QUIET_NANOS) {
                 quietOffered = true;
