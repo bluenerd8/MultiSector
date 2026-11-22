@@ -75,6 +75,8 @@ import java.util.Set;
  */
 public final class JointBattle implements EveryFrameScript {
 
+    /** A join that hears nothing from its leader for this long is over. */
+    private static final long STALE_JOIN_NANOS = 30_000_000_000L;
     /** A joiner can stop waiting if they hear nothing for this long. */
     private static final long QUIET_NANOS = 120_000_000_000L;
     /** How often the leader tells everyone about their battle. */
@@ -301,8 +303,13 @@ public final class JointBattle implements EveryFrameScript {
             if (jn == null || lead == null) return;
             if ("cpilot".equals(k)) lead.pilotShip(jn, j.optInt("id"));
             else if ("corders".equals(k)) lead.orders(jn, j.optJSONArray("list"));
-            else if (j.has("ships")) lead.bringIn(jn, j.optJSONArray("ships"));
-            else lead.bringIn(jn);
+            else if (j.has("ships")) {
+                log.info("[MultiSector] " + m.fromName + " deploys " + j.optJSONArray("ships").length() + " ship(s) from their view");
+                lead.bringIn(jn, j.optJSONArray("ships"));
+            } else {
+                log.info("[MultiSector] " + m.fromName + " has nothing to deploy from (no view): bringing in their fleet");
+                lead.bringIn(jn);
+            }
             return;
         }
         if ("cwho".equals(k)) {
@@ -563,7 +570,7 @@ public final class JointBattle implements EveryFrameScript {
 
     /** Sets up joining this player's battle. False if we're already in one. */
     private static boolean prepare(int leaderId, String name, String enemyName) {
-        if (phase == Phase.JOINING || phase == Phase.IN) return false;
+        if ((phase == Phase.JOINING || phase == Phase.IN) && !stale()) return false;
         leader = leaderId;
         leaderName = name;
         Fight f = fightOf(leaderId);
@@ -656,7 +663,9 @@ public final class JointBattle implements EveryFrameScript {
         if (!MultiSectorConfig.isJointBattleView()) return;
         CampaignFleetAPI me = Global.getSector().getPlayerFleet();
         if (open == null || open.dialog == null || me == null) {
-            bringUsIn(); // no view: our ships go in now
+            // Nothing to open the view from. Our ships stay out rather than all going in for us.
+            log.warn("[MultiSector] the join dialog closed before " + leaderName + "'s battle view could open; our ships stay out");
+            say2("Couldn't open the battle view (the join dialog was closed). Your ships stay out of this one.");
             return;
         }
         try {
@@ -669,14 +678,16 @@ public final class JointBattle implements EveryFrameScript {
             viewCreation = null;
             viewDummy = null;
             JointCombat.viewOpening = 0;
-            log.warn("[MultiSector] couldn't open the battle view", e);
-            say2("Couldn't open a view of the battle; you'll get reports here instead.");
-            bringUsIn();
+            log.warn("[MultiSector] couldn't open the battle view; our ships stay out", e);
+            say2("Couldn't open a view of the battle. Your ships stay out of this one (set \"jointBattleView\": false"
+                    + " to fight without the view).");
         }
     }
 
     /** Our ships can go into the leader's battle now. */
     private static void bringUsIn() {
+        log.info("[MultiSector] no battle view (jointBattleView is off): asking " + leaderName + " to bring our fleet in"
+                + JointCombat.where());
         Session.get().sendBattleMessage(leader, msg("cdeploy", joinBattle).toString());
     }
 
@@ -700,7 +711,20 @@ public final class JointBattle implements EveryFrameScript {
         refresh();
     }
 
+    /** We think we're in a battle, but its leader has gone quiet: we're not, any more. */
+    private static boolean stale() {
+        return JointCombat.view == null && System.nanoTime() - lastHeard > STALE_JOIN_NANOS;
+    }
+
     private static void joinerFrame(Session s) {
+        if ((phase == Phase.JOINING || phase == Phase.IN) && stale()) {
+            // No word from the leader for a while (their battle ended without a result reaching us, or we were
+            // pulled away). Without this, clicking them only ever offered a hail.
+            log.info("[MultiSector] no word from " + leaderName + "'s battle for a while: leaving it");
+            phase = open != null ? Phase.DONE : Phase.NONE;
+            say2(leaderName + "'s battle went quiet: you're out of it. Your fleet is as it was.");
+            refresh();
+        }
         if (open == null) {
             if (phase == Phase.DONE || phase == Phase.ASKED) phase = Phase.NONE;
             return;

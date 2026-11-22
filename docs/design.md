@@ -575,3 +575,19 @@ What changed:
 - **Transfer command.** Taking the helm of another of their ships in the view sends `cpilot`. The leader moves `RemotePilot` to that ship and gives the previous one its AI back.
 - **Rings.** Each player's ships get a ring in their colour, drawn in world space (`renderInWorldCoords`), as well as the glow. The view rings the leader's ships and other joiners' ships, but not your own.
 - `PROTOCOL_VERSION` 17.
+
+### What the joiner sees, deploying, and stuck joins (0.0.37)
+
+From testing 0.0.36: the leader's side worked well. In the joiner's view, ship systems, venting and most shots were missing, the joiner's fleet still deployed by itself, deploying from the panel made duplicates, a join could leave the joiner only able to hail the leader, and the joiner's own ships had no colour.
+
+- **Every shot, not a sample.** A weapon is only "firing" for a moment per shot, so sampling that 20 times a second missed most shots. The leader now counts each new projectile and missile per weapon (`DamagingProjectileAPI.getWeapon`) and sends the count since the last update. The view spawns exactly that many from the weapon (`spawnProjectile`), at the leader's angle. Beams still fire for as long as the leader's do. The view's ships hold fire otherwise, so their autofire adds nothing of its own.
+- **Systems, phase cloaks, venting** are set directly from the leader's state (`forceState` to the same system state, `setPhased`, `ventFlux`). Commands could be refused on the view's ships. The state now carries each ship's system and cloak state (one byte each).
+- **No whole-fleet fallback in the view.** If the view's deployment list doesn't have the joiner's ships when it has caught up, they're added to it (`addToReserves`), instead of everything being brought in for them. That fallback was the "AI deploy". A ship deployed from the panel that's already in the leader's battle is removed at once. That was the duplicate. Ships already in the battle are kept out of the deployment list.
+- **The view doesn't unpause under its own dialog** (the deployment panel), only with the leader.
+- **Stuck joins.** A join that hears nothing from its leader for 30 s (and has no view open) is over. Before, a battle that ended without a result reaching the joiner (for example, if another fleet pulled them away) left them marked as in it, and clicking the leader only offered a hail.
+- **Colours on the joiner's game too:** the view rings and marks every player's ships, its own included, so both games show the same colours.
+- The leader's log says how each joiner's ships came in (`deploys N ship(s) from their view`, or `nothing to deploy from`).
+- **Only the joiner deploys their ships (rechecked).** There was still a whole-fleet deploy in two places while the view was on: when the view caught up with nothing in its deployment list, and when the view couldn't open because the join dialog was gone. Both are gone; the whole-fleet deploy is only for `jointBattleView: false`. The view also recognises its own ships when the battle lists copies of them (same hull and name), instead of removing them as strays, so deploying from the panel works either way. On the leader's game, the joiner's ships spawn in one place, from either a deploy from the view or the no-view whole fleet. Every spawn is logged with why and where (a short stack), as is every deploy the view sees (combat time, and whether a dialog was open).
+- **Autopilot:** with autopilot on in the view, input packets say so (`K_AUTO`), and the leader gives that ship its own AI until it's off.
+- **Selected weapon group:** the piloted ship in the view picks its weapon group itself (that one command isn't blocked), so the selection shows, and that group is what's sent.
+- `PROTOCOL_VERSION` 18 (the state datagram changed).

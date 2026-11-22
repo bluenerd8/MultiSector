@@ -91,6 +91,8 @@ final class JointCombat {
     private static final int E_ACCEL = 1, E_BACK = 2, E_DECEL = 4, E_LEFT = 8, E_RIGHT = 16, E_SLEFT = 32, E_SRIGHT = 64;
     // input keys
     private static final int K_W = 1, K_S = 2, K_A = 4, K_D = 8, K_Q = 16, K_E = 32, K_FIRE = 64, K_DECEL = 128;
+    /** The joiner switched their ship to autopilot: the leader gives it its AI. */
+    private static final int K_AUTO = 256;
     /** Toggle counters in an input packet: shield, system, vent, fighters, autofire. */
     private static final int TOGGLES = 5;
 
@@ -166,6 +168,14 @@ final class JointCombat {
         }
     }
 
+    /** Where in our code this is happening, for the log (every place a ship is spawned or deployed). */
+    static String where() {
+        StackTraceElement[] st = new Throwable().getStackTrace();
+        StringBuilder b = new StringBuilder();
+        for (int i = 1; i < st.length && i < 9; i++) b.append("\n    at ").append(st[i]);
+        return b.toString();
+    }
+
     private static String aiName(ShipAPI ship) {
         ShipAIPlugin ai = ship.getShipAI();
         return ai == null ? "player" : ai.getClass().getSimpleName();
@@ -204,6 +214,9 @@ final class JointCombat {
         /** Our own ships are out: joiners' ships can go in. */
         private boolean ready;
         private long nextGuard, nextCheck, nextOrders;
+        /** Shots each weapon fired since the last state we sent (every projectile and missile, by its weapon). */
+        private final Map<WeaponAPI, int[]> shots = new IdentityHashMap<WeaponAPI, int[]>();
+        private Set<Object> seenShots = java.util.Collections.newSetFromMap(new IdentityHashMap<Object, Boolean>());
         /** When we last gave each ship its player's order (so the ally AI's own isn't fought every frame). */
         private final Map<ShipAPI, Long> ordered = new IdentityHashMap<ShipAPI, Long>();
         private final Map<Integer, Input> inputs = new ConcurrentHashMap<Integer, Input>();
@@ -258,7 +271,7 @@ final class JointCombat {
                 FleetMemberAPI m = jn.memberFor(o.optString("id"));
                 if (m == null || m.getRepairTracker().isMothballed() || !jn.spawned.add(m.getId())) continue;
                 Vector2f at = new Vector2f((float) o.optDouble("x", 0), (float) o.optDouble("y", -engine.getMapHeight() / 2f + 500f));
-                if (spawn(jn, m, at, (float) o.optDouble("f", 90))) n++;
+                if (spawn(jn, m, at, (float) o.optDouble("f", 90), "they deployed it from their view")) n++;
             }
             if (n > 0) announceArrival(jn, n);
         }
@@ -276,7 +289,7 @@ final class JointCombat {
         }
 
         /** One joiner ship into the fight: tagged as theirs, an ally (we don't command it), never twice. */
-        private boolean spawn(JointBattle.Joiner jn, FleetMemberAPI m, Vector2f at, float facing) {
+        private boolean spawn(JointBattle.Joiner jn, FleetMemberAPI m, Vector2f at, float facing, String why) {
             CombatFleetManagerAPI fm = engine.getFleetManager(0);
             try {
                 m.setAlly(true);
@@ -286,8 +299,8 @@ final class JointCombat {
                 ship.setCustomData(PLAYER_TAG, jn.id);
                 ship.setAlly(true);
                 engine.addFloatingText(ship.getLocation(), jn.name, 28f, colorOf(jn.id), ship, 1f, 4f);
-                log.info("[MultiSector] " + jn.name + "'s " + m.getShipName() + " is in: ally=" + ship.isAlly() + ", fleet "
-                        + jn.fleet.getName() + " (outside the campaign battle), owner " + ship.getOwner());
+                log.info("[MultiSector] " + jn.name + "'s " + m.getShipName() + " is in (" + why + "): ally=" + ship.isAlly()
+                        + ", fleet " + jn.fleet.getName() + " (outside the campaign battle), owner " + ship.getOwner() + where());
                 return true;
             } catch (RuntimeException e) {
                 log.warn("[MultiSector] couldn't deploy " + jn.name + "'s " + m.getShipName(), e);
@@ -335,10 +348,12 @@ final class JointCombat {
                     pilot(jn);
                     if (orderTick) applyOrders(jn);
                 }
+                countShots();
                 long now = System.nanoTime();
                 if (now - nextState >= 0) {
                     nextState = now + STATE_NANOS;
                     sendStates(s);
+                    shots.clear();
                 }
                 boolean over = engine.isCombatOver();
                 if (now - nextStatus >= 0 || (over && !ended)) {
@@ -551,6 +566,26 @@ final class JointCombat {
             return ship.getOwner() == 0 && !ship.isAlly() ? Session.get().getMyId() : -1;
         }
 
+        /**
+         * Every new projectile or missile this frame, counted against the
+         * weapon that fired it. A weapon is only "firing" for a moment per
+         * shot, so sampling that 20 times a second missed most of them.
+         */
+        private void countShots() {
+            if (JointBattle.joiners().isEmpty()) return;
+            Set<Object> now = java.util.Collections.newSetFromMap(new IdentityHashMap<Object, Boolean>());
+            for (com.fs.starfarer.api.combat.DamagingProjectileAPI p : engine.getProjectiles()) {
+                now.add(p);
+                if (seenShots.contains(p)) continue;
+                WeaponAPI w = p.getWeapon();
+                if (w == null) continue;
+                int[] c = shots.get(w);
+                if (c == null) shots.put(w, c = new int[1]);
+                c[0]++;
+            }
+            seenShots = now;
+        }
+
         /** Every ship's state, packed into datagrams, to every joiner. */
         private void sendStates(Session s) {
             if (JointBattle.joiners().isEmpty()) return;
@@ -561,7 +596,7 @@ final class JointCombat {
             short count = 0;
             int room = NetConfig.MAX_DATAGRAM - 7 - 8;
             for (Map.Entry<ShipAPI, Integer> e : ids.entrySet()) {
-                byte[] entry = encode(e.getValue(), e.getKey());
+                byte[] entry = encode(e.getValue(), e.getKey(), shots);
                 if (bb == null || bb.remaining() < entry.length) {
                     if (bb != null) {
                         bb.putShort(countPos, count);
@@ -589,14 +624,17 @@ final class JointCombat {
             }
         }
 
-        private static byte[] encode(int id, ShipAPI ship) {
+        private static byte[] encode(int id, ShipAPI ship, Map<WeaponAPI, int[]> shots) {
             List<WeaponAPI> weapons = ship.getAllWeapons();
             List<int[]> firing = new ArrayList<int[]>();
             for (int i = 0; i < weapons.size() && firing.size() < 40; i++) {
                 WeaponAPI w = weapons.get(i);
-                if (w.isFiring()) firing.add(new int[]{i, Math.round(w.getCurrAngle() * 10f)});
+                int[] c = shots.get(w);
+                boolean beam = w.isBeam() && w.isFiring();
+                // count 0: a beam, firing right now; otherwise how many shots since the last update
+                if (beam || c != null) firing.add(new int[]{i, Math.round(w.getCurrAngle() * 10f), beam ? 0 : Math.min(255, c[0])});
             }
-            ByteBuffer bb = ByteBuffer.allocate(41 + firing.size() * 3);
+            ByteBuffer bb = ByteBuffer.allocate(43 + firing.size() * 4);
             bb.putShort((short) id);
             bb.putFloat(ship.getLocation().x).putFloat(ship.getLocation().y);
             bb.putFloat(ship.getVelocity().x).putFloat(ship.getVelocity().y);
@@ -630,10 +668,12 @@ final class JointCombat {
             }
             bb.put((byte) eng);
             bb.putShort((short) Math.round((sh == null ? 0f : sh.getFacing()) * 10f));
+            bb.put(stateOf(ship.getSystem())).put(stateOf(ship.getPhaseCloak()));
             bb.put((byte) firing.size());
             for (int[] f : firing) {
                 bb.put((byte) f[0]);
                 bb.putShort((short) f[1]);
+                bb.put((byte) f[2]);
             }
             byte[] out = new byte[bb.position()];
             bb.flip();
@@ -679,7 +719,7 @@ final class JointCombat {
                 if (!pilot && !(ready && MultiSectorConfig.isJointBattleDeployAll())) continue;
                 float x = (slot % 2 == 0 ? 1 : -1) * (300f + 400f * (slot / 2));
                 slot++;
-                if (spawn(jn, m, new Vector2f(x, y), 90f)) n++;
+                if (spawn(jn, m, new Vector2f(x, y), 90f, "they have no battle view: their whole fleet")) n++;
             }
             return n;
         }
@@ -700,7 +740,9 @@ final class JointCombat {
             }
             if (jn.pilotPuppetId == null) return;
             Input in = inputs.get(jn.id);
-            boolean live = in != null && System.nanoTime() - in.arrived < INPUT_STALE_NANOS;
+            boolean fresh = in != null && System.nanoTime() - in.arrived < INPUT_STALE_NANOS;
+            boolean autopilot = fresh && (in.keys & K_AUTO) != 0;
+            boolean live = fresh && !autopilot;
             for (ShipAPI ship : engine.getShips()) {
                 FleetMemberAPI m = ship.getFleetMember();
                 if (m == null || !m.getId().equals(jn.pilotPuppetId)) continue;
@@ -717,7 +759,8 @@ final class JointCombat {
                 } else if (!live && flying) {
                     piloted.remove(ship);
                     ship.resetDefaultAI();
-                    banner(jn.name + "'s controls stopped coming: " + m.getShipName() + " is on its own AI");
+                    banner(autopilot ? jn.name + " puts " + m.getShipName() + " on autopilot"
+                            : jn.name + "'s controls stopped coming: " + m.getShipName() + " is on its own AI");
                     log.info("[MultiSector] " + jn.name + "'s controls stopped; " + m.getShipName() + " back on its AI");
                 }
             }
@@ -815,6 +858,34 @@ final class JointCombat {
                 if (m == null || !jn.toOwner.containsKey(m.getId())) continue;
                 if (ship.isAlive() && !ship.isHulk() && !ship.isRetreating()) ship.setRetreating(true, false);
             }
+        }
+    }
+
+    /** A ship system's state (IDLE, IN, ACTIVE, OUT, COOLDOWN), or 255 for none. */
+    private static byte stateOf(ShipSystemAPI sys) {
+        return (byte) (sys == null || sys.getState() == null ? 255 : sys.getState().ordinal());
+    }
+
+    /**
+     * A view ship's system (or phase cloak) in the same state as the
+     * leader's, set directly: the effect and its visuals run as there. A
+     * system that's already running its course isn't restarted.
+     */
+    private static void syncSystem(ShipSystemAPI sys, int state) {
+        ShipSystemAPI.SystemState[] all = ShipSystemAPI.SystemState.values();
+        if (sys == null || state < 0 || state >= all.length) return;
+        ShipSystemAPI.SystemState want = all[state];
+        ShipSystemAPI.SystemState have = sys.getState();
+        if (have == want) return;
+        boolean wantOn = want == ShipSystemAPI.SystemState.IN || want == ShipSystemAPI.SystemState.ACTIVE
+                || want == ShipSystemAPI.SystemState.OUT;
+        boolean haveOn = have == ShipSystemAPI.SystemState.IN || have == ShipSystemAPI.SystemState.ACTIVE
+                || have == ShipSystemAPI.SystemState.OUT;
+        if (wantOn == haveOn) return; // both running (or both not): let it run its course
+        try {
+            sys.forceState(want, 0f);
+        } catch (RuntimeException ignored) {
+            // a system that won't be forced: no effect shown
         }
     }
 
@@ -980,6 +1051,11 @@ final class JointCombat {
         int flags, eng;
         int[] fireIdx = new int[0];
         float[] fireAngle = new float[0];
+        /** Beams firing right now (from the latest update). */
+        boolean[] fireBeam = new boolean[0];
+        /** Shots to show, from every update since the last frame: weapon index, angle, count. */
+        final List<float[]> shotsDue = new ArrayList<float[]>();
+        int sys = 255, cloak = 255;
         long arrived;
         boolean hasState;
     }
@@ -1017,6 +1093,8 @@ final class JointCombat {
         private final Map<String, ShipAPI> adopting = new HashMap<String, ShipAPI>();
         private final Map<String, Long> adoptingSince = new HashMap<String, Long>();
         private final Set<String> requested = new HashSet<String>();
+        /** Our member ids already in the leader's battle (announced to us as ours). */
+        private final Set<String> inBattle = new HashSet<String>();
         /** Fleets the view's ships belong to (by side and whose), so the game sees proper ships, not strays. */
         private final Map<Integer, com.fs.starfarer.api.campaign.CampaignFleetAPI> fleets =
                 new HashMap<Integer, com.fs.starfarer.api.campaign.CampaignFleetAPI>();
@@ -1082,7 +1160,7 @@ final class JointCombat {
                     Shown sh = te.getValue();
                     apply(sh, now);
                     if (sh.traced < 10 && sh.ship != null && MultiSectorConfig.isJointBattleChecks()) trace(te.getKey(), sh);
-                    if (sh.ship != null && sh.player >= 0 && sh.player != me) mark(sh.ship, sh.player); // other players' ships
+                    if (sh.ship != null && sh.player >= 0) mark(sh.ship, sh.player); // every player's ships, ours too
                 }
                 if (!synced) checkSynced(s, now);
                 if (MultiSectorConfig.isJointBattleChecks()) check(now);
@@ -1097,7 +1175,7 @@ final class JointCombat {
 
         @Override
         public void renderInWorldCoords(ViewportAPI viewport) {
-            rings(engine, Session.get().getMyId());
+            rings(engine, -1); // every player's ships, ours too: the same colours on every game
         }
 
         /** The fleet a view ship belongs to: one per side and whose, never in any location. */
@@ -1253,6 +1331,7 @@ final class JointCombat {
         }
 
         private void register(int id, ShipAPI ship, JSONObject j, int owner, boolean mine) {
+            if (mine && !j.optString("real", "").isEmpty()) inBattle.add(j.optString("real"));
             if (ship.getOriginalOwner() != owner) ship.setOriginalOwner(owner);
             int player = j.optInt("player", -1);
             if (player >= 0) ship.setCustomData(PLAYER_TAG, player);
@@ -1283,13 +1362,25 @@ final class JointCombat {
             synced = true;
             CombatFleetManagerAPI fm = engine.getFleetManager(0);
             boolean canDeploy = !requested.isEmpty();
-            if (fm != null) for (FleetMemberAPI m : fm.getReservesCopy()) if (realIds.contains(m.getId())) canDeploy = true;
+            if (fm != null) for (FleetMemberAPI m : fm.getReservesCopy()) if (realIdOf(m) != null) canDeploy = true;
+            if (!canDeploy && fm != null) {
+                // Nothing in our deployment list yet: put our ships there, rather than bring them all in for us.
+                try {
+                    com.fs.starfarer.api.campaign.CampaignFleetAPI me = Global.getSector().getPlayerFleet();
+                    for (FleetMemberAPI m : me.getFleetData().getMembersListCopy()) {
+                        if (m.isFighterWing() || m.getRepairTracker().isMothballed() || inBattle.contains(m.getId())) continue;
+                        fm.addToReserves(m);
+                        canDeploy = true;
+                    }
+                } catch (RuntimeException e) {
+                    log.warn("[MultiSector] couldn't list our ships for deployment in the battle view", e);
+                }
+                if (canDeploy) log.info("[MultiSector] put our ships in the battle view's deployment list");
+            }
             if (!canDeploy) {
-                // No deployment panel to choose from here: everything combat-ready comes in, as before.
-                s.sendBattleMessage(leader, JointBattle.msg("cdeploy", 0).toString());
-                note("Caught up with " + Session.get().playerName(leader) + "'s battle: your fleet is warping in");
-                log.info("[MultiSector] battle view caught up (" + shown.size() + " ships), nothing to deploy from here:"
-                        + " bringing our fleet in");
+                // Never bring our fleet in for us: only what we deploy goes in.
+                note("Caught up with " + Session.get().playerName(leader) + "'s battle, but none of your ships can deploy");
+                log.info("[MultiSector] battle view caught up (" + shown.size() + " ships); none of our ships can deploy");
                 return;
             }
             note("Caught up with " + Session.get().playerName(leader) + "'s battle. Deploy your ships"
@@ -1302,9 +1393,8 @@ final class JointCombat {
          * it holds still here and the leader brings exactly it in, where we
          * put it. When the leader announces it, it becomes that ship.
          */
-        private void deployed(Session s, ShipAPI ship) {
+        private void deployed(Session s, ShipAPI ship, String id) {
             FleetMemberAPI m = ship.getFleetMember();
-            String id = m.getId();
             if (!requested.add(id)) return;
             ours.add(ship);
             ship.setShipAI(new Idle());
@@ -1318,7 +1408,9 @@ final class JointCombat {
             } catch (Exception e) {
                 log.warn("[MultiSector] couldn't ask for " + m.getShipName(), e);
             }
-            log.info("[MultiSector] deploying " + m.getShipName() + " into " + Session.get().playerName(leader) + "'s battle");
+            log.info("[MultiSector] deploying " + m.getShipName() + " into " + Session.get().playerName(leader) + "'s battle (it appeared"
+                    + " on our side here at t=" + Math.round(engine.getTotalElapsedTime(false)) + "s, dialog open: "
+                    + engine.isUIShowingDialog() + ")" + where());
         }
 
         /**
@@ -1417,14 +1509,41 @@ final class JointCombat {
             }
         }
 
+        /**
+         * Our campaign fleet's member id for a ship record here: the record
+         * itself, or, if the battle made a copy of it, the ship it copies
+         * (same hull and name). Null if it isn't ours.
+         */
+        private String realIdOf(FleetMemberAPI m) {
+            if (m == null) return null;
+            if (realIds.contains(m.getId())) return m.getId();
+            try {
+                for (FleetMemberAPI r : Global.getSector().getPlayerFleet().getFleetData().getMembersListCopy()) {
+                    if (r.getHullId().equals(m.getHullId()) && r.getShipName() != null && r.getShipName().equals(m.getShipName())) {
+                        return r.getId();
+                    }
+                }
+            } catch (RuntimeException ignored) {
+                // not ours
+            }
+            return null;
+        }
+
         /** Only the leader's battle on this field: nothing deployed here by the game itself. */
         private void clean(long now) {
             Session s = Session.get();
             for (ShipAPI ship : new ArrayList<ShipAPI>(engine.getShips())) {
                 if (ship.isFighter() || ship.isHulk() || ship.getParentStation() != null || ours.contains(ship)) continue;
                 FleetMemberAPI m = ship.getFleetMember();
-                if (m != null && ship.getOwner() == 0 && realIds.contains(m.getId()) && !requested.contains(m.getId())) {
-                    deployed(s, ship); // our deployment panel: the leader brings exactly this one in
+                String real = ship.getOwner() == 0 ? realIdOf(m) : null;
+                if (real != null) {
+                    if (inBattle.contains(real) || requested.contains(real)) {
+                        // Already in the leader's battle (or on its way): a second one here would be a duplicate.
+                        log.info("[MultiSector] " + m.getShipName() + " is already in the battle; not deploying it again");
+                        engine.removeEntity(ship);
+                        continue;
+                    }
+                    deployed(s, ship, real); // our deployment panel: the leader brings exactly this one in
                     continue;
                 }
                 log.info("[MultiSector] removing a ship the battle view didn't make: "
@@ -1448,7 +1567,8 @@ final class JointCombat {
                 if (fm == null) continue;
                 // Only our own ships wait in reserve here (for the deployment panel), and only until deployed.
                 for (FleetMemberAPI m : fm.getReservesCopy()) {
-                    if (side != 0 || !realIds.contains(m.getId()) || requested.contains(m.getId())) fm.removeFromReserves(m);
+                    String real = side == 0 ? realIdOf(m) : null;
+                    if (real == null || requested.contains(real) || inBattle.contains(real)) fm.removeFromReserves(m);
                 }
             }
             for (Shown sh : shown.values()) {
@@ -1491,12 +1611,20 @@ final class JointCombat {
                     sh.flags = bb.get() & 0xff;
                     sh.eng = bb.get() & 0xff;
                     sh.shieldFacing = bb.getShort() / 10f;
+                    sh.sys = bb.get() & 0xff;
+                    sh.cloak = bb.get() & 0xff;
                     int nf = bb.get() & 0xff;
                     sh.fireIdx = new int[nf];
                     sh.fireAngle = new float[nf];
+                    sh.fireBeam = new boolean[nf];
                     for (int f = 0; f < nf; f++) {
                         sh.fireIdx[f] = bb.get() & 0xff;
                         sh.fireAngle[f] = bb.getShort() / 10f;
+                        int fired = bb.get() & 0xff;
+                        sh.fireBeam[f] = fired == 0;
+                        if (fired > 0 && sh.shotsDue.size() < 200) {
+                            sh.shotsDue.add(new float[]{sh.fireIdx[f], sh.fireAngle[f], fired});
+                        }
                     }
                     sh.arrived = now;
                     sh.hasState = true;
@@ -1511,7 +1639,8 @@ final class JointCombat {
             if (local > 0.01f && Math.abs(leaderTime - local) > 0.01f) {
                 engine.getTimeMult().modifyMult(TIME_ID, leaderTime / local);
             }
-            if (leaderPaused != engine.isPaused()) engine.setPaused(leaderPaused);
+            // Follow the leader's pause, but don't unpause under our own dialog (the deployment panel).
+            if (leaderPaused != engine.isPaused() && (leaderPaused || !engine.isUIShowingDialog())) engine.setPaused(leaderPaused);
         }
 
         private void apply(Shown sh, long now) {
@@ -1554,10 +1683,13 @@ final class JointCombat {
                 if (on) shield.forceFacing(sh.shieldFacing);
             }
             if ((sh.flags & F_OVERLOAD) != 0 && !ft.isOverloaded()) ft.forceOverload(0f);
+            // Systems, phase cloak and venting are set directly, as on the leader's game (commands could be refused here).
+            syncSystem(ship.getSystem(), sh.sys);
+            syncSystem(ship.getPhaseCloak(), sh.cloak);
+            boolean phased = (sh.flags & F_PHASED) != 0;
+            if (ship.isPhased() != phased) ship.setPhased(phased);
+            if ((sh.flags & F_VENT) != 0 && !ft.isVenting() && !ft.isOverloaded()) ft.ventFlux();
             if (!sh.pilot) {
-                ShipSystemAPI sys = ship.getSystem();
-                if ((sh.flags & F_SYSTEM) != 0 && sys != null && !sys.isActive()) ship.giveCommand(ShipCommand.USE_SYSTEM, null, 0);
-                if ((sh.flags & F_VENT) != 0 && !ft.isVenting()) ship.giveCommand(ShipCommand.VENT_FLUX, null, 0);
                 // Engine flames: same commands as the leader's ship (the move itself is overwritten above).
                 if ((sh.eng & E_ACCEL) != 0) ship.giveCommand(ShipCommand.ACCELERATE, null, 0);
                 if ((sh.eng & E_BACK) != 0) ship.giveCommand(ShipCommand.ACCELERATE_BACKWARDS, null, 0);
@@ -1570,18 +1702,42 @@ final class JointCombat {
                 ship.getEngineController().forceShowAccelerating();
             }
             List<WeaponAPI> weapons = ship.getAllWeapons();
+            boolean beams = false;
+            boolean fresh = now - sh.arrived < 250_000_000L;
             for (int i = 0; i < sh.fireIdx.length; i++) {
                 if (sh.fireIdx[i] >= weapons.size()) continue;
                 WeaponAPI w = weapons.get(sh.fireIdx[i]);
                 w.setCurrAngle(sh.fireAngle[i]);
-                w.setForceFireOneFrame(true); // shots fly and hit here, but nothing here takes damage
+                if (sh.fireBeam[i] && fresh) {
+                    w.setForceFireOneFrame(true); // beams fire as long as the leader's do
+                    beams = true;
+                }
             }
+            // Exactly the shots the leader's ships fired: projectiles and missiles fly and hit here, nothing takes damage.
+            for (float[] shot : sh.shotsDue) {
+                int idx = (int) shot[0];
+                if (idx >= weapons.size()) continue;
+                WeaponAPI w = weapons.get(idx);
+                if (w.isBeam()) continue;
+                w.setCurrAngle(shot[1]);
+                for (int k = 0; k < Math.min((int) shot[2], 8); k++) {
+                    try {
+                        engine.spawnProjectile(ship, w, w.getId(), w.getFirePoint(0), shot[1], ship.getVelocity());
+                    } catch (RuntimeException e) {
+                        break; // a weapon that can't be spawned this way: no shot shown
+                    }
+                }
+            }
+            sh.shotsDue.clear();
+            // Nothing fires here on its own (autofire): only what the leader's ships fired.
+            if (!beams) ship.setHoldFireOneFrame(true);
         }
 
         /** Our piloted ship: its controls go to the leader, not to it. */
         private void controls(Session s, long now) {
             ShipAPI ship = pilot.ship;
-            for (ShipCommand c : ShipCommand.values()) ship.blockCommandForOneFrame(c);
+            // Everything goes to the leader, except picking a weapon group: that happens here too, so it shows.
+            for (ShipCommand c : ShipCommand.values()) if (c != ShipCommand.SELECT_GROUP) ship.blockCommandForOneFrame(c);
             if (engine.isUIShowingDialog()) return; // the game's own menus have the keyboard
             boolean rmb = Mouse.isButtonDown(1);
             if (rmb && !wasRmb) toggles[0]++;
@@ -1591,6 +1747,8 @@ final class JointCombat {
             wasZ = edge(Keyboard.KEY_Z, wasZ, 3);
             wasT = edge(Keyboard.KEY_T, wasT, 4);
             for (int g = 0; g < 7; g++) if (Keyboard.isKeyDown(Keyboard.KEY_1 + g)) group = g;
+            int selected = ship.getWeaponGroupsCopy().indexOf(ship.getSelectedGroupAPI());
+            if (selected >= 0) group = selected;
             ViewportAPI vp = engine.getViewport();
             // The game's mouse position is in UI pixels (scaled), which is what the viewport expects.
             float mx = vp.convertScreenXToWorldX(Global.getSettings().getMouseX());
@@ -1609,6 +1767,7 @@ final class JointCombat {
             if (Keyboard.isKeyDown(Keyboard.KEY_E)) keys |= K_E;
             if (Keyboard.isKeyDown(Keyboard.KEY_X)) keys |= K_DECEL;
             if (Mouse.isButtonDown(0)) keys |= K_FIRE;
+            if (engine.isUIAutopilotOn()) keys = K_AUTO; // autopilot: the ship flies on its AI on the leader's game
             ByteBuffer bb = ByteBuffer.allocate(64);
             bb.put(INPUT).putInt(inputSeq++).putShort((short) idOf(pilot)).putInt(keys).putFloat(mx).putFloat(my)
                     .put((byte) group).putShort((short) target);

@@ -35,7 +35,7 @@ Invariants:
 
 - **Battle messages:** JSON over TCP, sent player to player on the battle channel (`CHANNEL_BATTLE`) and relayed by the host. Each message carries `k` (its kind) and `b` (the leader's battle id). `b` = 0 on a join request means "whatever you're fighting".
 - **Combat datagrams:** UDP, relayed by the host (`COMBAT_UDP`). The first byte says which kind:
-  - `STATE` (1), leader to joiner, 20 per second: every ship's state, plus combat speed and pause.
+  - `STATE` (1), leader to joiner, 20 per second: every ship's state (position, motion, hull, flux, CR, shield, flags, engines, system and phase cloak state, and each weapon's angle with the number of shots it fired since the last update, or 0 for a beam firing now), plus combat speed and pause.
   - `INPUT` (2), joiner to leader, about 30 per second: the piloted ship's controls.
 - **Two independent channels:** the two channels aren't ordered with respect to each other. TCP messages arrive in order. Datagrams may be lost or reordered, and each one is a complete snapshot of the ships in it.
 
@@ -89,7 +89,7 @@ The other messages:
 | `left` | relay → everyone | A player disconnected. Their battles end for the others. If it was a joiner, their ships retreat. |
 
 Fallbacks:
-- If the view has nothing to deploy from (its deployment panel is empty), or there's no view, the joiner's game sends `cdeploy` without a ship list. The leader then brings in all their combat-ready ships, as in earlier builds.
+- **Only with `"jointBattleView": false`** does the joiner's game send `cdeploy` without a ship list, which brings in all their combat-ready ships. While the view is on, nothing of the joiner's ever deploys for them. If their deployment list is empty when the view catches up, their ships are put in it. If the view can't open, their ships stay out.
 - A ship held in the view that the leader doesn't confirm within 15 s is removed from the view.
 - If the leader has deployed nothing, joiners are let in after 30 s of combat time.
 - The view closes after 20 s with no datagram.
