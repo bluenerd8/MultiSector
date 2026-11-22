@@ -36,7 +36,7 @@ public final class NetConfig {
     public static final int MAGIC = 0x4D534543;
 
     /** Bump when the wire format changes. Host and client must match. */
-    public static final short PROTOCOL_VERSION = 16;
+    public static final short PROTOCOL_VERSION = 17;
 
     public static final int CONNECT_TIMEOUT_MS = 5000;
 

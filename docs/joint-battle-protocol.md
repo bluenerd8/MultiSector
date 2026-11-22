@@ -16,13 +16,16 @@ How a player joins another player's battle: who owns which state, and which mess
 | Every ship in the combat: position, hull, flux, CR, shields, systems, weapons, wrecked or not | Leader's game | The view copies it from the stream and never decides any of it itself. |
 | Side (`owner` 0/1) and ally flag of each ship | Leader's game, sent once per ship in `cship` | The view sets both before spawning and must match. A mismatch shows in the view check. |
 | Which ships a joiner brings, and their loadouts | Joiner's real fleet, sent once in `join` | The leader builds an exact copy in a separate fleet that's never in any location or battle. |
+| Which of them deploy, and where | Joiner, from the view's deployment panel (`cdeploy` with ships) | The leader spawns exactly those, at that spot. Nothing of a joiner's deploys by itself. |
 | Whose ship it is (`multisector_player` tag) | Leader sets it on each joiner ship it spawns | Sent as `player` in `cship`. The view tags its ships the same way. |
 | Controls of the piloted ship | Joiner (input datagrams) | The leader's `RemotePilot` applies them. Without fresh input for 1.5 s, the ship's default AI flies it. |
-| Orders for joiner ships | Leader's side: they aren't AI allies, so the leader's tactical orders apply | None yet from the joiner. |
+| Orders for joiner ships | Joiner, from the view's command map (`corders`) | The leader enforces them on the real ships, which are allies there, so the leader can't command or fly them. Ships without an order from the joiner follow the ally AI. |
+| Which ship the joiner flies | Joiner (transfer command in the view, `cpilot`) | The leader moves `RemotePilot` to it; the previous one goes back to its AI. |
 | What happened to the joiner's ships | Leader's game, sent in `result` | The joiner applies it to their real fleet. |
 | Combat speed and pause | Leader's game, in every state datagram | The view follows both. |
 
 Invariants:
+- A joiner's ship is in the leader's combat only if the joiner deployed it.
 - Each joiner ship exists once in the leader's combat. A second copy, or a ship of a player's stand-in fleet, is removed within 0.5 s.
 - A player's stand-in fleet is never in a campaign battle. If it ever is, it's taken out immediately.
 - The view shows only ships the leader announced. Anything else is removed.
@@ -55,10 +58,16 @@ leader's ships out, combat clock running
   STATE datagrams, 20/s ═══════════════════► places every ship from the stream
                                          ◄── cwho {ids}  (stream mentions ships it doesn't have; ≤ 3 times each)
   cship × those ───────────────────────────►
-                                         ◄── cdeploy  (every ship placed from the stream: 1.5 s ≤ t ≤ 8 s)
-spawns the joiner's ships, tagged, not allies
+                                             view caught up (every ship placed, 1.5–8 s):
+                                             "Deploy your ships" (its deployment panel lists the joiner's real fleet)
+                                         ◄── cdeploy {ships: [{id, x, y, f}]}  (each ship the joiner deploys; it
+                                             holds still in the view, damage-immune, until the leader confirms it)
+spawns exactly those, there: tagged, allies
 ("X joins your battle with N ships")
-  cship × the joiner's ships ──────────────► spawns them as its own; the piloted one becomes its player ship
+  cship {real: their member id} ───────────► that held ship becomes the leader's (adopted, not made again)
+                                         ◄── cpilot {id}     (the joiner takes the helm of one of their ships)
+                                         ◄── corders {list}  (their command-map orders: when changed, and every 3 s)
+enforces them on the joiner's ships (re-given at most every 3 s each)
                                          ◄══ INPUT datagrams, ~30/s
   status {ships} every 1 s ────────────────► (report, used without the view)
                                          ◄── retreat  (optional)
@@ -80,7 +89,8 @@ The other messages:
 | `left` | relay → everyone | A player disconnected. Their battles end for the others. If it was a joiner, their ships retreat. |
 
 Fallbacks:
-- If `cdeploy` never comes, the leader brings the joiner's ships in after 25 s.
+- If the view has nothing to deploy from (its deployment panel is empty), or there's no view, the joiner's game sends `cdeploy` without a ship list. The leader then brings in all their combat-ready ships, as in earlier builds.
+- A ship held in the view that the leader doesn't confirm within 15 s is removed from the view.
 - If the leader has deployed nothing, joiners are let in after 30 s of combat time.
 - The view closes after 20 s with no datagram.
 
@@ -98,4 +108,7 @@ With `"jointBattleChecks": true` (the default, in `data/config/multisector.json`
 On the joiner's game, `view differs from the leader's battle` lists each ship whose side, ally flag, wreck state, CR (more than 10% apart) or hull (more than 15% apart) doesn't match the leader. Other lines to look for:
 - `view can't make` or `couldn't place`: a ship the view couldn't build or spawn.
 - `removing a ship the view didn't make`: a ship that appeared in the view without being announced.
+- `view ship N ... frame 1/2/5/10` (joiner): each new view ship's first frames: wreck, hitpoints, side and original side, ally, whether its record is the joiner's campaign ship or a view copy (and its fleet), and its readiness. A wreck at frame 1 means it was placed wrongly; a wreck right after the first update means a bad update; a wreck later means the view decided it, which it never should.
+- `watching X's battle; player fleet here is ...` (joiner): whether the view's player fleet is the joiner's campaign fleet, and how many of their ships can deploy.
+- `X's ... is in: ally=..., fleet ...` (leader): each joiner ship as it spawns, with the fleet it belongs to (always the joiner's own, outside the campaign battle).
 - `taking … out of the battle`: the leader's duplicate or stand-in guard removed a ship.

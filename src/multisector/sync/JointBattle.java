@@ -125,7 +125,7 @@ public final class JointBattle implements EveryFrameScript {
                     leaderLost(m.from);
                     joinerLost(m.from);
                 } else if ("join".equals(k) || "retreat".equals(k) || "seen".equals(k) || "cwho".equals(k)
-                        || "cdeploy".equals(k)) {
+                        || "cdeploy".equals(k) || "cpilot".equals(k) || "corders".equals(k)) {
                     toLeader(s, m, k, j);
                 } else {
                     toJoiner(s, m, k, j);
@@ -168,9 +168,20 @@ public final class JointBattle implements EveryFrameScript {
         final Map<String, float[]> lastHullCr = new HashMap<String, float[]>();
         /** Our member ids already put into the fight: never twice. */
         final Set<String> spawned = new HashSet<String>();
-        /** Their ships are in (only once their view has caught up with the battle). */
+        /** Some of their ships are in (only what they deploy from their view). */
         boolean deployed;
         long joinedAt;
+        /** Their orders for their ships, by the leader's ship id (from their view's command map). */
+        final Map<Integer, JSONObject> orders = new HashMap<Integer, JSONObject>();
+
+        /** Our copy of one of their ships, by their member id. */
+        FleetMemberAPI memberFor(String theirId) {
+            for (Map.Entry<String, String> e : toOwner.entrySet()) {
+                if (!e.getValue().equals(theirId)) continue;
+                for (FleetMemberAPI m : fleet.getFleetData().getMembersListCopy()) if (m.getId().equals(e.getKey())) return m;
+            }
+            return null;
+        }
 
         Joiner(int id, String name, CampaignFleetAPI fleet) {
             this.id = id;
@@ -284,10 +295,14 @@ public final class JointBattle implements EveryFrameScript {
             }
             return;
         }
-        if ("cdeploy".equals(k)) {
+        if ("cdeploy".equals(k) || "cpilot".equals(k) || "corders".equals(k)) {
             Joiner jn = joiners.get(m.from);
             JointCombat.Leader lead = JointCombat.Leader.active;
-            if (jn != null && lead != null) lead.bringIn(jn);
+            if (jn == null || lead == null) return;
+            if ("cpilot".equals(k)) lead.pilotShip(jn, j.optInt("id"));
+            else if ("corders".equals(k)) lead.orders(jn, j.optJSONArray("list"));
+            else if (j.has("ships")) lead.bringIn(jn, j.optJSONArray("ships"));
+            else lead.bringIn(jn);
             return;
         }
         if ("cwho".equals(k)) {
@@ -400,7 +415,7 @@ public final class JointBattle implements EveryFrameScript {
             m.getRepairTracker().setCR((float) sj.optDouble("cr", m.getRepairTracker().getMaxCR()));
             m.getStatus().setHullFraction((float) sj.optDouble("hullFraction", 1));
             if (sj.optBoolean("mothballed")) m.getRepairTracker().setMothballed(true);
-            m.setAlly(false); // a player's ship, not an AI ally (JointCombat.PLAYER_TAG)
+            m.setAlly(true); // another player's ship: we don't command it (JointCombat.PLAYER_TAG)
             String owner = sj.optString("id", "");
             jn.toOwner.put(m.getId(), owner);
             jn.names.put(m.getId(), m.getShipName());

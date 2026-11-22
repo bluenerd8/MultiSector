@@ -560,3 +560,18 @@ From testing 0.0.34: the joiner's ships were already in the battle as AI copies 
   - **Never taken over.** If the leader switches to one of them, they're put back on their own ship ("That ship is X's: they command it").
 - `cship` carries whose ship each one is (`player`: a joiner's id, the leader's id for the leader's own ships, or -1). The joiner's view tags and marks other players' ships the same way, so the leader's ships glow in the leader's colour there.
 - Still to come: commands from the joiner to their own ships. For now their ships take the leader's side's orders.
+
+### The joiner deploys and commands their own ships (0.0.36)
+
+From testing 0.0.35:
+- The joiner had a deployment panel, but their ships came in by themselves anyway.
+- The leader could command the joiner's ships as their own, and the colour marking didn't show.
+- In the view every ship was unflyable, and the command map showed them all as mothballed, while combat showed readiness.
+
+What changed:
+- **The view's ships have a proper fleet record.** A member in no fleet has no readiness on its record (the command map reads it there, not the ship's combat readiness), so it shows as mothballed and can't be commanded or flown. Each view ship is now added to a view fleet (one per side and whose), its record's readiness is set from the leader's announcement (`cship` carries `cr`), and kept in step with the stream.
+- **The joiner chooses what deploys.** The view keeps the joiner's real fleet in its reserves (and nothing else), so the deployment panel and the command map's Deploy list their own ships. A ship they deploy holds still in the view (damage-immune, controls blocked). The view sends `cdeploy` with its id and position. The leader spawns exactly that ship there, and announces it with `real` (the joiner's member id); the view adopts its held ship as that one instead of making another. Nothing else of the joiner's deploys. A view with nothing in reserve (no panel) falls back to bringing everything in.
+- **Independent command.** On the leader's game the joiner's ships are allies again, so the leader can neither command nor fly them. The joiner commands them from the view's command map: every 0.5 s the view reads its task manager's assignment for each of their ships (type, and target ship or location) and sends any change (`corders`, and the full set every 3 s). The leader gives each order through the ally task manager (`createAssignment` on the target ship, an objective within 400 units, or a waypoint, then `giveAssignment`). It re-gives an order the ally AI replaced, at most every 3 s per ship. Ships the joiner hasn't ordered follow the ally AI. A full retreat in the view orders their ships out. The view has no battle objectives, so orders to capture them can't be given from it yet.
+- **Transfer command.** Taking the helm of another of their ships in the view sends `cpilot`. The leader moves `RemotePilot` to that ship and gives the previous one its AI back.
+- **Rings.** Each player's ships get a ring in their colour, drawn in world space (`renderInWorldCoords`), as well as the glow. The view rings the leader's ships and other joiners' ships, but not your own.
+- `PROTOCOL_VERSION` 17.

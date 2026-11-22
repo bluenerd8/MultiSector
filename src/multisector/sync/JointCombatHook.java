@@ -4,6 +4,7 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.combat.BaseEveryFrameCombatPlugin;
 import com.fs.starfarer.api.combat.CombatEngineAPI;
+import com.fs.starfarer.api.combat.ViewportAPI;
 import com.fs.starfarer.api.input.InputEventAPI;
 import multisector.net.Session;
 
@@ -38,6 +39,11 @@ public final class JointCombatHook extends BaseEveryFrameCombatPlugin {
             }
         }
         if (leader != null) leader.advance(amount, events);
+    }
+
+    @Override
+    public void renderInWorldCoords(ViewportAPI viewport) {
+        if (leader != null) leader.renderInWorldCoords(viewport);
     }
 
     private boolean leads() {
