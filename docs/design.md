@@ -591,3 +591,15 @@ From testing 0.0.36: the leader's side worked well. In the joiner's view, ship s
 - **Autopilot:** with autopilot on in the view, input packets say so (`K_AUTO`), and the leader gives that ship its own AI until it's off.
 - **Selected weapon group:** the piloted ship in the view picks its weapon group itself (that one command isn't blocked), so the selection shows, and that group is what's sent.
 - `PROTOCOL_VERSION` 18 (the state datagram changed).
+
+### Piloting and orders (0.0.38)
+
+From testing 0.0.37: deploying, markings and duplicates were fixed, but the joiner couldn't fly their ship at all, and a game crashed ("Cannot invoke ReadableVector2f.getX() because src is null") a while after the joiner started giving orders.
+
+- **Piloting:** the game shows the view's flown ship as on autopilot from the start, because it has the view's do-nothing AI. 0.0.37 sent that as the player turning autopilot on, so the leader kept the ship on its AI. Now autopilot only counts once it has been off: turning it off and on again is the player's choice. When the flown ship changes, the old one gets the do-nothing AI back.
+- **Orders, hardened** (the crash's stack trace wasn't available yet):
+  - Each order is only passed on with a target that fits it: a live ship in play for ship orders (intercept, engage, harass, strike, escorts), an objective within 400 units for objective orders (capture, control, assault), and an objective or a spot for the rest (defend, avoid, recon, rallies). Other orders aren't passed on.
+  - An order is made once per ship and given again when the ally AI replaces it, instead of a new assignment and waypoint every 3 s.
+  - Target positions are copied, never shared.
+- **The view removes ships cleanly** (out of its side's deployed list too), so no order or AI in it is left pointing at a ship that's gone. Shots are never spawned from a missing fire point.
+- `PROTOCOL_VERSION` 19.
