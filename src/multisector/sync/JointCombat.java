@@ -168,6 +168,16 @@ final class JointCombat {
         }
     }
 
+    /** Still flying in from the map's edge after deploying: orders to or about it wait until it's arrived. */
+    static boolean arriving(ShipAPI ship) {
+        try {
+            ShipSystemAPI drive = ship.getTravelDrive();
+            return drive != null && drive.isActive();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     /** Where in our code this is happening, for the log (every place a ship is spawned or deployed). */
     static String where() {
         StackTraceElement[] st = new Throwable().getStackTrace();
@@ -779,6 +789,7 @@ final class JointCombat {
             for (Map.Entry<Integer, JSONObject> e : jn.orders.entrySet()) {
                 ShipAPI ship = byId.get(e.getKey());
                 if (ship == null || !ship.isAlive() || ship.isHulk() || piloted.contains(ship) || playerOf(ship) != jn.id) continue;
+                if (arriving(ship) || !engine.isEntityInPlay(ship)) continue; // an order now, mid-arrival, crashed the game
                 Long last = ordered.get(ship);
                 if (last != null && now - last < 3_000_000_000L) continue;
                 try {
@@ -830,7 +841,8 @@ final class JointCombat {
             }
             com.fs.starfarer.api.combat.AssignmentTargetAPI target = null;
             if ("ship".equals(kind)) {
-                if (targetShip == null || !targetShip.isAlive() || targetShip.isHulk() || !engine.isEntityInPlay(targetShip)) return false;
+                if (targetShip == null || !targetShip.isAlive() || targetShip.isHulk() || !engine.isEntityInPlay(targetShip)
+                        || arriving(targetShip)) return false;
                 CombatFleetManagerAPI tfm = engine.getFleetManager(targetShip.getOwner());
                 target = tfm == null ? null : tfm.getDeployedFleetMember(targetShip);
             } else if (want != null) {
@@ -1291,6 +1303,7 @@ final class JointCombat {
                 for (Map.Entry<Integer, Shown> e : shown.entrySet()) {
                     Shown sh = e.getValue();
                     if (sh.ship == null || sh.player != me || sh.ship.isHulk()) continue;
+                    if (!sh.hasState || now - sh.spawnedAt < 2_000_000_000L) continue; // not settled here yet
                     CombatFleetManagerAPI.AssignmentInfo info = tm.getAssignmentFor(sh.ship);
                     JSONObject o = new JSONObject().put("id", e.getKey());
                     if (info != null && info.getType() != null) {
@@ -1373,6 +1386,7 @@ final class JointCombat {
 
         /** A ship we deployed here, now in the leader's battle: it's that one. */
         private void adopt(int id, ShipAPI ship, JSONObject j) {
+            noTravelDrive(ship);
             ship.setShipAI(new Idle());
             immune(ship.getMutableStats(), true);
             if (ship.getOwner() != 0) ship.setOwner(0);
@@ -1450,6 +1464,7 @@ final class JointCombat {
             FleetMemberAPI m = ship.getFleetMember();
             if (!requested.add(id)) return;
             ours.add(ship);
+            noTravelDrive(ship);
             ship.setShipAI(new Idle());
             immune(ship.getMutableStats(), true);
             adopting.put(id, ship);
@@ -1559,6 +1574,14 @@ final class JointCombat {
                 s.sendBattleMessage(leader, JointBattle.msg("cwho", 0).put("ids", want).toString());
             } catch (Exception ignored) {
                 // next second
+            }
+        }
+
+        private static void noTravelDrive(ShipAPI ship) {
+            try {
+                if (arriving(ship)) ship.turnOffTravelDrive();
+            } catch (RuntimeException ignored) {
+                // the stream places it anyway
             }
         }
 
@@ -1700,11 +1723,21 @@ final class JointCombat {
         private void followSpeed() {
             engine.getTimeMult().unmodify(TIME_ID);
             float local = engine.getTimeMult().getModifiedValue();
-            if (local > 0.01f && Math.abs(leaderTime - local) > 0.01f) {
-                engine.getTimeMult().modifyMult(TIME_ID, leaderTime / local);
+            float want = leaderPaused ? 0.02f : leaderTime;
+            if (local > 0.001f && Math.abs(want - local) > 0.001f) {
+                engine.getTimeMult().modifyMult(TIME_ID, want / local);
             }
-            // Follow the leader's pause, but don't unpause under our own dialog (the deployment panel).
-            if (leaderPaused != engine.isPaused() && (leaderPaused || !engine.isUIShowingDialog())) engine.setPaused(leaderPaused);
+            // The view runs unpaused: the battle is the leader's, and things like transferring command only
+            // happen while it runs. Paused only under the deployment panel, and left alone under menus.
+            // When the leader pauses, the view nearly stops instead (ships are held where the leader has them).
+            com.fs.starfarer.api.combat.CombatUIAPI ui = engine.getCombatUI();
+            boolean deploying = ui != null && ui.isShowingDeploymentDialog();
+            boolean commandMap = ui != null && ui.isShowingCommandUI();
+            if (deploying) {
+                if (!engine.isPaused()) engine.setPaused(true);
+            } else if (engine.isPaused() && (commandMap || !engine.isUIShowingDialog())) {
+                engine.setPaused(false);
+            }
         }
 
         private void apply(Shown sh, long now) {
@@ -1731,9 +1764,14 @@ final class JointCombat {
             float dx = tx - pos.x, dy = ty - pos.y;
             if (dx * dx + dy * dy > 300f * 300f) pos.set(tx, ty);
             else pos.set(pos.x + dx * 0.5f, pos.y + dy * 0.5f);
-            ship.getVelocity().set(sh.vx, sh.vy);
+            if (leaderPaused) {
+                ship.getVelocity().set(0f, 0f); // held where the leader's paused battle has it
+                ship.setAngularVelocity(0f);
+            } else {
+                ship.getVelocity().set(sh.vx, sh.vy);
+                ship.setAngularVelocity(sh.angVel);
+            }
             ship.setFacing(sh.facing + sh.angVel * ahead);
-            ship.setAngularVelocity(sh.angVel);
             ship.setHitpoints(Math.max(1f, sh.hull * ship.getMaxHitpoints()));
             if (Math.abs(ship.getCurrentCR() - sh.cr) > 0.01f) ship.setCurrentCR(sh.cr);
             FluxTrackerAPI ft = ship.getFluxTracker();
@@ -1835,6 +1873,9 @@ final class JointCombat {
             if (Mouse.isButtonDown(0)) keys |= K_FIRE;
             boolean autopilotUi = engine.isUIAutopilotOn();
             if (!autopilotUi) autopilotAtStart = false;
+            // Flying it yourself (move or fire) takes it off autopilot, as in the game, even though the game's own
+            // switch can't see our controls. It stays off until autopilot is switched off and on again.
+            if (autopilotUi && keys != 0) autopilotAtStart = true;
             if (autopilotUi && !autopilotAtStart) keys = K_AUTO; // the player's autopilot: its AI flies it on the leader's game
             ByteBuffer bb = ByteBuffer.allocate(64);
             bb.put(INPUT).putInt(inputSeq++).putShort((short) idOf(pilot)).putInt(keys).putFloat(mx).putFloat(my)

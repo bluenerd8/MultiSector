@@ -603,3 +603,12 @@ From testing 0.0.37: deploying, markings and duplicates were fixed, but the join
   - Target positions are copied, never shared.
 - **The view removes ships cleanly** (out of its side's deployed list too), so no order or AI in it is left pointing at a ship that's gone. Shots are never spawned from a missing fire point.
 - `PROTOCOL_VERSION` 19.
+
+### Orders on arrival, autopilot, and the view's pause (0.0.39)
+
+From testing 0.0.38: commanding works, but the crash came back when ordering ships that hadn't finished arriving. Autopilot was unreliable: an order to the flown ship put it on autopilot for good. The joiner couldn't transfer command, because the view kept itself paused while the command map was open.
+
+- **No orders mid-arrival.** A ship flying in from the edge after deploying has its travel drive on (`ShipAPI.getTravelDrive`). The leader gives no order to such a ship, nor one that targets it, until it has arrived. The view sends orders only for ships that are settled (updated from the stream, at least 2 s old). In the view, a ship the joiner deploys has its travel drive switched off straight away (`turnOffTravelDrive`): the leader's game is what moves it in.
+- **Autopilot:** flying the ship yourself (any move or fire key) takes it off autopilot, as in the game (`shipControlsTurnOffAutopilot`). The game's own switch can't see our controls, since they're blocked locally and sent to the leader. It stays off until autopilot is switched off and on again. Giving your own ship an order still puts it on autopilot to carry the order out, and pressing a control takes it back.
+- **The view runs unpaused.** It's only paused under the deployment panel (`CombatUIAPI.isShowingDeploymentDialog`). It's unpaused under the command map (so transferring command works) and otherwise, and left alone under other menus. When the leader pauses, the view runs at 2% speed with every ship held where the leader's paused battle has it, instead of pausing.
+- `PROTOCOL_VERSION` 20.
