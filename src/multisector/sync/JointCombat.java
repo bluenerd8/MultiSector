@@ -127,7 +127,9 @@ final class JointCombat {
         private long nextState, nextStatus;
         private boolean deployed, ended;
         private final Map<Integer, Input> inputs = new ConcurrentHashMap<Integer, Input>();
+        /** Ships flown from a joiner's controls right now (the rest of the time they have their own AI). */
         private final Set<ShipAPI> piloted = java.util.Collections.newSetFromMap(new IdentityHashMap<ShipAPI, Boolean>());
+        private final Set<Integer> announcedJoiners = new HashSet<Integer>();
 
         @Override
         public void init(CombatEngineAPI engine) {
@@ -142,6 +144,7 @@ final class JointCombat {
                     // they'll just get the report
                 }
             }
+            JointBattle.engaged = true;
             log.info("[MultiSector] joint battle started with " + JointBattle.joiners().size() + " other player(s)");
         }
 
@@ -158,6 +161,9 @@ final class JointCombat {
                     deployJoiners();
                 }
                 for (JointBattle.Joiner jn : JointBattle.joiners()) {
+                    if (announcedJoiners.add(jn.id)) {
+                        banner(jn.name + " joins the fight with " + jn.toOwner.size() + " ships");
+                    }
                     if (jn.retreat) retreat(jn);
                     pilot(jn);
                 }
@@ -258,7 +264,7 @@ final class JointCombat {
                 WeaponAPI w = weapons.get(i);
                 if (w.isFiring()) firing.add(new int[]{i, Math.round(w.getCurrAngle() * 10f)});
             }
-            ByteBuffer bb = ByteBuffer.allocate(40 + firing.size() * 3);
+            ByteBuffer bb = ByteBuffer.allocate(41 + firing.size() * 3);
             bb.putShort((short) id);
             bb.putFloat(ship.getLocation().x).putFloat(ship.getLocation().y);
             bb.putFloat(ship.getVelocity().x).putFloat(ship.getVelocity().y);
@@ -267,6 +273,7 @@ final class JointCombat {
             FluxTrackerAPI ft = ship.getFluxTracker();
             float max = Math.max(1f, ft.getMaxFlux());
             bb.put(unit(ft.getCurrFlux() / max)).put(unit(ft.getHardFlux() / max));
+            bb.put(unit(ship.getCurrentCR()));
             int flags = 0;
             ShieldAPI sh = ship.getShield();
             if (sh != null && sh.isOn()) flags |= F_SHIELD;
@@ -351,16 +358,44 @@ final class JointCombat {
             }
         }
 
-        /** The joiner's chosen ship flies on their controls. */
+        /**
+         * The joiner's chosen ship flies on their controls while they're
+         * coming in, and on its own AI while they aren't (before their view
+         * opens, or if their connection stalls). The game won't let a ship's
+         * old AI be called once replaced, so it gets a fresh default AI back.
+         */
         private void pilot(JointBattle.Joiner jn) {
             if (jn.pilotPuppetId == null) return;
+            Input in = inputs.get(jn.id);
+            boolean live = in != null && System.nanoTime() - in.arrived < INPUT_STALE_NANOS;
             for (ShipAPI ship : engine.getShips()) {
                 FleetMemberAPI m = ship.getFleetMember();
-                if (m == null || !m.getId().equals(jn.pilotPuppetId) || piloted.contains(ship)) continue;
-                if (ship.isHulk() || !ship.isAlive()) continue;
-                piloted.add(ship);
-                ship.setShipAI(new RemotePilot(ship, ship.getShipAI(), jn.id, inputs, byId));
-                log.info("[MultiSector] " + jn.name + " is piloting " + m.getShipName());
+                if (m == null || !m.getId().equals(jn.pilotPuppetId)) continue;
+                boolean flying = piloted.contains(ship);
+                if (ship.isHulk() || !ship.isAlive()) {
+                    piloted.remove(ship);
+                    continue;
+                }
+                if (live && !flying) {
+                    piloted.add(ship);
+                    ship.setShipAI(new RemotePilot(ship, jn.id, inputs, byId));
+                    banner(jn.name + " takes the helm of " + m.getShipName());
+                    log.info("[MultiSector] " + jn.name + " is piloting " + m.getShipName());
+                } else if (!live && flying) {
+                    piloted.remove(ship);
+                    ship.resetDefaultAI();
+                    banner(jn.name + "'s controls stopped coming: " + m.getShipName() + " is on its own AI");
+                    log.info("[MultiSector] " + jn.name + "'s controls stopped; " + m.getShipName() + " back on its AI");
+                }
+            }
+        }
+
+        /** A line in the battle's message log, for the leader. */
+        private void banner(String text) {
+            try {
+                if (engine.getCombatUI() != null) engine.getCombatUI().addMessage(1, java.awt.Color.CYAN, text);
+            } catch (RuntimeException ignored) {
+                // just no message
             }
         }
 
@@ -381,19 +416,17 @@ final class JointCombat {
         return (b & 0xff) / 255f;
     }
 
-    /** Flies a ship from a joiner's controls; its own AI takes over if they stop coming. */
+    /** Flies a ship from a joiner's controls. The leader puts the ship's own AI back if they stop coming. */
     static final class RemotePilot implements ShipAIPlugin {
         private final ShipAPI ship;
-        private final ShipAIPlugin fallback;
         private final int joiner;
         private final Map<Integer, Input> inputs;
         private final Map<Integer, ShipAPI> byId;
         private final int[] seen = {-1, -1, -1, -1, -1};
         private final ShipwideAIFlags flags = new ShipwideAIFlags();
 
-        RemotePilot(ShipAPI ship, ShipAIPlugin fallback, int joiner, Map<Integer, Input> inputs, Map<Integer, ShipAPI> byId) {
+        RemotePilot(ShipAPI ship, int joiner, Map<Integer, Input> inputs, Map<Integer, ShipAPI> byId) {
             this.ship = ship;
-            this.fallback = fallback;
             this.joiner = joiner;
             this.inputs = inputs;
             this.byId = byId;
@@ -401,10 +434,7 @@ final class JointCombat {
 
         public void advance(float amount) {
             Input in = inputs.get(joiner);
-            if (in == null || System.nanoTime() - in.arrived > INPUT_STALE_NANOS) {
-                if (fallback != null) fallback.advance(amount);
-                return;
-            }
+            if (in == null || System.nanoTime() - in.arrived > INPUT_STALE_NANOS) return; // the leader switches us out
             if ((in.keys & K_W) != 0) ship.giveCommand(ShipCommand.ACCELERATE, null, 0);
             if ((in.keys & K_S) != 0) ship.giveCommand(ShipCommand.ACCELERATE_BACKWARDS, null, 0);
             if ((in.keys & K_A) != 0) ship.giveCommand(ShipCommand.TURN_LEFT, null, 0);
@@ -447,27 +477,24 @@ final class JointCombat {
         }
 
         public void setDoNotFireDelay(float amount) {
-            if (fallback != null) fallback.setDoNotFireDelay(amount);
         }
 
         public void forceCircumstanceEvaluation() {
-            if (fallback != null) fallback.forceCircumstanceEvaluation();
         }
 
         public boolean needsRefit() {
-            return fallback != null && fallback.needsRefit();
+            return false;
         }
 
         public ShipwideAIFlags getAIFlags() {
-            return fallback != null ? fallback.getAIFlags() : flags;
+            return flags;
         }
 
         public void cancelCurrentManeuver() {
-            if (fallback != null) fallback.cancelCurrentManeuver();
         }
 
         public ShipAIConfig getConfig() {
-            return fallback != null ? fallback.getConfig() : new ShipAIConfig();
+            return new ShipAIConfig();
         }
     }
 
@@ -499,6 +526,17 @@ final class JointCombat {
             api.initFleet(FleetSide.PLAYER, "", FleetGoal.ATTACK, false);
             api.initFleet(FleetSide.ENEMY, "", FleetGoal.ATTACK, false);
             api.initMap(-w / 2f, w / 2f, -h / 2f, h / 2f);
+            // The same backdrop as the battle's: we're in the same place.
+            try {
+                com.fs.starfarer.api.campaign.LocationAPI loc = context.getPlayerFleet() == null ? null
+                        : context.getPlayerFleet().getContainingLocation();
+                if (loc != null) {
+                    if (loc.getBackgroundTextureFilename() != null) api.setBackgroundSpriteName(loc.getBackgroundTextureFilename());
+                    if (loc.isHyperspace()) api.setHyperspaceMode(true);
+                }
+            } catch (RuntimeException ignored) {
+                // plain backdrop
+            }
             api.addPlugin(new Mirror(leader));
         }
 
@@ -511,7 +549,7 @@ final class JointCombat {
         ShipAPI ship;
         boolean pilot;
         // latest state
-        float x, y, vx, vy, facing, angVel, hull, flux, hard, shieldFacing;
+        float x, y, vx, vy, facing, angVel, hull, flux, hard, cr, shieldFacing;
         int flags, eng;
         int[] fireIdx = new int[0];
         float[] fireAngle = new float[0];
@@ -591,6 +629,8 @@ final class JointCombat {
             FleetMemberAPI m = ShipJson.buildShip(j.getJSONObject("ship"), new ArrayList<String>());
             if (m == null) return; // a ship this game doesn't have
             if (j.has("name")) m.setShipName(j.optString("name"));
+            // A new ship starts at no readiness: everything malfunctions and it looks scuttled. The stream sets the real value.
+            m.getRepairTracker().setCR(m.getRepairTracker().getMaxCR());
             int owner = j.optInt("owner") == 1 ? 1 : 0;
             CombatFleetManagerAPI fm = engine.getFleetManager(owner);
             ShipAPI ship = fm.spawnFleetMember(m, new Vector2f((float) j.optDouble("x"), (float) j.optDouble("y")),
@@ -634,6 +674,7 @@ final class JointCombat {
                     sh.hull = unit(bb.get());
                     sh.flux = unit(bb.get());
                     sh.hard = unit(bb.get());
+                    sh.cr = unit(bb.get());
                     sh.flags = bb.get() & 0xff;
                     sh.eng = bb.get() & 0xff;
                     sh.shieldFacing = bb.getShort() / 10f;
@@ -684,6 +725,7 @@ final class JointCombat {
             ship.setFacing(sh.facing + sh.angVel * ahead);
             ship.setAngularVelocity(sh.angVel);
             ship.setHitpoints(Math.max(1f, sh.hull * ship.getMaxHitpoints()));
+            if (Math.abs(ship.getCurrentCR() - sh.cr) > 0.01f) ship.setCurrentCR(sh.cr);
             FluxTrackerAPI ft = ship.getFluxTracker();
             ft.setCurrFlux(sh.flux * ft.getMaxFlux());
             ft.setHardFlux(sh.hard * ft.getMaxFlux());

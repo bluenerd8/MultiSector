@@ -508,3 +508,11 @@ When you reach a fleet another player is already dealing with, you're no longer 
 
 - **NPC fleet details:** `NpcInfo.extra` carries each ship's hull, readiness (both to 5%) and mothballing, and the commander's name, portrait, rank and post. Followers apply them to stand-ins and their own copies; it's re-sent when it changes.
 - **Objects already there:** an owner with followers sends everything rebuildable around it (debris, wrecks, pods, objectives, stable locations; within 8,000 units in hyperspace) when followers arrive and every 20 s. Followers add what they're missing. Before, only changes were shared, so a derelict that existed before a friend arrived never reached them.
+
+### First test fixes (0.0.32)
+
+- **Crash on the leader** ("Ship ... is being controlled by an AI that is assigned to something else"). The remote pilot called the ship's previous AI whenever the joiner's controls weren't arriving, which the game forbids once an AI has been replaced. Now the leader swaps the ship between the remote pilot (while controls arrive) and a fresh default AI (`resetDefaultAI`, while they don't), and says so in the combat log.
+- **Joiners' ships never reaching combat.** The fleet dialog builds each side's combined fleet when it opens (`genCombined`), and the battle is fought with those. A fleet joined later was in the battle but not in the combined fleet. Now a join rebuilds them (and the battle's snapshots, before the first engagement).
+- **"Scuttled" ships in the view.** New fleet members start at no readiness, so the view's ships malfunctioned. They now start at full readiness, and the stream carries each ship's readiness.
+- **Blank battlefield in the view.** It now uses the backdrop of the place you're in (and hyperspace mode there).
+- **Live updates for the leader.** The dialog says when each nearby player is asked, when they've seen the call and are deciding, when they're bringing their fleet in, when they've joined (also as a message on the map), when they decline or are busy, and when there's been no answer for 30 s. In combat, the message log shows each joiner arriving, taking the helm of their ship, and losing their connection.

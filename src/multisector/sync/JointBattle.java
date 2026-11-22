@@ -118,7 +118,7 @@ public final class JointBattle implements EveryFrameScript {
                 if ("left".equals(k)) {
                     leaderLost(m.from);
                     joinerLost(m.from);
-                } else if ("join".equals(k) || "decline".equals(k) || "retreat".equals(k)) {
+                } else if ("join".equals(k) || "decline".equals(k) || "retreat".equals(k) || "seen".equals(k)) {
                     toLeader(s, m, k, j);
                 } else {
                     toJoiner(s, m, k, j);
@@ -169,6 +169,11 @@ public final class JointBattle implements EveryFrameScript {
     private static final Map<Integer, Joiner> joiners = new HashMap<Integer, Joiner>();
     /** True while a battle is being fought: nobody can join a fight already under way. */
     static volatile boolean inCombat;
+    /** True once this battle has had an engagement. */
+    static volatile boolean engaged;
+    /** Players we asked and haven't heard back from, with when we asked. */
+    private static final Map<Integer, Long> waiting = new HashMap<Integer, Long>();
+    private static final long ANSWER_NANOS = 30_000_000_000L;
 
     static Collection<Joiner> joiners() {
         return joiners.values();
@@ -184,6 +189,14 @@ public final class JointBattle implements EveryFrameScript {
             battleId = 1 + random.nextInt(Integer.MAX_VALUE - 1);
             asked.clear();
             joiners.clear();
+            waiting.clear();
+            engaged = false;
+        }
+        for (java.util.Iterator<Map.Entry<Integer, Long>> it = waiting.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<Integer, Long> w = it.next();
+            if (System.nanoTime() - w.getValue() < ANSWER_NANOS) continue;
+            it.remove();
+            say("No answer from " + s.playerName(w.getKey()) + " yet. If they join, you'll see it here.");
         }
         if (ClockSync.isMapView()) return; // asked from the battle's dialog
         List<CampaignFleetAPI> enemies = b.getNonPlayerSide();
@@ -199,6 +212,7 @@ public final class JointBattle implements EveryFrameScript {
             } catch (Exception e) {
                 continue;
             }
+            waiting.put(id, System.nanoTime());
             say(s.playerName(id) + "'s fleet is close by: asking them to join you. Give them a moment before you engage.");
             log.info("[MultiSector] asking " + s.playerName(id) + " to join the battle with " + enemies.get(0).getName());
         }
@@ -208,7 +222,12 @@ public final class JointBattle implements EveryFrameScript {
         int b = j.optInt("b");
         boolean live = battle != null && !battle.isDone();
         boolean ours = live && (b == battleId || (b == 0 && "join".equals(k))); // 0: "whatever you're fighting"
+        if ("seen".equals(k)) {
+            if (ours) say(m.fromName + " got your call and is deciding whether to join...");
+            return;
+        }
         if ("decline".equals(k)) {
+            waiting.remove(m.from);
             if (ours) say(m.fromName + (j.optBoolean("busy") ? " is busy and can't join." : " stays out of the battle."));
             return;
         }
@@ -221,6 +240,7 @@ public final class JointBattle implements EveryFrameScript {
             return;
         }
         // join
+        if (ours && !joiners.containsKey(m.from)) say(m.fromName + " is bringing their fleet in...");
         if (!ours || inCombat || joiners.containsKey(m.from)) {
             s.sendBattleMessage(m.from, msg(live ? "late" : "nobattle", b).toString());
             return;
@@ -239,11 +259,23 @@ public final class JointBattle implements EveryFrameScript {
             log.warn("[MultiSector] couldn't add " + m.fromName + "'s fleet to the battle");
             return;
         }
+        // The dialog built each side's combined fleet when it opened, and the battle is fought with those:
+        // rebuild them, or the joiner's ships never reach combat.
+        try {
+            battle.genCombined();
+            if (!engaged) battle.takeSnapshots();
+        } catch (RuntimeException e) {
+            log.warn("[MultiSector] couldn't refresh the battle's sides after a join", e);
+        }
         joiners.put(m.from, jn);
         asked.add(m.from);
+        waiting.remove(m.from);
         s.sendBattleMessage(m.from, msg("joined").toString());
         say(m.fromName + "'s fleet joins the battle on your side (" + jn.toOwner.size() + " ships)."
-                + (jn.pilotPuppetId != null ? " They'll pilot " + jn.names.get(jn.pilotPuppetId) + " themselves." : ""));
+                + (jn.pilotPuppetId != null ? " They'll pilot " + jn.names.get(jn.pilotPuppetId) + " themselves." : "")
+                + " All their combat-ready ships will deploy alongside yours.");
+        CampaignUIAPI ui = Global.getSector().getCampaignUI();
+        if (ui != null) ui.addMessage(m.fromName + " joined your battle with " + jn.toOwner.size() + " ships");
         log.info("[MultiSector] " + m.fromName + " joined the battle with " + jn.toOwner.size() + " ships");
     }
 
@@ -327,7 +359,9 @@ public final class JointBattle implements EveryFrameScript {
         }
         joiners.clear();
         asked.clear();
+        waiting.clear();
         battle = null;
+        engaged = false;
     }
 
     private static void leaderLost(int id) {
@@ -463,6 +497,8 @@ public final class JointBattle implements EveryFrameScript {
             if (!Global.getSector().getCampaignUI().showInteractionDialog(new JoinDialog(false), target)) {
                 phase = Phase.NONE;
                 s.sendBattleMessage(m.from, msg("decline", b).put("busy", true).toString());
+            } else {
+                s.sendBattleMessage(m.from, msg("seen", b).toString());
             }
             return;
         }
@@ -662,6 +698,8 @@ public final class JointBattle implements EveryFrameScript {
     public static void forget() {
         joiners.clear();
         asked.clear();
+        waiting.clear();
+        engaged = false;
         battle = null;
         inCombat = false;
         phase = Phase.NONE;
