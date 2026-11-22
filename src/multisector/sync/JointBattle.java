@@ -51,7 +51,8 @@ import java.util.Set;
  * <p><b>Joining only opens once combat has begun.</b> The battle's sides,
  * deployment and enemies are settled on the leader's game first, exactly as
  * in single player; nothing about the campaign battle is changed. A joiner
- * then comes in as reinforcements: they pick the ship they'll pilot (their
+ * who asks while the leader is still deploying is told to wait, and comes in
+ * as soon as the leader's ships are out. A joiner comes in as reinforcements: they pick the ship they'll pilot (their
  * flagship by default) and send their fleet exactly (loadouts, officers,
  * their own character on the flagship, readiness, damage). The leader's
  * combat ({@link JointCombat.Leader}) spawns their combat-ready ships at the
@@ -123,7 +124,7 @@ public final class JointBattle implements EveryFrameScript {
                 if ("left".equals(k)) {
                     leaderLost(m.from);
                     joinerLost(m.from);
-                } else if ("join".equals(k) || "retreat".equals(k) || "seen".equals(k)) {
+                } else if ("join".equals(k) || "retreat".equals(k) || "seen".equals(k) || "cwho".equals(k)) {
                     toLeader(s, m, k, j);
                 } else {
                     toJoiner(s, m, k, j);
@@ -164,6 +165,8 @@ public final class JointBattle implements EveryFrameScript {
         /** Their member id -> how it was doing when we last looked (state; hull and readiness). */
         final Map<String, String> lastState = new HashMap<String, String>();
         final Map<String, float[]> lastHullCr = new HashMap<String, float[]>();
+        /** Our member ids already put into the fight: never twice. */
+        final Set<String> spawned = new HashSet<String>();
 
         Joiner(int id, String name, CampaignFleetAPI fleet) {
             this.id = id;
@@ -180,6 +183,8 @@ public final class JointBattle implements EveryFrameScript {
     private static long nextFight;
     /** Players we've told about our battle, to tell when it's over. */
     private static final Set<Integer> told = new HashSet<Integer>();
+    /** Joins that came while we were still deploying: let in once our ships are out. */
+    private static final Map<Integer, Object[]> queued = new LinkedHashMap<Integer, Object[]>();
 
     static Collection<Joiner> joiners() {
         return joiners.values();
@@ -188,6 +193,11 @@ public final class JointBattle implements EveryFrameScript {
     private static void leaderFrame(Session s) {
         if (!joiners.isEmpty()) finishJoiners(s); // combat ended without our combat plugin seeing it end
         JointCombat.Leader.active = null;
+        for (Object[] q : queued.values()) {
+            Session.PlayerMessage m = (Session.PlayerMessage) q[0];
+            s.sendBattleMessage(m.from, msg("notyet").toString()); // the fighting stopped before they got in
+        }
+        queued.clear();
         CampaignFleetAPI me = Global.getSector().getPlayerFleet();
         BattleAPI b = me == null ? null : me.getBattle();
         if (battle != null && (b != battle || battle.isDone())) {
@@ -212,12 +222,17 @@ public final class JointBattle implements EveryFrameScript {
 
     /** Every other player hears about our battle, and whether they can join yet. */
     static void tellFight(Session s, boolean live) {
+        tellFight(s, live, live);
+    }
+
+    /** {@code ready}: we've deployed, so a joiner's ships can go straight in. */
+    static void tellFight(Session s, boolean live, boolean ready) {
         long now = System.nanoTime();
         if (now - nextFight < 0) return;
         nextFight = now + FIGHT_NANOS;
         String text;
         try {
-            text = msg("fight").put("live", live).put("enemy", enemyName()).toString();
+            text = msg("fight").put("live", live).put("ready", live && ready).put("enemy", enemyName()).toString();
         } catch (Exception e) {
             return;
         }
@@ -259,12 +274,16 @@ public final class JointBattle implements EveryFrameScript {
         boolean live = battleId != 0 && (inCombat || (battle != null && !battle.isDone()));
         boolean ours = live && (b == battleId || b == 0); // 0: "whatever you're fighting"
         if ("seen".equals(k)) {
-            if (!ours || joiners.containsKey(m.from)) return;
-            if (inCombat) {
+            // Only once we're fighting: nothing to say in the battle dialog, they can't join yet.
+            if (ours && inCombat && !joiners.containsKey(m.from)) {
                 JointCombat.Leader.message(m.fromName + " is getting ready to join your battle");
-            } else {
-                say(m.fromName + " wants to join your battle. They can come in once the fighting starts.");
             }
+            return;
+        }
+        if ("cwho".equals(k)) {
+            Joiner jn = joiners.get(m.from);
+            JointCombat.Leader lead = JointCombat.Leader.active;
+            if (jn != null && lead != null) lead.reannounce(jn, j.optJSONArray("ids"));
             return;
         }
         if ("retreat".equals(k)) {
@@ -286,6 +305,34 @@ public final class JointBattle implements EveryFrameScript {
             return;
         }
         if (joiners.containsKey(m.from)) return;
+        if (!lead.isReady()) {
+            if (queued.put(m.from, new Object[]{m, j}) == null) {
+                s.sendBattleMessage(m.from, msg("wait").toString());
+                JointCombat.Leader.message(m.fromName + " is waiting to join: deploy your ships and theirs follow");
+            }
+            return;
+        }
+        admit(s, lead, m, j);
+    }
+
+    /** We've deployed: let in everyone who was waiting. */
+    static void admitQueued(Session s) {
+        JointCombat.Leader lead = JointCombat.Leader.active;
+        if (lead == null) return;
+        List<Object[]> waiting = new ArrayList<Object[]>(queued.values());
+        queued.clear();
+        for (Object[] q : waiting) {
+            Session.PlayerMessage m = (Session.PlayerMessage) q[0];
+            if (joiners.containsKey(m.from) || !s.isPlayerHere(m.from)) continue;
+            try {
+                admit(s, lead, m, (JSONObject) q[1]);
+            } catch (Exception e) {
+                log.warn("[MultiSector] couldn't let " + m.fromName + " into the battle", e);
+            }
+        }
+    }
+
+    private static void admit(Session s, JointCombat.Leader lead, Session.PlayerMessage m, JSONObject j) throws Exception {
         Joiner jn = new Joiner(m.from, m.fromName, ownFleet(m.from, m.fromName));
         if (!buildExact(jn, j.optString("fleet", ""), j.optString("pilot", ""))) {
             s.sendBattleMessage(m.from, msg("failed").toString());
@@ -387,6 +434,7 @@ public final class JointBattle implements EveryFrameScript {
     }
 
     private static void leaderLost(int id) {
+        queued.remove(id);
         Joiner jn = joiners.remove(id);
         told.remove(id);
         JointCombat.Leader lead = JointCombat.Leader.active;
@@ -456,6 +504,8 @@ public final class JointBattle implements EveryFrameScript {
     /** A battle another player is in, as they last told us. */
     static final class Fight {
         boolean live;
+        /** The leader's ships are deployed: a joiner's go straight in. */
+        boolean ready;
         String enemy = "a hostile fleet";
         int b;
         long heard;
@@ -526,6 +576,7 @@ public final class JointBattle implements EveryFrameScript {
             Fight f = fights.get(m.from);
             if (f == null) fights.put(m.from, f = new Fight());
             f.live = j.optBoolean("live");
+            f.ready = j.optBoolean("ready", f.live);
             f.enemy = j.optString("enemy", f.enemy);
             f.b = b;
             f.heard = System.nanoTime();
@@ -545,6 +596,8 @@ public final class JointBattle implements EveryFrameScript {
             say2("You've joined " + leaderName + "'s battle. Your ships arrive at their side of the battlefield."
                     + (MultiSectorConfig.isJointBattleView() ? " A view of it opens here and you fly your chosen ship;"
                     + " your other ships fight under the battle AI." : " Your ships fight under the battle AI."));
+        } else if ("wait".equals(k) && phase == Phase.JOINING) {
+            say2(leaderName + " is still deploying their fleet. Your ships go in as soon as theirs are out...");
         } else if ("notyet".equals(k) && phase == Phase.JOINING) {
             phase = Phase.ASKED;
             say2(leaderName + " hasn't started the fighting yet. You can join as soon as it begins.");
@@ -559,7 +612,7 @@ public final class JointBattle implements EveryFrameScript {
             JointCombat.pending.clear();
             openView((float) j.optDouble("w", 20000), (float) j.optDouble("h", 20000));
         } else if ("cship".equals(k) || "cgone".equals(k)) {
-            if (JointCombat.view != null || viewCreation != null) JointCombat.pending.add(j);
+            if (phase == Phase.IN) JointCombat.pending.add(j); // the view picks them up when it opens
         } else if ("cend".equals(k)) {
             JointCombat.Mirror v = JointCombat.view;
             if (v != null) v.end();
@@ -735,6 +788,7 @@ public final class JointBattle implements EveryFrameScript {
     public static void forget() {
         joiners.clear();
         told.clear();
+        queued.clear();
         fights.clear();
         battle = null;
         battleId = 0;
@@ -771,23 +825,33 @@ public final class JointBattle implements EveryFrameScript {
                     : " They fight under the battle AI, and you can order them to retreat at any time."));
             Session.get().sendBattleMessage(leader, msg("seen", joinBattle).toString());
             shownState = fightState();
-            dialog.getTextPanel().addPara(shownState == 2 ? "The fighting has begun. You can join now."
-                    : shownState == 1 ? "They haven't started fighting yet. Wait here: you can join as soon as they do."
-                    : "You haven't heard from " + leaderName + " about it yet. Wait a moment.");
+            dialog.getTextPanel().addPara(describe(shownState, -1));
             menu();
         }
 
-        /** 0 over/unknown, 1 not fighting yet, 2 fighting. */
+        /** 0 over/unknown, 1 not fighting yet, 2 fighting but still deploying, 3 fighting. */
         private int fightState() {
             Fight f = fightOf(leader);
-            return f == null ? 0 : f.live ? 2 : 1;
+            return f == null ? 0 : !f.live ? 1 : f.ready ? 3 : 2;
+        }
+
+        private String describe(int st, int was) {
+            if (st == 3) return was == 2 ? leaderName + "'s ships are out. You can join now."
+                    : "The fighting has begun. You can join now.";
+            if (st == 2) return leaderName + " has started the battle and is deploying their fleet. You can join now:"
+                    + " your ships go in as soon as theirs are out.";
+            if (st == 1) return was >= 2 ? "That engagement is over; " + leaderName
+                    + " is deciding what to do next. You can join if they fight again."
+                    : "They haven't started fighting yet. Wait here: you can join once the battle begins.";
+            return was < 0 ? "You haven't heard from " + leaderName + " about it yet. Wait a moment."
+                    : leaderName + "'s battle is over.";
         }
 
         void menu() {
             OptionPanelAPI op = dialog.getOptionPanel();
             op.clearOptions();
             if (phase == Phase.ASKED) {
-                if (fightState() == 2) {
+                if (fightState() >= 2) {
                     op.addOption("Join " + leaderName + "'s battle", "join");
                     if (MultiSectorConfig.isJointBattleView()) op.addOption("Ship you'll pilot: " + pilotName(), "pick");
                 }
@@ -874,11 +938,7 @@ public final class JointBattle implements EveryFrameScript {
             if (phase == Phase.ASKED) {
                 int st = fightState();
                 if (st != shownState) {
-                    if (st == 2) dialog.getTextPanel().addPara(leaderName + " has started fighting. You can join now.");
-                    else if (st == 1 && shownState == 2) dialog.getTextPanel().addPara("That engagement is over; "
-                            + leaderName + " is deciding what to do next. You can join if they fight again.");
-                    else if (st == 1) dialog.getTextPanel().addPara(leaderName + " hasn't started fighting yet. Wait here.");
-                    else dialog.getTextPanel().addPara(leaderName + "'s battle is over.");
+                    dialog.getTextPanel().addPara(describe(st, shownState));
                     shownState = st;
                     menu();
                 }

@@ -528,3 +528,14 @@ Testing 0.0.32 showed that changing the campaign battle while it's being set up 
 - **The joiner sees the battle as it is.** On join, the leader sends `cstart` and every ship already in the fight; the view opens with them. Wrecks (owner 100) are no longer shown, which put them on the player side.
 - **Results per engagement.** Each joiner ship's state, hull and readiness are kept from the status updates (every second, and when combat ends). When combat ends, or at the next campaign frame if it ended without the plugin seeing it, each joiner gets the result: destroyed and disabled ships are lost; the rest take their last hull and readiness; ships that never deployed are unchanged. A joiner who leaves the game mid-fight has their ships ordered to retreat.
 - `PROTOCOL_VERSION` 14: builds with the old join messages won't connect.
+
+### Waiting for the leader to deploy, and no duplicates (0.0.34)
+
+From testing 0.0.33: joining while the leader was still on the deployment screen gave duplicate AI copies of the joiner's ships, on the leader's game and in the joiner's view, and enemies sometimes never appeared in the view.
+
+- **Joiners wait for the leader's ships.** The leader's combat is `ready` once combat time has passed 1 s (it doesn't run while the deployment screen is open) and a ship of the leader's side that isn't a joiner's is on the field (or after 30 s regardless). `fight` carries `ready`. A `join` before then is queued and answered `wait` ("still deploying, your ships go in as soon as theirs are out"), and let in when the leader is ready. The join dialog shows the three stages: not fighting yet, deploying, fighting.
+- **Nothing in the leader's battle dialog.** The "X wants to join" line before combat is gone; the leader only hears about joiners in combat ("getting ready to join", "waiting to join", "joins your battle").
+- **Each joiner ship once.** Every joiner member is spawned at most once and taken out of reserves straight away. Twice a second the leader's guard removes a second live copy of any joiner ship (keeping the piloted one), any ship of a player's stand-in fleet (which must never be in a battle), and any of those waiting in reserve where the game could deploy them again.
+- **The view only shows the leader's battle.** It removes any ship it didn't make itself (wrecks' pieces aside) and keeps both reserves empty.
+- **Missing ships are asked for again.** Ships the stream mentions that the view doesn't have (an announcement lost, or a ship that couldn't be made) are asked for (`cwho`, up to 3 times each), and the leader announces them again. Ships the view can't build or place are logged with what's missing.
+- `PROTOCOL_VERSION` 15.
