@@ -57,6 +57,11 @@ import java.util.regex.Pattern;
 public final class Launcher {
 
     private static final String PREFS = "multisector_launcher.json";
+    private static final String MOD_ID = "multisector";
+    private JTabbedPane tabs;
+    /** What to carry on with after an update reopens the launcher: "host:<save folder>" or "join:<address>". */
+    private String resume = "";
+    private long resumeAt;
 
     private final GameInstall game;
     private final JFrame frame = new JFrame("MultiSector " + BuildInfo.VERSION);
@@ -67,6 +72,9 @@ public final class Launcher {
     private final DefaultListModel<GameInstall.SaveInfo> saveModel = new DefaultListModel<GameInstall.SaveInfo>();
     private final JList<GameInstall.SaveInfo> saveList = new JList<GameInstall.SaveInfo>(saveModel);
     private final JButton hostButton = new JButton("Start hosting");
+    private final JButton hostLaunchButton = new JButton("Host and launch");
+    /** Last save hosted, so it's picked again next time. */
+    private String lastSave;
     private LobbyServer server;
 
     // join tab
@@ -74,8 +82,25 @@ public final class Launcher {
     private final JButton checkButton = new JButton("Check host");
     private final JTextArea hostInfo = new JTextArea(6, 50);
     private final JButton downloadButton = new JButton("Download save");
+    private final JButton joinLaunchButton = new JButton("Join and launch");
+    /** Offered when the host runs another MultiSector build: installs theirs. */
+    private final JButton matchButton = new JButton("Get the host's build");
+    private String hostBuild = "";
     private final JProgressBar progress = new JProgressBar(0, 1000);
     private LobbyClient.Info checkedInfo;
+    /** Sets the game's enabled mods to the host's (the player's own list is kept aside). */
+    private final JButton modsButton = new JButton("Use the host's mods");
+    private final JButton restoreModsButton = new JButton("Put my mods back");
+    /** Waiting for the host's game to be back (their session ended): we fetch their world when it is. */
+    private final JButton waitButton = new JButton("Stop waiting for the host");
+    private String waitingFor;
+    private long waitUntil, nextWaitCheck;
+    private boolean waitChecking;
+    /** The download is a fresh copy our game asked for (it's at the main menu): say so, don't launch. */
+    private boolean forRejoin;
+    // host tab: Windows Firewall
+    private final JLabel firewallLabel = new JLabel("Windows Firewall: checking...");
+    private final JButton firewallButton = new JButton("Open it for friends (asks for admin)");
 
 
     public static void main(String[] args) {
@@ -107,10 +132,18 @@ public final class Launcher {
     private void show() {
         loadPrefs();
 
+        JButton update = new JButton("Update MultiSector");
+        update.setToolTipText("Install the newest MultiSector test build from GitHub (closes and reopens this window)");
+        update.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                updateTo(null);
+            }
+        });
         JPanel top = row(new JLabel("Your name:"), nameField,
-                Box.createHorizontalStrut(20), new JLabel("Starsector: " + game.root));
+                Box.createHorizontalStrut(20), new JLabel("Starsector: " + game.root),
+                Box.createHorizontalStrut(20), update);
 
-        JTabbedPane tabs = new JTabbedPane();
+        tabs = new JTabbedPane();
         tabs.addTab("Host a game", hostTab());
         tabs.addTab("Join a game", joinTab());
 
@@ -152,6 +185,17 @@ public final class Launcher {
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
 
+        javax.swing.Timer poll = new javax.swing.Timer(2000, new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                pollRejoin();
+                pollWait();
+            }
+        });
+        poll.start();
+        checkFirewall();
+        restoreModsButton.setVisible(game.enabledModsBackup().isFile());
+        carryOn();
+
         log("MultiSector " + BuildInfo.VERSION + " (built " + BuildInfo.BUILT_AT + "). Starsector folder: " + game.root);
         if (game.isGameRunning()) {
             log("Starsector is already running. Pick or download the save here, then load it in the game.");
@@ -189,15 +233,29 @@ public final class Launcher {
                 toggleHosting();
             }
         });
+        hostLaunchButton.setFont(hostLaunchButton.getFont().deriveFont(Font.BOLD));
+        hostLaunchButton.setToolTipText("Start hosting this save, make it the one Continue loads, and start Starsector");
+        hostLaunchButton.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                hostAndLaunch();
+            }
+        });
 
         JPanel p = column(
-                label("1. Pick the save to play together. Save in the game first so friends get the latest state."),
+                label("1. Pick the save to play together. Friends get a fresh copy when they download."),
                 new JScrollPane(saveList),
-                row(refresh),
-                label("2. Start hosting and send friends your address. Keep this window open while they download."),
-                row(hostButton, Box.createHorizontalStrut(16), addrLabel, copy),
-                label("3. Click Launch Starsector and load the same save (Continue, if it's your newest)."),
-                label("    The game starts hosting by itself once the save is loaded."));
+                row(refresh, label("Any save works, whichever MultiSector version (if any) it was last played with.")),
+                label("2. Click Host and launch, then Continue on the game's main menu. Send friends your address."),
+                row(hostLaunchButton, Box.createHorizontalStrut(16), addrLabel, copy),
+                label("    Keep this window open while friends download. The game starts hosting once the save loads."),
+                row(label("Or step by step:"), hostButton),
+                row(firewallLabel, firewallButton));
+        firewallButton.setVisible(false);
+        firewallButton.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                openFirewall();
+            }
+        });
         return p;
     }
 
@@ -219,28 +277,62 @@ public final class Launcher {
         addressField.addActionListener(check);
         downloadButton.addActionListener(new ActionListener() {
             public void actionPerformed(ActionEvent e) {
-                downloadSave();
+                downloadSave(false);
+            }
+        });
+        joinLaunchButton.setFont(joinLaunchButton.getFont().deriveFont(Font.BOLD));
+        joinLaunchButton.setToolTipText("Check the host, download their world and start Starsector, in one go");
+        joinLaunchButton.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                joinAndLaunch();
+            }
+        });
+        matchButton.setVisible(false);
+        matchButton.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                if (!hostBuild.isEmpty()) updateTo(hostBuild);
+            }
+        });
+        modsButton.setVisible(false);
+        modsButton.setToolTipText("Enable exactly the host's mods in Starsector (your own list is kept to put back)");
+        modsButton.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                if (checkedInfo != null) useHostMods(checkedInfo);
+            }
+        });
+        restoreModsButton.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                restoreMods();
+            }
+        });
+        waitButton.setVisible(false);
+        waitButton.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                stopWaiting("Stopped waiting for the host.");
             }
         });
 
         return column(
-                label("1. Type the host's address (their Hamachi 25.x.x.x address)."),
-                row(new JLabel("Host's address:"), addressField, checkButton),
+                label("1. Type the host's address (their Hamachi 25.x.x.x address), then click Join and launch."),
+                row(new JLabel("Host's address:"), addressField, joinLaunchButton, checkButton),
                 new JScrollPane(hostInfo),
-                label("2. Download their save. It replaces any earlier download from the same host."),
+                row(matchButton, modsButton, restoreModsButton, waitButton),
+                label("2. It downloads their world (replacing any earlier download from them) and starts Starsector."),
                 row(downloadButton, progress),
-                label("3. Click Launch Starsector, then Continue on the main menu. The game joins the host by itself."));
+                label("3. Click Continue on the main menu. The game joins the host by itself."));
     }
 
     // =============================================================== hosting
 
     private void refreshSaves() {
         saveModel.clear();
+        int pick = 0;
         for (GameInstall.SaveInfo s : game.listSaves()) {
             if (s.folder.getName().startsWith(LobbyClient.SAVE_PREFIX)) continue; // others' worlds
+            if (s.folder.getName().equals(lastSave)) pick = saveModel.size();
             saveModel.addElement(s);
         }
-        if (!saveModel.isEmpty()) saveList.setSelectedIndex(0);
+        if (!saveModel.isEmpty()) saveList.setSelectedIndex(pick);
     }
 
     private void toggleHosting() {
@@ -248,6 +340,7 @@ public final class Launcher {
             server.stop();
             server = null;
             hostButton.setText("Start hosting");
+            hostLaunchButton.setEnabled(true);
             saveList.setEnabled(true);
             log("Stopped sharing the save.");
             return;
@@ -274,7 +367,10 @@ public final class Launcher {
             return;
         }
         server = s;
+        lastSave = save.folder.getName();
+        savePrefs();
         hostButton.setText("Stop hosting");
+        hostLaunchButton.setEnabled(false);
         saveList.setEnabled(false);
         log("Sharing \"" + save.characterName + "\" (" + GameInstall.megabytes(save.sizeBytes) + ") on port "
                 + NetConfig.lobbyPort(port) + ". Friends can download it now.");
@@ -293,18 +389,42 @@ public final class Launcher {
         }
         checkButton.setEnabled(false);
         downloadButton.setEnabled(false);
+        matchButton.setVisible(false);
         hostInfo.setText("Contacting " + address + "...");
         background(new Runnable() {
             public void run() {
                 try {
                     final LobbyClient.Info info = LobbyClient.fetchInfo(address, name);
+                    // Their game is hosting: can we actually reach it? (The launcher's port working doesn't prove it.)
+                    final boolean reach = info.gameHosting != 1
+                            || LobbyClient.canReachGame(LobbyClient.splitAddress(address)[0], info.gamePort);
                     ui(new Runnable() {
                         public void run() {
                             checkedInfo = info;
-                            hostInfo.setText(describe(info));
+                            hostInfo.setText(describe(info, reach));
                             downloadButton.setEnabled(true);
                             checkButton.setEnabled(true);
+                            modsButton.setVisible(!modsMatch(info));
                             savePrefs();
+                            if (!launchAfterDownload) return;
+                            // One click: get the mods right first, or the save won't load.
+                            if (!modsMatch(info) && !useHostMods(info)) {
+                                launchAfterDownload = false;
+                                joinLaunchButton.setEnabled(true);
+                                return;
+                            }
+                            if (info.gameHosting == 0) {
+                                // Their game isn't in the world yet: a download now would be their last save, not
+                                // their world as it is. Wait for them, then download (and start the game if needed).
+                                launchAfterDownload = false;
+                                forRejoin = false;
+                                joinLaunchButton.setEnabled(true);
+                                startWaiting(address, "The host's game isn't in their world yet. This window checks "
+                                        + "every few seconds, then downloads it and starts Starsector. (Download save "
+                                        + "gets their last save now instead.)");
+                                return;
+                            }
+                            downloadSave(!forRejoin);
                         }
                     });
                 } catch (final IOException e) {
@@ -312,6 +432,10 @@ public final class Launcher {
                         public void run() {
                             hostInfo.setText(e.getMessage());
                             checkButton.setEnabled(true);
+                            joinLaunchButton.setEnabled(true);
+                            launchAfterDownload = false;
+                            forRejoin = false;
+                            offerHostBuild(e);
                         }
                     });
                 }
@@ -319,16 +443,61 @@ public final class Launcher {
         });
     }
 
-    private String describe(LobbyClient.Info info) {
+    /** The host runs another build: one click installs theirs (or the newest, if theirs is unknown). */
+    private void offerHostBuild(IOException e) {
+        if (!(e instanceof LobbyClient.VersionMismatch)) return;
+        hostBuild = ((LobbyClient.VersionMismatch) e).hostVersion;
+        matchButton.setText(hostBuild.isEmpty() ? "Get the newest MultiSector" : "Get MultiSector " + hostBuild + " (the host's)");
+        if (hostBuild.isEmpty()) hostBuild = "newest";
+        matchButton.setVisible(true);
+        hostInfo.append("\n\nClick the button below to install the host's build. This window closes and reopens.");
+    }
+
+    // ================================================================ one click
+
+    /** After the check: download, then start the game (Join and launch). */
+    private boolean launchAfterDownload;
+
+    private void hostAndLaunch() {
+        if (server == null) toggleHosting();
+        if (server == null) return; // didn't start: the error is shown
+        GameInstall.SaveInfo save = saveList.getSelectedValue();
+        try {
+            if (save != null) GameInstall.touchSaveDate(save.folder); // the main menu's Continue loads it
+        } catch (IOException e) {
+            log("Couldn't make it the newest save (" + e.getMessage() + "); load it from the Load list instead.");
+        }
+        launchGame();
+        log("When the main menu shows, click Continue. Your game starts hosting once the save loads.");
+    }
+
+    private void joinAndLaunch() {
+        launchAfterDownload = true;
+        joinLaunchButton.setEnabled(false);
+        checkHost();
+    }
+
+    private String describe(LobbyClient.Info info, boolean reach) {
         StringBuilder sb = new StringBuilder();
-        sb.append("Host: ").append(info.hostName).append('\n');
+        sb.append("Host: ").append(info.hostName);
+        if (info.gameHosting == 1 && reach) {
+            sb.append(" - their game is in the world and hosting.\n");
+        } else if (info.gameHosting == 1) {
+            sb.append(" - their game is hosting, but this PC can't reach it on port ").append(info.gamePort)
+                    .append(". The host should click \"Open it for friends\" in their launcher (or run tools\\firewall.cmd), "
+                            + "and you should both be online in Hamachi.\n");
+        } else if (info.gameHosting == 0) {
+            sb.append(" - their game isn't hosting yet. You can download now: your game waits for theirs.\n");
+        } else {
+            sb.append('\n');
+        }
         sb.append("Save: ").append(info.characterName).append(", saved ").append(info.saveDate)
                 .append(" (").append(GameInstall.megabytes(info.saveBytes)).append(", ")
                 .append(GameInstall.megabytes(info.zipBytes)).append(" to download)\n");
         sb.append("Game version: ").append(info.gameVersion).append(", MultiSector ").append(info.hostVersion)
                 .append(" (same as yours)\n");
-        sb.append("Your character: you choose it in the game when the save loads, either your exported "
-                + "character or a new one.\n");
+        sb.append("Your character: if you've played in this world before, you come back as yourself. "
+                + "Otherwise you choose in the game: your exported character or a new one.\n");
         org.json.JSONObject export = loadExport();
         if (export != null) {
             sb.append("Exported character available: ").append(exportSummary(export)).append('\n');
@@ -351,18 +520,269 @@ public final class Launcher {
         if (missing.isEmpty() && extra.isEmpty()) {
             sb.append("Mods: match the host's.");
         } else {
-            if (!missing.isEmpty()) sb.append("WARNING - the host uses mods you don't have enabled: ").append(missing)
-                    .append(". Install and enable them, or the save may not load.\n");
-            if (!extra.isEmpty()) sb.append("You have mods enabled that the host doesn't: ").append(extra)
-                    .append(". Turn them off to be safe.");
+            java.util.Map<String, String> installed = game.installedMods();
+            List<String> notInstalled = new ArrayList<String>();
+            for (String id : missing) if (!installed.containsKey(id)) notInstalled.add(id);
+            if (!missing.isEmpty()) sb.append("The host uses mods you don't have enabled: ").append(missing).append(".\n");
+            if (!extra.isEmpty()) sb.append("You have mods enabled that the host doesn't: ").append(extra).append(".\n");
+            if (notInstalled.isEmpty()) {
+                sb.append("Join and launch switches your mods to the host's (\"Use the host's mods\" does just that); "
+                        + "\"Put my mods back\" undoes it.");
+            } else {
+                sb.append("Not installed here, so install these first: ").append(notInstalled).append('.');
+            }
         }
         return sb.toString();
     }
 
-    private void downloadSave() {
+    // ================================================================ mods
+
+    private boolean modsMatch(LobbyClient.Info info) {
+        return new java.util.HashSet<String>(game.enabledMods()).equals(new java.util.HashSet<String>(info.mods));
+    }
+
+    /**
+     * Enables exactly the host's mods (the player's own list is kept aside
+     * once, for "Put my mods back"). False if some aren't installed, or the
+     * game is running (it only reads the list when it starts).
+     */
+    private boolean useHostMods(LobbyClient.Info info) {
+        java.util.Map<String, String> installed = game.installedMods();
+        List<String> notInstalled = new ArrayList<String>();
+        for (String id : info.mods) if (!installed.containsKey(id)) notInstalled.add(id);
+        if (!notInstalled.isEmpty()) {
+            error("The host's world needs mods that aren't installed here: " + notInstalled
+                    + ". Install them in Starsector\\mods, then try again.");
+            return false;
+        }
+        if (game.isGameRunning()) {
+            error("Close Starsector first: it only reads the mod list when it starts.");
+            return false;
+        }
+        List<String> want = new ArrayList<String>(info.mods);
+        if (!want.contains(MOD_ID)) want.add(MOD_ID);
+        try {
+            game.writeEnabledMods(want);
+        } catch (IOException e) {
+            error("Couldn't change the mod list: " + e.getMessage());
+            return false;
+        }
+        log("Switched Starsector's mods to the host's (" + want.size() + " mods). \"Put my mods back\" restores yours.");
+        modsButton.setVisible(false);
+        restoreModsButton.setVisible(true);
+        return true;
+    }
+
+    private void restoreMods() {
+        if (game.isGameRunning()) {
+            error("Close Starsector first: it only reads the mod list when it starts.");
+            return;
+        }
+        try {
+            if (game.restoreEnabledMods()) log("Your own mod list is back.");
+        } catch (IOException e) {
+            error("Couldn't put your mods back: " + e.getMessage());
+        }
+        restoreModsButton.setVisible(game.enabledModsBackup().isFile());
+    }
+
+    /** MultiSector must be ticked in the game's own launcher; a forgotten tick is the commonest snag. */
+    private void ensureModEnabled() {
+        List<String> on = game.enabledMods();
+        if (on.contains(MOD_ID)) return;
+        List<String> want = new ArrayList<String>(on);
+        want.add(MOD_ID);
+        try {
+            game.writeEnabledMods(want);
+            log("Ticked MultiSector in Starsector's mod list for you.");
+            restoreModsButton.setVisible(true);
+        } catch (IOException e) {
+            log("Couldn't tick MultiSector in the mod list (" + e.getMessage() + "): tick it in the game's launcher.");
+        }
+    }
+
+    // ================================================================ fresh copies and waiting
+
+    /** Our game asked for a fresh copy of the host's world (it's at the main menu now, or will be shortly). */
+    private void pollRejoin() {
+        String text = game.readCommon(NetConfig.REJOIN_FILE);
+        if (text == null) return;
+        game.deleteCommon(NetConfig.REJOIN_FILE);
+        String address = jsonString(text, "address");
+        Matcher at = Pattern.compile("\"at\"\\s*:\\s*(\\d+)").matcher(text);
+        long when = at.find() ? Long.parseLong(at.group(1)) : 0L;
+        if (address == null || address.isEmpty() || System.currentTimeMillis() - when > 30L * 60L * 1000L) return;
+        boolean wait = text.matches("(?s).*\"wait\"\\s*:\\s*true.*");
+        addressField.setText(address);
+        frame.toFront();
+        if (wait) {
+            startWaiting(address, "The host ended the session. This window checks every few seconds and downloads "
+                    + "their world as soon as they're back in it. Then click Continue in the game.");
+        } else {
+            log("Your game asked for a fresh copy of the host's world. Downloading it...");
+            rejoinNow();
+        }
+    }
+
+    /** Checks the host every 10 s until their game is in the world, then downloads it (rejoinNow). */
+    private void startWaiting(String address, String why) {
+        waitingFor = address;
+        waitUntil = System.currentTimeMillis() + 60L * 60L * 1000L;
+        nextWaitCheck = System.currentTimeMillis() + 10000L;
+        waitButton.setVisible(true);
+        log(why);
+        hostInfo.append("\n\nWaiting for the host to be in their world...");
+    }
+
+    private void rejoinNow() {
+        forRejoin = true;
+        launchAfterDownload = true;
+        joinLaunchButton.setEnabled(false);
+        checkHost();
+    }
+
+    /** While waiting for the host: every 10 s, is their game hosting again? */
+    private void pollWait() {
+        if (waitingFor == null || waitChecking) return;
+        long now = System.currentTimeMillis();
+        if (now > waitUntil) {
+            stopWaiting("Stopped waiting for the host after an hour. Click Join and launch when they're back.");
+            return;
+        }
+        if (now < nextWaitCheck) return;
+        nextWaitCheck = now + 10000L;
+        waitChecking = true;
+        final String address = waitingFor;
+        final String name = nameField.getText().trim().isEmpty() ? "Player" : nameField.getText().trim();
+        background(new Runnable() {
+            public void run() {
+                int hosting;
+                try {
+                    hosting = LobbyClient.fetchInfo(address, name).gameHosting;
+                } catch (final LobbyClient.VersionMismatch e) {
+                    // They're back, on another MultiSector build (they updated): offer it, and carry on joining after.
+                    ui(new Runnable() {
+                        public void run() {
+                            waitChecking = false;
+                            if (waitingFor == null) return;
+                            stopWaiting("The host is back, with MultiSector " + (e.hostVersion.isEmpty() ? "another build"
+                                    : e.hostVersion) + ". Get their build below: then this window joins them by itself.");
+                            hostInfo.setText(e.getMessage());
+                            offerHostBuild(e);
+                            frame.toFront();
+                        }
+                    });
+                    return;
+                } catch (IOException e) {
+                    hosting = 0; // their launcher isn't up yet
+                }
+                final boolean back = hosting != 0;
+                ui(new Runnable() {
+                    public void run() {
+                        waitChecking = false;
+                        if (!back || waitingFor == null) return;
+                        stopWaiting("The host is back. Downloading their world...");
+                        rejoinNow();
+                    }
+                });
+            }
+        });
+    }
+
+    private void stopWaiting(String why) {
+        waitingFor = null;
+        waitButton.setVisible(false);
+        log(why);
+    }
+
+    // ================================================================ firewall (host)
+
+    /**
+     * What Windows Firewall lets in, for the game's Java (the game) and javaw
+     * (this window, which shares the save): MultiSector's port rules, or
+     * "allow" rules for those programs on public networks (what clicking
+     * Allow on Windows' prompt makes; Hamachi is usually a public network).
+     * A block rule for them beats any allow. Read with PowerShell's firewall
+     * commands, which need no admin rights and don't depend on the Windows
+     * language. Prints e.g. "ports=0 java=1 javaw=1 block=0".
+     */
+    private String firewallScript() {
+        String java = new File(game.root, "jre\\bin\\java.exe").getAbsolutePath().replace("'", "''");
+        String javaw = new File(game.root, "jre\\bin\\javaw.exe").getAbsolutePath().replace("'", "''");
+        return "$ErrorActionPreference='SilentlyContinue';"
+                + "$on={param($r) $r.Enabled -eq 'True' -and $r.Direction -eq 'Inbound'};"
+                + "$pub={param($r) ($r.Profile -match 'Public|Any') -or ([int]$r.Profile -eq 0)};"
+                + "$ports=@(Get-NetFirewallRule -Group 'MultiSector' | Where-Object {(& $on $_) -and $_.Action -eq 'Allow'}).Count -ge 2;"
+                + "$f=@(Get-NetFirewallApplicationFilter | Where-Object {$_.Program -ieq '" + java + "' -or $_.Program -ieq '" + javaw + "'});"
+                + "$j=0;$w=0;$b=0;"
+                + "foreach($x in $f){$r=$x|Get-NetFirewallRule; if(-not (& $on $r)){continue};"
+                + "if($r.Action -eq 'Block'){$b=1}elseif(& $pub $r){if($x.Program -ieq '" + java + "'){$j=1}else{$w=1}}};"
+                + "Write-Output ('ports='+[int]$ports+' java='+$j+' javaw='+$w+' block='+$b)";
+    }
+
+    /** Is Windows Firewall letting friends in? Shown on the Host tab, with a fix if not. */
+    private void checkFirewall() {
+        background(new Runnable() {
+            public void run() {
+                String out;
+                try {
+                    Process p = new ProcessBuilder("powershell", "-NoProfile", "-NonInteractive", "-Command",
+                            firewallScript()).redirectErrorStream(true).start();
+                    out = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                    p.waitFor();
+                } catch (Exception e) {
+                    return; // can't tell: say nothing
+                }
+                final boolean ports = out.contains("ports=1");
+                final boolean apps = out.contains("java=1") && out.contains("javaw=1");
+                final boolean blocked = out.contains("block=1");
+                if (!out.contains("ports=")) return; // PowerShell didn't run the check
+                ui(new Runnable() {
+                    public void run() {
+                        if (blocked) {
+                            firewallLabel.setText("Windows Firewall: a rule blocks Starsector's Java, so friends can't connect.");
+                        } else if (ports || apps) {
+                            firewallLabel.setText("Windows Firewall: open for friends.");
+                        } else {
+                            firewallLabel.setText("Windows Firewall: friends will probably be blocked.");
+                        }
+                        firewallButton.setVisible(blocked || !(ports || apps));
+                    }
+                });
+            }
+        });
+    }
+
+    private void openFirewall() {
+        File cmd = new File(new File(new File(game.mods, "MultiSector"), "tools"), "firewall.cmd");
+        if (!cmd.isFile()) {
+            error("Can't find " + cmd + ".");
+            return;
+        }
+        try {
+            new ProcessBuilder("cmd", "/c", cmd.getAbsolutePath()).directory(cmd.getParentFile()).start();
+            log("Opening the firewall: Windows asks for admin rights. This window checks again in a moment.");
+        } catch (IOException e) {
+            error("Couldn't run " + cmd + ": " + e.getMessage());
+            return;
+        }
+        javax.swing.Timer again = new javax.swing.Timer(12000, new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                checkFirewall();
+            }
+        });
+        again.setRepeats(false);
+        again.start();
+    }
+
+    private void downloadSave(final boolean thenLaunch) {
+        launchAfterDownload = false;
         final LobbyClient.Info info = checkedInfo;
         final String name = myName();
-        if (info == null || name == null) return;
+        if (info == null || name == null) {
+            joinLaunchButton.setEnabled(true);
+            return;
+        }
         downloadButton.setEnabled(false);
         checkButton.setEnabled(false);
         progress.setValue(0);
@@ -407,8 +827,19 @@ public final class Launcher {
                                         GameInstall.megabytes(result.zipBytes), elapsed / 1000.0,
                                         speed(result.zipBytes, elapsed), LobbyClient.lastMethod));
                             }
-                            log("In the game's Load list it's \"" + label + "\". Click Launch Starsector, then "
-                                    + "Continue (or Load it).");
+                            joinLaunchButton.setEnabled(true);
+                            if (forRejoin) {
+                                forRejoin = false;
+                                frame.toFront();
+                                log("Fresh copy ready. Click Continue in the game (it's \"" + label + "\" in the Load list).");
+                                if (!game.isGameRunning()) launchGame();
+                            } else if (thenLaunch) {
+                                launchGame();
+                                log("When the main menu shows, click Continue (it's \"" + label + "\" in the Load list).");
+                            } else {
+                                log("In the game's Load list it's \"" + label + "\". Click Launch Starsector, then "
+                                        + "Continue (or Load it).");
+                            }
                         }
                     });
                 } catch (final IOException e) {
@@ -417,7 +848,105 @@ public final class Launcher {
                             progress.setString("Failed");
                             downloadButton.setEnabled(true);
                             checkButton.setEnabled(true);
+                            joinLaunchButton.setEnabled(true);
+                            forRejoin = false;
                             error("Download failed: " + e.getMessage());
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    // ================================================================ updates
+
+    /** Just updated: pick up what the player was doing (hosting that save, or joining that host). */
+    private void carryOn() {
+        String what = resume;
+        long when = resumeAt;
+        if (what == null || what.isEmpty()) return;
+        resume = "";
+        savePrefs();
+        if (System.currentTimeMillis() - when > 20L * 60L * 1000L) return; // an old one: not what they're doing now
+        if (what.startsWith("host:")) {
+            lastSave = what.substring(5);
+            refreshSaves();
+            tabs.setSelectedIndex(0);
+            log("Updated to MultiSector " + BuildInfo.VERSION + ". Carrying on: hosting your save again.");
+            hostAndLaunch();
+        } else if (what.startsWith("join:")) {
+            addressField.setText(what.substring(5));
+            tabs.setSelectedIndex(1);
+            log("Updated to MultiSector " + BuildInfo.VERSION + ". Carrying on: joining " + what.substring(5) + " again.");
+            joinAndLaunch();
+        }
+    }
+
+    /** What an update should carry on with: hosting the picked save, or joining the typed host. */
+    private String resumeFor(boolean joinSide) {
+        if (!joinSide && (server != null || tabs.getSelectedIndex() == 0)) {
+            GameInstall.SaveInfo save = saveList.getSelectedValue();
+            return save == null ? "" : "host:" + save.folder.getName();
+        }
+        String address = addressField.getText().trim();
+        return address.isEmpty() ? "" : "join:" + address;
+    }
+
+    /** Installs that MultiSector version (null or "newest": the newest release), then reopens the launcher. */
+    private void updateTo(final String wanted) {
+        final String carry = resumeFor(wanted != null);
+        final String carryText = carry.startsWith("host:") ? "Then it hosts that save again (Host and launch)."
+                : carry.startsWith("join:") ? "Then it joins " + carry.substring(5) + " again (Join and launch)." : "";
+        log("Looking for MultiSector " + (wanted == null || wanted.equals("newest") ? "updates" : wanted) + " on GitHub...");
+        background(new Runnable() {
+            public void run() {
+                try {
+                    final String version = wanted == null || wanted.equals("newest") ? Updater.newestVersion() : wanted;
+                    if (version.equals(BuildInfo.VERSION)) {
+                        log("You already have MultiSector " + version + ".");
+                        return;
+                    }
+                    final boolean[] go = new boolean[1];
+                    SwingUtilities.invokeAndWait(new Runnable() {
+                        public void run() {
+                            go[0] = JOptionPane.showConfirmDialog(frame, "Install MultiSector " + version + " (you have "
+                                    + BuildInfo.VERSION + ")?\n\nThis window closes, the mod is replaced (your "
+                                    + "multisector.json settings are kept), and the launcher opens again. " + carryText
+                                    + (game.isGameRunning() ? "\n\nStarsector is running: save and quit it when "
+                                    + "asked, and the update finishes as soon as it closes." : ""),
+                                    "MultiSector", JOptionPane.OK_CANCEL_OPTION) == JOptionPane.OK_OPTION;
+                        }
+                    });
+                    if (!go[0]) return;
+                    java.io.File script = Updater.prepare(game, version, new Updater.Progress() {
+                        public void update(String text) {
+                            log(text);
+                        }
+                    });
+                    // The mod can only be swapped once the game is closed: downloaded already, so it's quick after.
+                    if (game.isGameRunning()) {
+                        log("Downloaded. Now save and quit Starsector: the update finishes as soon as it closes.");
+                        ui(new Runnable() {
+                            public void run() {
+                                frame.toFront();
+                            }
+                        });
+                        while (game.isGameRunning()) Thread.sleep(2000);
+                    }
+                    if (server != null) {
+                        server.stop();
+                        log("Stopped sharing the save for the update (it starts again afterwards).");
+                    }
+                    log("Installing MultiSector " + version + "; the launcher reopens in a moment.");
+                    resume = carry;
+                    resumeAt = System.currentTimeMillis();
+                    savePrefs();
+                    Updater.start(script);
+                    System.exit(0);
+                } catch (final Exception e) {
+                    ui(new Runnable() {
+                        public void run() {
+                            error("Update failed: " + e.getMessage());
                         }
                     });
                 }
@@ -452,9 +981,10 @@ public final class Launcher {
             log("Starsector is already running. Load the save from its main menu.");
             return;
         }
+        ensureModEnabled();
         try {
             game.launchGame();
-            log("Starting Starsector. Make sure MultiSector is ticked in the launcher's Mods list.");
+            log("Starting Starsector. Click Play in its launcher.");
         } catch (IOException e) {
             error(e.getMessage());
         }
@@ -540,12 +1070,19 @@ public final class Launcher {
         String last = json == null ? null : jsonString(json, "lastHost");
         nameField.setText(name != null ? name : System.getProperty("user.name", ""));
         if (last != null) addressField.setText(last);
+        lastSave = json == null ? null : jsonString(json, "lastSave");
+        String r = json == null ? null : jsonString(json, "resume");
+        resume = r == null ? "" : r;
+        Matcher at = json == null ? null : Pattern.compile("\"resumeAt\"\\s*:\\s*(\\d+)").matcher(json);
+        resumeAt = at != null && at.find() ? Long.parseLong(at.group(1)) : 0L;
     }
 
     private void savePrefs() {
         try {
             game.writeCommon(PREFS, "{\"name\": " + quote(nameField.getText().trim())
-                    + ", \"lastHost\": " + quote(addressField.getText().trim()) + "}\n");
+                    + ", \"lastHost\": " + quote(addressField.getText().trim())
+                    + ", \"lastSave\": " + quote(lastSave == null ? "" : lastSave)
+                    + ", \"resume\": " + quote(resume == null ? "" : resume) + ", \"resumeAt\": " + resumeAt + "}\n");
         } catch (IOException ignored) {
         }
     }

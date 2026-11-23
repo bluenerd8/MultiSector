@@ -31,6 +31,10 @@ public final class Protocol {
     public static final byte PING_REPORT = 6;
     /** client -> host: paused(byte). Anyone can pause or resume the shared clock. */
     public static final byte PAUSE_REQUEST = 7;
+    /** client -> host: fast(byte), mult(float). "I'm fast-forwarding": the shared clock speeds up for everyone. */
+    public static final byte FAST_REQUEST = 38;
+    /** host -> clients: json (long string). Session-wide orders from the host: save now, the host is leaving. */
+    public static final byte HOST_ORDER = 39;
     /** client -> host: FleetComp of my fleet. host -> clients: playerId(int), FleetComp. */
     public static final byte FLEET_COMP = 8;
 

@@ -70,6 +70,7 @@ public final class AutoConnect {
             try {
                 session.host(port, name);
                 notice("Hosting on port " + port + ". Friends join from the MultiSector launcher.");
+                multisector.sync.SessionGuard.waitForLastPlayers();
             } catch (Exception e) {
                 notice("Couldn't start hosting: " + e.getMessage());
             }

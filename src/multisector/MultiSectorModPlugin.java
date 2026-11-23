@@ -8,6 +8,7 @@ import com.fs.starfarer.api.campaign.PersistentUIDataAPI.AbilitySlotsAPI;
 import multisector.net.AddressFinder;
 import multisector.probe.SandboxProbe;
 import multisector.sync.ClockSync;
+import multisector.sync.Escort;
 import multisector.sync.FleetSync;
 import multisector.sync.HostSaver;
 import multisector.sync.MarketSync;
@@ -15,8 +16,10 @@ import multisector.sync.NpcInteractionGuard;
 import multisector.sync.PlayerTalk;
 import multisector.sync.JointBattle;
 import multisector.sync.WorldObjects;
+import multisector.sync.WorldState;
 import multisector.sync.NpcSync;
 import multisector.sync.PuppetManager;
+import multisector.sync.SessionGuard;
 import multisector.ui.AutoConnect;
 import multisector.ui.MultiSectorConfig;
 import multisector.ui.MultiplayerAbility;
@@ -47,11 +50,13 @@ public class MultiSectorModPlugin extends BaseModPlugin {
                 + " (built " + BuildInfo.BUILT_AT + ")");
         SandboxProbe.runAll();
         MultiSectorConfig.load();
+        multisector.net.Session.get().setHoldWhileBusy(MultiSectorConfig.isHoldWhileEveryoneBusy());
         logAddresses();
     }
 
     @Override
     public void onGameLoad(boolean newGame) {
+        SessionGuard.worldLoaded(); // a session from another world ends here; this load gets its own id
         PuppetManager.forget(); // any puppets belonged to the previously loaded world
         Global.getSector().getListenerManager().addListener(new MultiplayerHotkey(), true);
         Global.getSector().addTransientScript(new SessionNoticeScript(MultiSectorConfig.isShowHintOnLoad()));
@@ -67,8 +72,17 @@ public class MultiSectorModPlugin extends BaseModPlugin {
         Global.getSector().addTransientScript(new PlayerTalk());
         WorldObjects.forget();
         Global.getSector().addTransientScript(new WorldObjects());
+        Escort.forget();
+        Global.getSector().addTransientScript(new Escort());
+        WorldState.forget();
+        Global.getSector().addTransientScript(new WorldState());
+        Global.getSector().getListenerManager().addListener(new WorldState.HostileActs(), true);
         JointBattle.forget();
         Global.getSector().addTransientScript(new JointBattle());
+        SessionGuard.forget(); // a new world: nothing joined yet
+        SessionGuard guardScript = new SessionGuard();
+        Global.getSector().addTransientScript(guardScript);
+        Global.getSector().getListenerManager().addListener(guardScript, true);
         // Transient plugins aren't saved, but unregister first in case this sector already has one.
         NpcInteractionGuard guard = new NpcInteractionGuard();
         Global.getSector().unregisterPlugin(guard.getId());
@@ -94,6 +108,11 @@ public class MultiSectorModPlugin extends BaseModPlugin {
     public void beforeGameSave() {
         PuppetManager.removeAll();
         NpcSync.releaseForSave();
+        try {
+            SessionGuard.beforeSave(); // host: friends save too; friends: our character is exported with it
+        } catch (RuntimeException e) {
+            Global.getLogger(MultiSectorModPlugin.class).warn("[MultiSector] save sync failed", e);
+        }
     }
 
     /** Gives the player the Multiplayer ability and puts it in the first free ability-bar slot. */

@@ -75,8 +75,11 @@ public final class FleetLocks {
                     Integer asked = pending.get(h);
                     if (asked != null && asked == m.from) {
                         pending.remove(h);
-                        replies.put(h, new Reply(m.from, j.optBoolean("ok"), j.optString("holder", ""),
-                                j.optInt("holderId", -1), j.optString("fleet", "")));
+                        Reply r = new Reply(m.from, j.optBoolean("ok"), j.optString("holder", ""),
+                                j.optInt("holderId", -1), j.optString("fleet", ""));
+                        JSONArray battle = j.optJSONArray("battle");
+                        if (battle != null) r.battleJson = battle.toString();
+                        replies.put(h, r);
                     }
                 } else if ("left".equals(k)) {
                     playerLeft(m.from);
@@ -102,7 +105,10 @@ public final class FleetLocks {
             replies.put(e.getKey(), new Reply(id, false, "", -1, ""));
             it.remove();
         }
-        if (active != null && active.owner == id) active = null;
+        if (active != null && active.owner == id) {
+            active = null;
+            group.clear();
+        }
     }
 
     private static JSONObject msg(String kind, int handle) {
@@ -169,7 +175,14 @@ public final class FleetLocks {
             } else if (f.getBattle() != null) {
                 CampaignFleetAPI me = Global.getSector().getPlayerFleet();
                 boolean mine = me != null && f.getBattle() == me.getBattle();
-                reply(s, m.from, handle, false, mine ? myName : "a battle", mine ? s.getMyId() : -1, null);
+                JSONArray whole = mine ? null : claimBattle(m, f.getBattle(), byHandle);
+                if (whole != null) {
+                    JSONObject j2 = msg("reply", handle).put("ok", true).put("holder", "").put("holderId", -1)
+                            .put("fleet", exactCopy(f).toString()).put("battle", whole);
+                    s.sendLockMessage(m.from, j2.toString());
+                } else {
+                    reply(s, m.from, handle, false, mine ? myName : "a battle", mine ? s.getMyId() : -1, null);
+                }
             } else {
                 if (cur == null) {
                     cur = new Hold(m.from, m.fromName, f);
@@ -194,6 +207,45 @@ public final class FleetLocks {
                 applyLosses(cur.fleet, lost, m.fromName);
             }
         }
+    }
+
+    /**
+     * A follower wants to join a battle between NPC fleets on our world: hold
+     * every fleet in it for them and describe each one (handle, side, exact
+     * ships). Null if it can't be shared: a player or stand-in is in it, a
+     * fleet in it isn't one we publish, or another player holds one.
+     */
+    private static JSONArray claimBattle(Session.PlayerMessage m, com.fs.starfarer.api.campaign.BattleAPI b,
+                                         Map<Integer, CampaignFleetAPI> byHandle) throws Exception {
+        if (b == null || b.isDone() || !multisector.ui.MultiSectorConfig.isJoinNpcBattles()) return null;
+        Map<CampaignFleetAPI, Integer> handleOf = new java.util.IdentityHashMap<CampaignFleetAPI, Integer>();
+        for (Map.Entry<Integer, CampaignFleetAPI> e : byHandle.entrySet()) handleOf.put(e.getValue(), e.getKey());
+        JSONArray out = new JSONArray();
+        List<Object[]> want = new ArrayList<Object[]>();
+        for (int side = 1; side <= 2; side++) {
+            for (CampaignFleetAPI g : side == 1 ? b.getSideOne() : b.getSideTwo()) {
+                if (g.isPlayerFleet() || g.getMemoryWithoutUpdate().getBoolean(PuppetManager.PUPPET_FLAG)) return null;
+                Integer h = handleOf.get(g);
+                if (h == null) return null;
+                Hold cur = holds.get(h);
+                if (cur != null && cur.playerId != m.from) return null;
+                want.add(new Object[]{h, g, side});
+            }
+        }
+        if (want.size() < 2 || b.getSideOne().isEmpty() || b.getSideTwo().isEmpty()) return null;
+        for (Object[] w : want) {
+            int h = (Integer) w[0];
+            CampaignFleetAPI g = (CampaignFleetAPI) w[1];
+            if (!holds.containsKey(h)) {
+                Hold hold = new Hold(m.from, m.fromName, g);
+                holds.put(h, hold);
+                freeze(hold);
+            }
+            out.put(new JSONObject().put("h", h).put("side", w[2]).put("fleet", exactCopy(g).toString()));
+        }
+        log.info("[MultiSector] " + m.fromName + " is joining the battle around " + b.getSideOne().get(0).getName()
+                + " (" + want.size() + " fleets held)");
+        return out;
     }
 
     private static void reply(Session s, int to, int handle, boolean ok, String holder, int holderId, String fleet)
@@ -327,6 +379,8 @@ public final class FleetLocks {
         final int holderId;
         /** The fleet's exact copy, when granted. */
         final String fleetJson;
+        /** Granted as a whole battle between NPC fleets: every fleet in it ([{h, side, fleet}]), or "". */
+        String battleJson = "";
 
         Reply(int owner, boolean granted, String holder, int holderId, String fleetJson) {
             this.owner = owner;
@@ -374,6 +428,8 @@ public final class FleetLocks {
     }
 
     private static Active active;
+    /** The other fleets of a battle we joined (the one we clicked is {@link #active}). */
+    private static final List<Active> group = new ArrayList<Active>();
     /** Handle -> deadline: don't show a stand-in for it until the owner has caught up. */
     private static final Map<Integer, Long> awaiting = new HashMap<Integer, Long>();
     private static final Map<Integer, Integer> awaitingHash = new HashMap<Integer, Integer>();
@@ -384,6 +440,65 @@ public final class FleetLocks {
      * couldn't be made (the dialog then just leaves).
      */
     static boolean takeOver(int owner, int handle, CampaignFleetAPI fleet, String json) {
+        group.clear();
+        Active a = rebuild(owner, handle, fleet, json);
+        if (a == null) return false;
+        active = a;
+        return true;
+    }
+
+    /**
+     * The owner gave us a whole NPC battle: every other fleet in it becomes
+     * the owner's exact copy too, and they fight it out here as a battle the
+     * normal fleet dialog lets us join. Returns how many fleets are in it, or
+     * 0 if it couldn't be set up (then it's just the one fleet).
+     */
+    static int takeOverBattle(int owner, int handle, CampaignFleetAPI clicked, String battleJson) {
+        if (active == null || active.fleet != clicked) return 0;
+        List<CampaignFleetAPI> one = new ArrayList<CampaignFleetAPI>(), two = new ArrayList<CampaignFleetAPI>();
+        try {
+            JSONArray arr = new JSONArray(battleJson);
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject o = arr.getJSONObject(i);
+                int h = o.optInt("h");
+                CampaignFleetAPI f = h == handle ? clicked : NpcSync.fleetOfHandle(h);
+                if (f == null || f.getContainingLocation() != clicked.getContainingLocation() || f.getBattle() != null) {
+                    release(owner, h); // not here on our game: it stays out of it
+                    continue;
+                }
+                if (f != clicked) {
+                    Active a = rebuild(owner, h, f, o.optString("fleet"));
+                    if (a == null) {
+                        release(owner, h);
+                        continue;
+                    }
+                    group.add(a);
+                }
+                (o.optInt("side") == 1 ? one : two).add(f);
+            }
+        } catch (Exception e) {
+            log.warn("[MultiSector] couldn't set up the owner's battle here", e);
+        }
+        if (one.isEmpty() || two.isEmpty()) return 0;
+        com.fs.starfarer.api.campaign.BattleAPI b = Global.getFactory().createBattle(one.get(0), two.get(0));
+        for (CampaignFleetAPI f : one) if (f.getBattle() == null) b.join(f);
+        for (CampaignFleetAPI f : two) if (f.getBattle() == null) b.join(f);
+        log.info("[MultiSector] joined " + Session.get().playerName(owner) + "'s NPC battle: " + one.size() + " vs "
+                + two.size() + " fleets");
+        return one.size() + two.size();
+    }
+
+    /** Follower: is this fleet locked for us right now (alone, or as part of a battle we joined)? */
+    static boolean isActive(CampaignFleetAPI f) {
+        if (f == null) return false;
+        Active a = active;
+        if (a != null && a.fleet == f) return true;
+        for (Active g : group) if (g.fleet == f) return true;
+        return false;
+    }
+
+    /** Rebuilds our copy of one of the owner's fleets as their exact copy. Null if it couldn't be made. */
+    private static Active rebuild(int owner, int handle, CampaignFleetAPI fleet, String json) {
         List<String> skipped = new ArrayList<String>();
         Active a = new Active(owner, handle, fleet);
         List<FleetMemberAPI> built = new ArrayList<FleetMemberAPI>();
@@ -409,9 +524,9 @@ public final class FleetLocks {
             }
         } catch (Exception e) {
             log.warn("[MultiSector] couldn't rebuild the owner's fleet", e);
-            return false;
+            return null;
         }
-        if (built.isEmpty()) return false;
+        if (built.isEmpty()) return null;
         FleetDataAPI data = fleet.getFleetData();
         for (FleetMemberAPI old : data.getMembersListCopy()) data.removeFleetMember(old);
         for (FleetMemberAPI m : built) data.addFleetMember(m);
@@ -420,9 +535,8 @@ public final class FleetLocks {
         if (flagship.getCaptain() != null && !flagship.getCaptain().isDefault()) fleet.setCommander(flagship.getCaptain());
         data.setSyncNeeded();
         fleet.forceSync();
-        active = a;
         if (!skipped.isEmpty()) log.info("[MultiSector] fleet copy is missing " + skipped + " (mods?)");
-        return true;
+        return a;
     }
 
     /** Every frame on a follower: when the dialog with the locked fleet ends, report what happened. */
@@ -431,6 +545,20 @@ public final class FleetLocks {
         if (a == null) return;
         if (NpcSync.dialogTarget() == a.fleet) return; // still talking or fighting
         active = null;
+        List<Active> all = new ArrayList<Active>();
+        all.add(a);
+        all.addAll(group);
+        group.clear();
+        for (Active x : all) report(s, x);
+        // The battle we set up here was only for our part in it: it's over (the owner's goes on with what's left).
+        for (Active x : all) {
+            com.fs.starfarer.api.campaign.BattleAPI b = x.fleet.getBattle();
+            if (b != null && !b.isPlayerInvolved()) b.leave(x.fleet, false);
+        }
+    }
+
+    /** One fleet we had locked: what it lost goes to its owner (or a release, if nothing). */
+    private static void report(Session s, Active a) {
         Set<String> survivors = new HashSet<String>();
         if (a.fleet.getContainingLocation() != null) {
             for (FleetMemberAPI m : a.fleet.getFleetData().getMembersListCopy()) survivors.add(m.getId());
@@ -493,6 +621,7 @@ public final class FleetLocks {
     static void forget() {
         holds.clear();
         active = null;
+        group.clear();
         pending.clear();
         replies.clear();
         awaiting.clear();

@@ -12,6 +12,7 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.TimeZone;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -70,18 +71,23 @@ final class GameInstall {
         final String saveDate;
         final String gameVersion;
         final long sizeBytes;
+        /** The MultiSector version that last saved it, or "" if it hasn't been played with MultiSector. */
+        final String modVersion;
 
-        SaveInfo(File folder, String characterName, String saveDate, String gameVersion, long sizeBytes) {
+        SaveInfo(File folder, String characterName, String saveDate, String gameVersion, long sizeBytes,
+                 String modVersion) {
             this.folder = folder;
             this.characterName = characterName;
             this.saveDate = saveDate;
             this.gameVersion = gameVersion;
             this.sizeBytes = sizeBytes;
+            this.modVersion = modVersion;
         }
 
         @Override
         public String toString() {
-            return characterName + "   -   saved " + saveDate + "   (" + megabytes(sizeBytes) + ")";
+            return characterName + "   -   saved " + saveDate + "   (" + megabytes(sizeBytes) + ")   "
+                    + (modVersion.isEmpty() ? "not played with MultiSector yet" : "MultiSector " + modVersion);
         }
     }
 
@@ -110,8 +116,11 @@ final class GameInstall {
             long size = 0;
             File[] files = dir.listFiles();
             if (files != null) for (File f : files) if (f.isFile()) size += f.length();
+            Matcher mod = Pattern.compile("(?s)<id>multisector</id>.*?<versionInfo[^>]*>.*?<string>([^<]*)</string>")
+                    .matcher(xml);
             return new SaveInfo(dir, orDefault(tag(xml, "characterName"), dir.getName()),
-                    localTime(tag(xml, "saveDate")), orDefault(tag(xml, "gameVersion"), "?"), size);
+                    localTime(tag(xml, "saveDate")), orDefault(tag(xml, "gameVersion"), "?"), size,
+                    mod.find() ? mod.group(1).trim() : "");
         } catch (IOException e) {
             return null;
         }
@@ -219,6 +228,66 @@ final class GameInstall {
         } catch (IOException ignored) {
         }
         return out;
+    }
+
+    /** Installed mods: id -> name, from each mods/&lt;folder&gt;/mod_info.json. */
+    Map<String, String> installedMods() {
+        Map<String, String> out = new java.util.TreeMap<String, String>();
+        File[] dirs = mods.listFiles();
+        if (dirs == null) return out;
+        Pattern id = Pattern.compile("\"id\"\\s*:\\s*\"([^\"]+)\"");
+        Pattern name = Pattern.compile("\"name\"\\s*:\\s*\"([^\"]+)\"");
+        for (File d : dirs) {
+            File info = new File(d, "mod_info.json");
+            if (!d.isDirectory() || !info.isFile()) continue;
+            try {
+                String text = new String(Files.readAllBytes(info.toPath()), StandardCharsets.UTF_8);
+                Matcher m = id.matcher(text);
+                if (!m.find()) continue;
+                Matcher n = name.matcher(text);
+                out.put(m.group(1), n.find() ? n.group(1) : m.group(1));
+            } catch (IOException ignored) {
+                // unreadable: as good as not installed
+            }
+        }
+        return out;
+    }
+
+    /** Where the player's own mod list is kept while the launcher has set the host's. */
+    File enabledModsBackup() {
+        return new File(mods, "enabled_mods.json.multisector-backup");
+    }
+
+    /**
+     * Sets the game's enabled mods (Starsector's own mods/enabled_mods.json).
+     * The first time, the player's own list is kept aside so it can be put back.
+     */
+    void writeEnabledMods(List<String> ids) throws IOException {
+        File f = new File(mods, "enabled_mods.json");
+        File backup = enabledModsBackup();
+        if (f.isFile() && !backup.exists()) Files.copy(f.toPath(), backup.toPath());
+        StringBuilder b = new StringBuilder("{\"enabledMods\": [\n");
+        for (int i = 0; i < ids.size(); i++) {
+            b.append("  \"").append(ids.get(i).replace("\"", "")).append('"').append(i < ids.size() - 1 ? "," : "").append('\n');
+        }
+        b.append("]}\n");
+        Files.write(f.toPath(), b.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** Puts the player's own mod list back. False if there was nothing kept aside. */
+    boolean restoreEnabledMods() throws IOException {
+        File backup = enabledModsBackup();
+        if (!backup.isFile()) return false;
+        Files.copy(backup.toPath(), new File(mods, "enabled_mods.json").toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        Files.delete(backup.toPath());
+        return true;
+    }
+
+    /** Deletes a common file (the launcher runs outside the game's sandbox). */
+    void deleteCommon(String name) {
+        File f = new File(common, name + ".data");
+        if (f.isFile() && !f.delete()) f.deleteOnExit();
     }
 
     // ---------------------------------------------------------- common files

@@ -31,6 +31,8 @@ public final class JointCombatHook extends BaseEveryFrameCombatPlugin {
     @Override
     public void advance(float amount, List<InputEventAPI> events) {
         if (engine == null) return;
+        // A battle in the campaign (ours, or our view of a friend's): our world is still open.
+        if (engine.isInCampaign() || engine.isInCampaignSim() || JointCombat.isViewing()) Session.get().gameAlive();
         if (!decided) {
             decided = true; // plugins are all set up by the first frame, our view's included
             if (leads()) {

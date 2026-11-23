@@ -2,15 +2,27 @@
 
 Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), aimed at small friend groups (2–8 players). One player hosts and runs the real game; everyone else connects to them.
 
-> **Status: early prototype.** Players share the host's world. Everyone sees the other players' fleets (with all their ships) on the map. Everyone stays on the host's date, pause is shared, and fast-forward follows the host. Planets line up. Where players are together, everyone sees the same NPC fleets: in a star system those of whoever got there first, and in hyperspace those of the nearby player who has been there longest. You can fight them, and the results reach that player's world. Battle wreckage, cargo pods and objectives (comm relays, sensor arrays and the like) are shared everywhere. Markets are shared everywhere: stock, purchases and price changes go through the host. Players can hail each other's fleets to talk and trade credits, cargo and ships. Players far apart in hyperspace each have their own hyperspace fleets.
+> **Status: early prototype.** Players share the host's world. Everyone sees the other players' fleets (with all their ships) on the map. Everyone stays on the host's date, pause is shared, and anyone can fast-forward for everyone. Planets line up. Where players are together, everyone sees the same NPC fleets: in a star system those of whoever got there first, and in hyperspace those of the nearby player who has been there longest. You can fight them, and the results reach that player's world. Battle wreckage, cargo pods and objectives (comm relays, sensor arrays and the like) are shared everywhere. Markets are shared everywhere: stock, purchases and price changes go through the host. Players can hail each other's fleets to talk and trade credits, cargo and ships. Players far apart in hyperspace each have their own hyperspace fleets.
 
 ## Time and pause
 
 - **Pause** on the map pauses everyone, and anyone can resume. Your own menus, markets and dialogs only pause your game. The shared clock keeps going, and your date catches up when you close them.
 - **Ctrl+Space** pauses or resumes everyone from inside a dialog, market or menu, where the normal pause key doesn't reach.
-- **Fast-forward** follows the host. When the host fast-forwards, turn yours on too. Yours does nothing while the host isn't.
+- **Fast-forward:** anyone can. When someone fast-forwards, the world speeds up for everyone, the host's game included. Turn yours on too to keep up.
+- **Nobody on the map:** while everyone is in a battle, dialog or menu, the world waits instead of running on (`holdWhileEveryoneBusy`).
+- **Menus:** while you're in the cargo, refit, character or map screen, your fleet keeps flying its course with the world. Switch it to stay put in the Multiplayer window (F8), or with `keepMovingInMenus`.
 - **Joining:** when you click Download, the host's game saves a fresh copy for you. By default everyone waits, paused, until you're in the game, so you start in exactly the world you downloaded. The host (or anyone) can unpause to stop waiting. Turn this off with `holdWhileJoining` in `data/config/multisector.json`.
 - If your save is older or newer than the host's world, your date is set to the host's when you connect.
+
+## One world, kept together
+
+- **The host comes first.** A friend's world that isn't connected to the host stays paused and keeps trying to join, so loading before the host is fine. F8 lets you stop waiting.
+- **When the host ends the session** (stops hosting or quits), friends' characters and worlds are saved and they go back to the main menu. The launcher then waits for the host and downloads their world as soon as they're back: just click Continue.
+- **Coming back as yourself:** your character in each shared world is saved separately (your own export is never overwritten). Next time you join that world, you're back as that character without choosing.
+- **Always the host's world:** if your copy doesn't match the host's (they loaded a save since), the game offers a fresh copy. One click, and the launcher fetches it; F8 has the same button.
+- **Saving:** when the host saves, everyone saves. The host can also have the world wait after loading until everyone from the last session is back (`waitForAllPlayers`).
+- **Shared:** raids and bombardments on planets, planet surveys and explored ruins, wars and peace between factions, and faction bounties on star systems. Your reputation, missions and bar events stay your own.
+- **Losing your whole fleet:** get picked up next to another player, or at the nearest friendly port.
 
 ## Seeing the other players
 
@@ -20,13 +32,15 @@ Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), ai
 
 ## Talking and trading with other players
 
-- **Click another player's fleet** to hail them. Their game opens a dialog to answer or decline, at once if they're on the map, or as soon as they finish what they're doing. Either of you can cancel or leave at any time.
+- **Click another player's fleet** to hail or escort them. A hail opens a dialog on their game to answer or decline, at once if they're on the map, or as soon as they finish what they're doing. Either of you can cancel or leave at any time.
+- **Escort** follows their fleet closely, through jump points too, with no dialog on their side. Click anywhere on the map to stop.
 - While you talk, both of you are in a dialog, so both fleets hold still. The world keeps going for everyone else; press Ctrl+Space if you want to pause everyone.
 - **Offer credits, cargo or ships.** What you offer leaves your fleet straight away and comes back if they turn it down, leave the conversation or leave the game. Officers stay with you, and you can't give away your flagship.
 
 ## Fighting together
 
 - Nobody is pulled into a battle. To help a friend who's fighting, fly to the fight and click the enemy fleet (or your friend's fleet). You can join once the fighting has begun; until then the dialog tells you to wait.
+- Battles between NPC fleets (a patrol fighting pirates, say) can be joined too, even in a world you follow: click one of the fleets and pick a side.
 - Your ships arrive as reinforcements at your friend's side of the battlefield, and they get a message in combat. A live view of the battle opens on your game: you **fly one of your own ships** (your flagship unless you pick another), and the rest of your combat-ready ships fight under the battle AI. Your friend can't pilot, recover or keep your ships.
 - Controls in the view: WASD to move, Q/E to strafe, X to decelerate, mouse to aim, left button to fire the selected group (1-7), right button for shields, F system, V vent, Z fighters, T autofire, R to target.
 - When the battle is over, their losses, hull damage and readiness are applied to their real fleet. Nobody is left without a ship.
@@ -46,9 +60,12 @@ Get the latest zip from [Releases](https://github.com/bluenerd8/MultiSector/rele
 
 `MultiSector Launcher.cmd` in the mod folder opens a window outside the game that handles everything before playing:
 
-- **Host:** pick a save and share it, and see your Hamachi address with a copy button
-- **Join:** type the host's address, check your mods match theirs, download their save
-- **Launch Starsector.** When the save loads, the mod hosts or joins by itself.
+- **Host:** pick a save and click **Host and launch**. It shares the save, makes it the one Continue loads, and starts Starsector. Your Hamachi address has a copy button.
+- **Join:** type the host's address and click **Join and launch**. It switches your enabled mods to the host's if they differ (**Put my mods back** undoes it), downloads their world and starts Starsector. It says whether the host's game is ready, and what to fix if it can't be reached.
+- The launcher ticks MultiSector in the game's mod list for you, and the Host tab checks Windows Firewall (with a button to open it).
+- When the save loads, the mod hosts or joins by itself.
+- **Any save works** with any MultiSector build: there's no need to start a new game for each test build. The Host tab shows which build last saved each save.
+- **Update MultiSector** installs the newest test build from GitHub. It works with Starsector open (it updates once you quit), then carries on hosting your save or joining your host. If the host has a different build, the launcher offers theirs. It keeps your `multisector.json` settings.
 
 The host's save is the shared world, so the map never has to be synced piece by piece. The launcher shares it on port 7778, next to the game's 7777. Developers can open it with `dev launcher`.
 

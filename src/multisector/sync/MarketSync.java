@@ -148,8 +148,13 @@ public final class MarketSync {
 
     // ================================================================ host
 
+    /** Markets whose stock changed (a trade here or from a friend): players docked there get it again. */
+    private static final java.util.Set<String> dirty = new java.util.HashSet<String>();
+    private static long nextPush;
+
     /** Every frame on the host: answer stock requests and apply friends' trades. */
     static void hostFrame(Session s) {
+        pushChanged(s);
         Object[] e;
         int budget = 20; // a burst of trades spreads over a few frames
         while (budget-- > 0 && (e = s.pollMarketEvent()) != null) {
@@ -161,7 +166,9 @@ public final class MarketSync {
                 if (kind == Session.MARKET_EVENT_REQUEST) {
                     s.replyMarket(playerId, text, snapshot(text));
                 } else {
-                    applyTrade(new JSONObject(text), name);
+                    JSONObject t = new JSONObject(text);
+                    applyTrade(t, name);
+                    dirty.add(t.optString("market"));
                 }
             } catch (Exception ex) {
                 log.warn("[MultiSector] market " + (kind == Session.MARKET_EVENT_REQUEST ? "request" : "trade")
@@ -169,6 +176,38 @@ public final class MarketSync {
                 if (kind == Session.MARKET_EVENT_REQUEST) s.replyMarket(playerId, text, "");
             }
         }
+    }
+
+    /**
+     * The host's stock changed: everyone docked at that market gets it again
+     * (at most twice a second), so a ship someone just bought can't still be
+     * for sale on another player's screen.
+     */
+    private static void pushChanged(Session s) {
+        if (dirty.isEmpty()) return;
+        long now = System.nanoTime();
+        if (now - nextPush < 0) return;
+        nextPush = now + 500_000_000L;
+        for (String id : new ArrayList<String>(dirty)) {
+            MarketAPI m = Global.getSector().getEconomy().getMarket(id);
+            if (m == null) continue;
+            java.util.Set<String> here = new java.util.HashSet<String>();
+            if (m.getPrimaryEntity() != null) here.add(m.getPrimaryEntity().getId());
+            for (SectorEntityToken e : m.getConnectedEntities()) here.add(e.getId());
+            String json = null;
+            for (Map.Entry<Integer, multisector.net.FleetState.Received> e : s.getRemoteFleets().entrySet()) {
+                multisector.net.FleetState st = e.getValue().state;
+                if (st == null || st.dockedAt == null || !here.contains(st.dockedAt)) continue;
+                try {
+                    if (json == null) json = snapshot(id);
+                    s.replyMarket(e.getKey(), id, json);
+                } catch (Exception ex) {
+                    log.warn("[MultiSector] couldn't send " + m.getName() + "'s new stock", ex);
+                    break;
+                }
+            }
+        }
+        dirty.clear();
     }
 
     private static String snapshot(String marketId) throws Exception {
@@ -293,6 +332,8 @@ public final class MarketSync {
 
     private static MarketAPI open;
     private static boolean settled;
+    /** New stock from the host while our trade screen was open: applied when it closes. */
+    private static String later;
     private static long askedAt;
     /** Ships in the market we're at: our member id -> the host's member id. */
     private static final Map<String, String> toHostShip = new HashMap<String, String>();
@@ -309,11 +350,27 @@ public final class MarketSync {
         if (m != open) {
             open = m;
             settled = false;
+            later = null;
             askedAt = now;
             toHostShip.clear();
             s.requestMarket(m.getId());
         }
-        if (settled) return;
+        if (settled) {
+            // The host's stock changed while we're here (someone traded): take it, once our trade screen is shut.
+            String pushed = s.takeMarketSnapshot(m.getId());
+            if (pushed != null && !pushed.isEmpty()) later = pushed;
+            CampaignUIAPI ui = Global.getSector().getCampaignUI();
+            if (later != null && ui != null && ui.getCurrentCoreTab() == null) {
+                String json = later;
+                later = null;
+                try {
+                    applySnapshot(m, new JSONObject(json));
+                } catch (Exception e) {
+                    log.warn("[MultiSector] couldn't apply the host's new stock for " + m.getName(), e);
+                }
+            }
+            return;
+        }
         String json = s.takeMarketSnapshot(m.getId());
         if (json == null) {
             if (now - askedAt > SNAPSHOT_WAIT_NANOS) {
@@ -326,8 +383,9 @@ public final class MarketSync {
         if (json.isEmpty()) return;
         CampaignUIAPI ui = Global.getSector().getCampaignUI();
         if (ui != null && ui.getCurrentCoreTab() != null) {
-            // Never change stock under an open trade screen.
-            log.info("[MultiSector] " + m.getName() + "'s stock arrived after the trade screen opened; using this game's");
+            // Never change stock under an open trade screen: it's applied as soon as the screen closes.
+            log.info("[MultiSector] " + m.getName() + "'s stock arrived after the trade screen opened; applying it once it closes");
+            later = json;
             return;
         }
         try {
@@ -393,6 +451,11 @@ public final class MarketSync {
         @Override
         public void reportPlayerMarketTransaction(PlayerMarketTransaction tx) {
             Session s = Session.get();
+            if (s.getState() == Session.State.HOSTING) {
+                // The host's own trade: friends docked at the same market get the new stock.
+                if (tx.getMarket() != null && syncable(tx.getSubmarket())) dirty.add(tx.getMarket().getId());
+                return;
+            }
             if (s.getState() != Session.State.CONNECTED) return;
             try {
                 SubmarketAPI sm = tx.getSubmarket();
@@ -424,6 +487,8 @@ public final class MarketSync {
     static void forget() {
         open = null;
         settled = false;
+        later = null;
+        dirty.clear();
         toHostShip.clear();
     }
 }

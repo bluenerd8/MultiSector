@@ -43,6 +43,10 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate implements Dialo
     private static final String BTN_COPY = "copy";
     private static final String BTN_EXPORT = "export";
     private static final String BTN_CHOOSE = "choose";
+    private static final String BTN_LET_GO = "letgo";
+    private static final String BTN_MENUS = "menus";
+    private static final String BTN_AUTO_CHAR = "autochar";
+    private static final String BTN_FRESH = "fresh";
 
     /** Last address typed into Join, for this game session. Also saved per save file. */
     private static String lastJoinAddress = "";
@@ -152,12 +156,32 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate implements Dialo
             } else if (s.getState() == Session.State.IDLE) {
                 try {
                     s.host(MultiSectorConfig.getPort(), playerName());
+                    multisector.sync.SessionGuard.waitForLastPlayers();
                 } catch (Exception e) {
                     localError = e.getMessage();
                 }
             }
+        } else if (BTN_AUTO_CHAR.equals(id)) {
+            GamePrefs.setAutoCharacter(!GamePrefs.isAutoCharacter());
+            localInfo = GamePrefs.isAutoCharacter()
+                    ? "Joining a world again brings back your character from last time."
+                    : "Joining a world again asks which character to bring.";
+        } else if (BTN_FRESH.equals(id)) {
+            close();
+            multisector.sync.SessionGuard.freshCopyNow(); // to the main menu; the launcher fetches the world
+            return;
+        } else if (BTN_MENUS.equals(id)) {
+            multisector.sync.Escort.setKeepMoving(!multisector.sync.Escort.isKeepMoving());
+            localInfo = multisector.sync.Escort.isKeepMoving()
+                    ? "Your fleet keeps flying its course while you're in the cargo, refit or map screens."
+                    : "Your fleet stays put while you're in the cargo, refit or map screens.";
+        } else if (BTN_LET_GO.equals(id)) {
+            multisector.sync.SessionGuard.letGo();
+            if (s.getState() == Session.State.CONNECTING) s.stop();
+            localInfo = "Stopped waiting. This world now runs on its own, without the host's.";
         } else if (BTN_JOIN.equals(id)) {
             if (s.getState() == Session.State.CONNECTING || s.getState() == Session.State.CONNECTED) {
+                multisector.sync.SessionGuard.letGo(); // leaving on purpose: don't hold the world for the host
                 s.stop();
             } else if (s.getState() == Session.State.IDLE) {
                 String address = addressField != null ? addressField.getText().trim() : "";
@@ -251,10 +275,18 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate implements Dialo
                 : st == Session.State.CONNECTED ? "Disconnect" : "Join";
         ButtonAPI join = t.addButton(joinText, BTN_JOIN, BUTTON_W, BUTTON_H, pad);
         join.setEnabled(st != Session.State.HOSTING);
+        if (multisector.sync.SessionGuard.isWaiting()) {
+            t.addPara("This world stays paused until you're back in the host's game; it tries to join every few "
+                    + "seconds. Stop waiting to play it on your own (it won't follow the host's world any more).", hl, 8f);
+            t.addButton("Stop waiting", BTN_LET_GO, BUTTON_W, BUTTON_H, 6f);
+        }
 
         // Players
         t.addSectionHeading("Players", Alignment.MID, 18f);
         playersLabel = t.addPara(playersText(), 8f);
+        t.addPara("Click another player's fleet to hail or escort them.", gray, 6f);
+        t.addButton(multisector.sync.Escort.isKeepMoving() ? "In menus: keep moving" : "In menus: stay put",
+                BTN_MENUS, BUTTON_W + 40f, BUTTON_H, 6f);
 
         // Character
         t.addSectionHeading("Your character", Alignment.MID, 18f);
@@ -265,6 +297,22 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate implements Dialo
         t.addPara("Export takes this character, fleet, officers and cargo into a friend's MultiSector world. "
                 + "Colonies, reputation and story progress stay in this save.", gray, 8f);
         t.addButton("Export character", BTN_EXPORT, BUTTON_W, BUTTON_H, pad);
+        t.addButton(GamePrefs.isAutoCharacter() ? "Bring my character back: on" : "Bring my character back: off",
+                BTN_AUTO_CHAR, BUTTON_W + 40f, BUTTON_H, 6f);
+        t.addPara("On: joining a world you've played in before brings back your character from last time, "
+                + "without asking.", gray, 4f);
+        if (st == Session.State.CONNECTED || multisector.sync.SessionGuard.isStaleCopy()) {
+            t.addSectionHeading("This copy of the world", Alignment.MID, 18f);
+            if (multisector.sync.SessionGuard.isStaleCopy()) {
+                t.addPara("The host has loaded their save since this copy was made, so it doesn't match theirs.",
+                        Misc.getNegativeHighlightColor(), 8f);
+            } else {
+                t.addPara("Something out of step? A fresh copy brings the host's world exactly as it is now.", gray, 8f);
+            }
+            t.addButton("Get a fresh copy", BTN_FRESH, BUTTON_W, BUTTON_H, 6f);
+            t.addPara("You go back to the main menu (your character is kept) and the MultiSector launcher downloads "
+                    + "the host's world. Then click Continue. Keep the launcher open for this.", gray, 4f);
+        }
 
         t.addPara("MultiSector %s. Shortcut: %s. The players panel on the map: %s.", 18f,
                 gray, Misc.getHighlightColor(), BuildInfo.VERSION, MultiSectorConfig.getHotkeyName(),
@@ -282,6 +330,9 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate implements Dialo
         sb.append(s.getState()).append('|').append(s.getLastError()).append('|')
                 .append(localError).append('|').append(localInfo).append('|');
         for (Session.Player p : s.getPlayers()) sb.append(p.id).append(',');
+        sb.append('|').append(multisector.sync.SessionGuard.isWaiting());
+        sb.append('|').append(multisector.sync.Escort.isKeepMoving());
+        sb.append('|').append(GamePrefs.isAutoCharacter()).append(multisector.sync.SessionGuard.isStaleCopy());
         return sb.toString();
     }
 

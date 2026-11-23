@@ -192,7 +192,12 @@ final class LobbyServer {
             if (hello == null || Protocol.readHeader(hello, null) != Protocol.LOBBY_HELLO) return;
             String name = Protocol.cleanName(Protocol.getString(hello));
             who = name;
-            if (hello.remaining() >= 2) Protocol.getString(hello); // their build (checked on their side)
+            String theirBuild = hello.remaining() >= 2 ? Protocol.getString(hello) : "an older build";
+            if (!BuildInfo.VERSION.equals(theirBuild)) {
+                // Checked on their side; their launcher offers them this build.
+                listener.log(name + " has MultiSector " + theirBuild + " and you have " + BuildInfo.VERSION
+                        + ". Their launcher offers them your build (Get the host's build).");
+            }
             byte purpose = hello.remaining() >= 1 ? hello.get() : Protocol.HELLO_FOR_CHECK;
             if (purpose == Protocol.HELLO_FOR_DOWNLOAD) freshSave(name);
 
@@ -353,7 +358,7 @@ final class LobbyServer {
     private ByteBuffer info(Snapshot snap) {
         int size = Protocol.stringSize(hostName) + Protocol.stringSize(save.characterName)
                 + Protocol.stringSize(save.saveDate) + Protocol.stringSize(save.gameVersion) + 8 + 4 + 4
-                + 8 + Protocol.stringSize(snap.hash) + Protocol.stringSize(BuildInfo.VERSION);
+                + 8 + Protocol.stringSize(snap.hash) + Protocol.stringSize(BuildInfo.VERSION) + 1;
         for (String m : mods) size += Protocol.stringSize(m);
         ByteBuffer bb = Protocol.begin(Protocol.LOBBY_INFO, size);
         Protocol.putString(bb, hostName);
@@ -367,6 +372,7 @@ final class LobbyServer {
         bb.putLong(snap.data.length);
         Protocol.putString(bb, snap.hash);
         Protocol.putString(bb, BuildInfo.VERSION);
+        bb.put((byte) (GameLink.isHosting(gamePort) ? 1 : 0)); // is our game in the world and hosting?
         bb.flip();
         return bb;
     }

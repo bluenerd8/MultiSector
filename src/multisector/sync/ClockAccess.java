@@ -37,6 +37,11 @@ final class ClockAccess {
     }
 
     static void set(long gameMillis) {
+        set(gameMillis, false);
+    }
+
+    /** quiet: a small routine step (a friend's fast-forward), not worth a log line. */
+    static void set(long gameMillis, boolean quiet) {
         CampaignClockAPI c = Global.getSector().getClock();
         long before = c.getTimestamp();
         c.getCal().setTimeInMillis(gameMillis);
@@ -52,13 +57,13 @@ final class ClockAccess {
         long jumped = gameMillis - before;
         if (Math.abs(jumped) >= ORBIT_MIN_MILLIS) {
             float days = jumped / 86_400_000f;
-            advanceOrbits(days * c.getSecondsPerDay());
+            advanceOrbits(days * c.getSecondsPerDay(), quiet);
             Docking.reattach(); // a fleet docked at a planet moves with it
         }
     }
 
     /** Turns every planet, station, moon and asteroid orbit by this much game time (seconds). */
-    private static void advanceOrbits(float seconds) {
+    private static void advanceOrbits(float seconds, boolean quiet) {
         Logger log = Global.getLogger(ClockAccess.class);
         long t0 = System.nanoTime();
         List<LocationAPI> all = new ArrayList<LocationAPI>(Global.getSector().getStarSystems());
@@ -79,7 +84,7 @@ final class ClockAccess {
                 }
             }
         }
-        log.info(String.format(java.util.Locale.ROOT, "[MultiSector] moved %d orbits by %.2f days in %d ms%s",
+        if (!quiet || failed > 0) log.info(String.format(java.util.Locale.ROOT, "[MultiSector] moved %d orbits by %.2f days in %d ms%s",
                 moved, seconds / Global.getSector().getClock().getSecondsPerDay(), (System.nanoTime() - t0) / 1_000_000,
                 failed > 0 ? " (" + failed + " skipped)" : ""));
     }

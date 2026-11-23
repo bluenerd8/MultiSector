@@ -58,7 +58,7 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
             }
             // In a battle: join it (once the fighting starts) rather than hail.
             InteractionDialogPlugin join = JointBattle.joinDialogFor(id);
-            return pick(join != null ? join : PlayerTalk.hail(id));
+            return pick(join != null ? join : new PlayerChoice(id));
         }
         if (!s.isActive()) return null;
         if (mem.contains(FleetLocks.CLAIMED_BY)) {
@@ -87,6 +87,41 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
         BattleCreationPlugin view = JointBattle.viewFor(opponent);
         if (view != null) return new PluginPick<BattleCreationPlugin>(view, PickPriority.HIGHEST);
         return null;
+    }
+
+    /** Nexerelin replaces the game's fleet dialog with its own (invasions, diplomacy, its battle rules). */
+    private static final String NEX_ID = "nexerelin";
+    private static final String NEX_FLEET_DIALOG = "exerelin.campaign.battle.NexFleetInteractionDialogPluginImpl";
+
+    /**
+     * The fleet encounter dialog this game would open for a fleet: the
+     * game's own, or Nexerelin's when it's enabled (Nexerelin picks its own
+     * for every fleet, and expects it). Loaded by name, so MultiSector
+     * doesn't need Nexerelin to run.
+     */
+    @SuppressWarnings("deprecation")
+    static InteractionDialogPlugin fleetDialog() {
+        try {
+            if (com.fs.starfarer.api.Global.getSettings().getModManager().isModEnabled(NEX_ID)) {
+                Class<?> c = com.fs.starfarer.api.Global.getSettings().getScriptClassLoader().loadClass(NEX_FLEET_DIALOG);
+                Object o = c.newInstance();
+                if (o instanceof InteractionDialogPlugin) return (InteractionDialogPlugin) o;
+            }
+        } catch (Throwable t) {
+            com.fs.starfarer.api.Global.getLogger(NpcInteractionGuard.class)
+                    .warn("[MultiSector] couldn't open Nexerelin's fleet dialog, using the game's: " + t);
+        }
+        return new FleetInteractionDialogPluginImpl();
+    }
+
+    /**
+     * Losing every ship in a multiplayer world: get picked up by another
+     * player, or at the nearest friendly port ({@link Respawn}).
+     */
+    @Override
+    public PluginPick<InteractionDialogPlugin> pickRespawnPlugin() {
+        if (!Respawn.wanted()) return null;
+        return new PluginPick<InteractionDialogPlugin>(new Respawn(), PickPriority.HIGHEST);
     }
 
     private static PluginPick<InteractionDialogPlugin> pick(InteractionDialogPlugin p) {
@@ -119,6 +154,41 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
             dialog.getOptionPanel().clearOptions();
             dialog.getOptionPanel().addOption("Leave", "leave");
             dialog.setOptionOnEscape("Leave", "leave");
+        }
+    }
+
+    /** Another player's fleet: hail them, or escort them (follow without any dialog on their side). */
+    private static final class PlayerChoice extends Base {
+        private final int id;
+
+        PlayerChoice(int id) {
+            this.id = id;
+        }
+
+        public void init(InteractionDialogAPI dialog) {
+            this.dialog = dialog;
+            String name = Session.get().playerName(id);
+            dialog.getTextPanel().addPara("Your fleet closes on " + name + "'s.");
+            dialog.getOptionPanel().addOption("Hail " + name, "hail");
+            if (Escort.isEscorting(id)) {
+                dialog.getOptionPanel().addOption("Stop escorting " + name, "unescort");
+            } else {
+                dialog.getOptionPanel().addOption("Escort " + name + " (follow them closely)", "escort");
+            }
+            dialog.getOptionPanel().addOption("Leave", "leave");
+            dialog.setOptionOnEscape("Leave", "leave");
+        }
+
+        public void optionSelected(String optionText, Object optionData) {
+            if ("hail".equals(optionData)) {
+                InteractionDialogPlugin hail = PlayerTalk.hail(id);
+                dialog.setPlugin(hail);
+                hail.init(dialog);
+                return;
+            }
+            if ("escort".equals(optionData)) Escort.start(id);
+            if ("unescort".equals(optionData)) Escort.stop("you stopped");
+            dialog.dismiss();
         }
     }
 
@@ -232,7 +302,10 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
                 return;
             }
             granted = true;
-            dialog.getTextPanel().addPara("Connected. The fleet holds position while you deal with it.");
+            int inBattle = r.battleJson.isEmpty() ? 0 : FleetLocks.takeOverBattle(owner, handle, fleet, r.battleJson);
+            dialog.getTextPanel().addPara(inBattle > 0
+                    ? "Connected. The battle (" + inBattle + " fleets) holds while you decide which side to join."
+                    : "Connected. The fleet holds position while you deal with it.");
             dialog.getOptionPanel().clearOptions();
             dialog.getOptionPanel().addOption("Continue", "continue");
             dialog.getOptionPanel().addOption("Leave", "leave");
@@ -245,8 +318,8 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
                 return;
             }
             if ("continue".equals(optionData) && granted) {
-                // The game's own fleet dialog, exactly as for any fleet. Our watcher reports the outcome.
-                FleetInteractionDialogPluginImpl normal = new FleetInteractionDialogPluginImpl();
+                // The fleet dialog this game uses for any fleet (Nexerelin's, if it's on). Our watcher reports the outcome.
+                InteractionDialogPlugin normal = fleetDialog();
                 dialog.setPlugin(normal);
                 normal.init(dialog);
                 return;

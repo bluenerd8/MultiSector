@@ -10,6 +10,7 @@ import com.fs.starfarer.api.util.Misc;
 import multisector.net.ClockState;
 import multisector.net.Session;
 import multisector.net.SharedClock;
+import multisector.ui.MultiSectorConfig;
 import org.apache.log4j.Logger;
 import org.lwjgl.input.Keyboard;
 
@@ -27,8 +28,12 @@ import java.util.Locale;
  *     however long their game spent loading or in a market.</li>
  * <li><b>Pause:</b> pressing pause on the map pauses everyone, and anyone
  *     can resume. Pauses caused by your own menus and dialogs stay local.</li>
- * <li><b>Fast-forward:</b> follows the host. A friend's fast-forward only
- *     works while the host is fast-forwarding too.</li>
+ * <li><b>Fast-forward:</b> anyone. A friend's fast-forward is sent to the
+ *     host, the shared clock speeds up, and the host's game moves its fleets
+ *     the extra time itself (its own fast-forward key can't be pressed for
+ *     it). Everyone else is told to fast-forward too.</li>
+ * <li><b>Nobody on the map:</b> the world waits (Session, on the host's
+ *     network thread, since campaigns don't run during battles).</li>
  * </ul>
  *
  * Transient: added on each load, never saved.
@@ -39,6 +44,10 @@ public class ClockSync implements EveryFrameScript {
     private static final long DAY = 24L * HOUR;
     /** Host: after a menu, catch up if the shared clock got this far ahead. */
     private static final long HOST_CATCH_UP = HOUR;
+    /** Host, while a friend fast-forwards: the date steps forward in pieces this big (planets with it). */
+    private static final long BOOST_CATCH_UP = 6 * HOUR;
+    /** Most extra game time the host's fleets get in one frame of a friend's fast-forward. */
+    private static final float MAX_BOOST_SECONDS = 1f;
     /** Friends: correct the date when it's this far from the host's (ping jitter stays well under it). */
     private static final long CLIENT_DRIFT = 3 * HOUR;
     /** While stopped nothing moves, so line up exactly. */
@@ -60,6 +69,10 @@ public class ClockSync implements EveryFrameScript {
     private Float originalSpeedup;
     private float appliedSpeedup = -1f;
     private boolean speedupHintShown;
+    private boolean sentFast;
+    private long nextFastSend;
+    // host
+    private int shownFastBy = -1;
 
     public boolean isDone() {
         return false;
@@ -71,6 +84,7 @@ public class ClockSync implements EveryFrameScript {
 
     public void advance(float amount) {
         Session session = Session.get();
+        session.gameAlive(); // this world is open (the host tells friends when it closes)
         Session.State state = session.getState();
         if (state != Session.State.IDLE) Docking.track(); // before any catch-up below moves the planets
         if (state == Session.State.HOSTING || state == Session.State.CONNECTED) dialogPauseKey(session);
@@ -82,7 +96,7 @@ public class ClockSync implements EveryFrameScript {
         long nanos = System.nanoTime();
         try {
             if (state == Session.State.HOSTING) {
-                host(session, nanos);
+                host(session, nanos, amount);
             } else if (state == Session.State.CONNECTED) {
                 friend(session, nanos);
             }
@@ -93,12 +107,16 @@ public class ClockSync implements EveryFrameScript {
 
     // ================================================================ host
 
-    private void host(Session session, long nanos) {
+    private void host(Session session, long nanos, float amount) {
         SharedClock clock = session.getSharedClock();
         SectorAPI sector = Global.getSector();
         CampaignClockAPI c = sector.getClock();
         long local = c.getTimestamp();
         boolean map = isMapView();
+        if (map) {
+            session.markOnMap();
+            clock.setIdle(false, nanos); // we're back on the map: the world runs again now, not at the next report
+        }
         if (!clock.isStarted()) {
             if (!map) return; // start from a moment on the map, where pause means "the player paused"
             clock.anchor(local, nanos);
@@ -122,11 +140,26 @@ public class ClockSync implements EveryFrameScript {
             boolean running = clock.isRunning();
             if (localPaused == running) sector.setPaused(!running);
             CampaignUIAPI ui = sector.getCampaignUI();
-            clock.setFast(running && ui.isFastForward(), Global.getSettings().getFloat(SPEEDUP), nanos);
+            boolean hostFast = ui.isFastForward();
+            float[] asked = MultiSectorConfig.isFriendsCanFastForward() ? session.fastRequest(nanos) : null;
+            // A friend fast-forwarding while we aren't: the world speeds up anyway, and this game keeps up below.
+            boolean boosted = running && !hostFast && asked != null;
+            float mult = hostFast ? Global.getSettings().getFloat(SPEEDUP) : asked != null ? asked[1] : 1f;
+            int by = hostFast ? session.getMyId() : asked != null ? (int) asked[0] : -1;
+            clock.setFast(running && (hostFast || asked != null), mult, by, nanos);
+            if (boosted && shownFastBy != by) {
+                session.notice(session.playerName(by) + " is fast-forwarding, so the world speeds up for everyone.");
+            }
+            shownFastBy = boosted ? by : -1;
 
             long shared = clock.now(nanos);
             long behind = shared - local;
-            if (running ? behind > HOST_CATCH_UP : Math.abs(behind) > STOPPED_SNAP) {
+            if (boosted) {
+                // Our fast-forward key can't be pressed for us, so our fleets get the extra time directly,
+                // and the date (with the planets) steps forward to the shared clock in small pieces.
+                NpcSync.boostLocalFleets(Math.min(amount * (mult - 1f), MAX_BOOST_SECONDS));
+                if (behind > BOOST_CATCH_UP) ClockAccess.set(shared, true);
+            } else if (running ? behind > HOST_CATCH_UP : Math.abs(behind) > STOPPED_SNAP) {
                 // The world clock kept going while this game sat in a menu.
                 ClockAccess.set(shared);
                 if (behind > DAY) log.info("[MultiSector] caught up " + days(behind) + " days to the shared clock");
@@ -167,6 +200,7 @@ public class ClockSync implements EveryFrameScript {
         if (localPaused != wantPaused) sector.setPaused(wantPaused);
 
         capSpeedup(st.isFast() ? st.fastMult : 1f);
+        askToFastForward(session, sector, nanos);
 
         int ping = session.getPingMs();
         long target = st.extrapolate(r.arrivedNanos, nanos, ping > 0 ? ping / 2f : 0f);
@@ -185,6 +219,23 @@ public class ClockSync implements EveryFrameScript {
         wasMapView = true;
     }
 
+    /**
+     * We're holding fast-forward: ask the host to speed the world up for
+     * everyone (our own speed-up stays off until it does, so we never run
+     * ahead). Repeated every second while held, so a lost or stale request
+     * just ends.
+     */
+    private void askToFastForward(Session session, SectorAPI sector, long nanos) {
+        if (!MultiSectorConfig.isFriendsCanFastForward()) return;
+        CampaignUIAPI ui = sector.getCampaignUI();
+        boolean want = ui != null && ui.isFastForward() && !sector.isPaused();
+        float mult = originalSpeedup != null ? originalSpeedup : Global.getSettings().getFloat(SPEEDUP);
+        if (want == sentFast && (!want || nanos - nextFastSend < 0)) return;
+        sentFast = want;
+        nextFastSend = nanos + 1_000_000_000L;
+        session.requestFast(want, mult);
+    }
+
     /** "Alice paused the game", "waiting for Bob", and so on, when the shared state changes. */
     private void announce(Session session, ClockState st) {
         ClockState prev = lastShown;
@@ -201,8 +252,9 @@ public class ClockSync implements EveryFrameScript {
         }
         if (!prev.isHeld() && st.isHeld()) session.notice(waitingText(st));
         if (prev.isHeld() && !st.isHeld() && !st.isPaused()) session.notice("Done waiting; the game carries on.");
-        if (!prev.isFast() && st.isFast()) {
-            session.notice("The host is fast-forwarding. Turn on fast-forward too to keep up.");
+        if ((!prev.isFast() || prev.fastBy != st.fastBy) && st.isFast() && st.fastBy != session.getMyId()) {
+            session.notice(session.playerName(st.fastBy < 0 ? 0 : st.fastBy)
+                    + " is fast-forwarding. Turn on fast-forward too to keep up.");
         }
     }
 
@@ -230,6 +282,8 @@ public class ClockSync implements EveryFrameScript {
 
     private void resetFriendState() {
         pendingPause = null;
+        sentFast = false;
+        shownFastBy = -1;
         synced = false;
         lastSeq = -1;
         lastShown = null;

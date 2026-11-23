@@ -348,6 +348,10 @@ public final class WorldObjects implements EveryFrameScript {
     // ================================================================ applying
 
     private static void applySafely(JSONObject j) {
+        if (WorldState.handles(j)) {
+            WorldState.apply(j); // world-wide facts: raids, discoveries, relations, bounties
+            return;
+        }
         try {
             SectorEntityToken talking = NpcSync.dialogTarget();
             if (talking != null && j.optString("id").equals(talking.getId())) {

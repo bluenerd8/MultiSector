@@ -38,6 +38,10 @@ public final class SharedClock {
     private int changedBy = -1;
     private boolean fast;
     private float fastMult = 1f;
+    /** Who is fast-forwarding (player id), or -1. */
+    private int fastBy = -1;
+    /** Nobody is on the map (everyone is in a dialog, menu or battle): the world waits for them. */
+    private boolean idle;
     /** Friend name -> System.nanoTime when the hold gives up. */
     private final Map<String, Long> holds = new LinkedHashMap<String, Long>();
     private int seq;
@@ -48,6 +52,8 @@ public final class SharedClock {
         changedBy = -1;
         fast = false;
         fastMult = 1f;
+        fastBy = -1;
+        idle = false;
         holds.clear();
     }
 
@@ -99,11 +105,35 @@ public final class SharedClock {
         return true;
     }
 
-    public synchronized void setFast(boolean f, float mult, long nanos) {
-        if (f == fast && mult == fastMult) return;
+    public synchronized void setFast(boolean f, float mult, int by, long nanos) {
+        if (f == fast && mult == fastMult && (!f || by == fastBy)) return;
         reanchor(nanos);
         fast = f;
         fastMult = Math.max(1f, mult);
+        fastBy = f ? by : -1;
+    }
+
+    public synchronized boolean isFast() {
+        return fast;
+    }
+
+    public synchronized int getFastBy() {
+        return fastBy;
+    }
+
+    /**
+     * Nobody is on the map: stop the world until someone is. Otherwise a
+     * battle or a long market visit everyone sits in moves the date on by
+     * weeks, with nothing happening meanwhile.
+     */
+    public synchronized void setIdle(boolean on, long nanos) {
+        if (on == idle) return;
+        reanchor(nanos);
+        idle = on;
+    }
+
+    public synchronized boolean isIdle() {
+        return idle;
     }
 
     /** Stops the clock until that friend connects, or until maxNanos have passed. */
@@ -138,9 +168,9 @@ public final class SharedClock {
         return !holds.isEmpty();
     }
 
-    /** Running: not paused and nobody being waited for. */
+    /** Running: not paused, nobody being waited for, and someone on the map. */
     public synchronized boolean isRunning() {
-        return !paused && holds.isEmpty();
+        return !paused && holds.isEmpty() && !idle;
     }
 
     public synchronized ClockState snapshot(long nanos) {
@@ -149,15 +179,16 @@ public final class SharedClock {
         s.gameMillis = now(nanos);
         s.rate = rate(nanos);
         s.flags = (paused ? ClockState.PAUSED : 0) | (fast ? ClockState.FAST : 0)
-                | (holds.isEmpty() ? 0 : ClockState.HELD);
+                | (holds.isEmpty() ? 0 : ClockState.HELD) | (idle ? ClockState.IDLE : 0);
         s.changedBy = changedBy;
+        s.fastBy = fastBy;
         s.fastMult = fastMult;
         s.heldFor = holds.isEmpty() ? "" : holds.keySet().iterator().next();
         return s;
     }
 
     private boolean running(long nanos) {
-        return started && !paused && holds.isEmpty();
+        return started && !paused && holds.isEmpty() && !idle;
     }
 
     /** Before the rate changes: fold the time so far into the anchor. */

@@ -27,6 +27,11 @@
 	# your dialogs.
 	"moveFleetsDuringHostDialogs":true,
 
+	# Battles between NPC fleets in someone else's world (a patrol fighting pirates, say) can
+	# be joined: click one of the fleets. Their world holds the battle while you fight in it,
+	# and the ships lost come back to it.
+	"joinNpcBattles":true,
+
 	# Joining another player's battle opens a live view of it on your game, where you pilot
 	# one of your ships (your flagship unless you pick another). Off: you only get a report.
 	"jointBattleView":true,
@@ -37,6 +42,46 @@
 	# ("battle check" on the leader's game, "view check" on the joiner's, same ship ids),
 	# and the joiner's game lists any ship that differs from the leader's. For bug reports.
 	"jointBattleChecks":true,
+
+	# Host only: while nobody is on the campaign map (everyone is in a battle, a dialog
+	# or a menu), the world waits. Off: it keeps running, and your date jumps ahead when
+	# you're back (a few minutes of battle is weeks of game time).
+	"holdWhileEveryoneBusy":true,
+	# Host only: when a friend fast-forwards, the world speeds up for everyone, your game
+	# included. Off: only the host's fast-forward counts.
+	"friendsCanFastForward":true,
+
+	# Friends: if you load the shared world before the host is in the game, yours waits,
+	# paused, and keeps trying to join. F8 lets you stop waiting.
+	"waitForHost":true,
+	# Friends: when the host ends the session (stops hosting, or quits), your character is
+	# saved and you go back to the main menu, so nobody plays on in a world that's gone.
+	"endWhenHostLeaves":true,
+	# Friends: when the host saves, your game saves too: your copy of the world, and your
+	# character (the export the launcher uses next time).
+	"saveWithHost":true,
+	# Host only: after you load the world, it waits (paused) until everyone who was playing
+	# at your last save has joined. Unpausing stops the wait.
+	"waitForAllPlayers":false,
+
+	# Starsector stops your fleet while the cargo, refit, character or map screen is open,
+	# but the shared world keeps going. On: your fleet keeps flying its course meanwhile.
+	# Off: it stays put (anchored) until you close the screen. Also switchable in F8.
+	"keepMovingInMenus":true,
+
+	# One world, one set of discoveries: surveying a planet, exploring ruins and similar
+	# one-off finds count for everyone (so the same ruins can't be looted twice).
+	"shareSurveys":true,
+	# Raids, disruptions and bombardments on planets reach everyone's world: the same
+	# industries are disrupted and the same planets unsettled.
+	"shareRaids":true,
+	# Faction bounties on star systems (the ones paid per kill) come from the host's
+	# world, so everyone sees the same ones. Mission bounties scaled to your own fleet
+	# stay your own.
+	"shareSystemBounties":true,
+	# Relations between NPC factions (wars and peace, including Nexerelin's diplomacy)
+	# follow the host's world. Your own reputation with each faction stays yours.
+	"shareFactionRelations":true,
 
 	# The players panel on the campaign map: who's where and doing what.
 	# The hotkey shows or hides it; more detail is in the Multiplayer window.

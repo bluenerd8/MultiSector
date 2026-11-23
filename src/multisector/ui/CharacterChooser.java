@@ -35,7 +35,7 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
 
     private static final float WIDTH = 780f;
     private static final float HEIGHT = 620f;
-    private static final float HEADER_H = 175f;
+    private static final float HEADER_H = 210f; // room for the "bring my character back" checkbox
     private static final float LEFT_W = 250f;
 
     // ------------------------------------------------------- pending choice
@@ -67,10 +67,47 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
         return pendingHost != null;
     }
 
-    /** Called every frame; opens the chooser once after loading, when the campaign UI is free. */
+    /**
+     * Called every frame; opens the chooser once after loading, when the
+     * campaign UI is free. A player coming back to a world they've played
+     * in before gets their character from last time straight away (unless
+     * they asked to be asked).
+     */
     public static void openIfPending() {
         if (!isPending() || autoShown) return;
+        if (GamePrefs.isAutoCharacter() && bringBack()) return;
         if (open()) autoShown = true;
+    }
+
+    /** Your character from your last session in this world, brought in without asking. False if there isn't one. */
+    private static boolean bringBack() {
+        JSONObject world = ProfileApplier.readWorldExport();
+        if (world == null) return false;
+        autoShown = true;
+        String name = exportName(world);
+        if (name.isEmpty()) name = pendingName == null ? "Captain" : pendingName;
+        try {
+            Session.get().notice(ProfileApplier.applyImport(world, name, pendingDownloadId));
+        } catch (Exception e) {
+            Global.getLogger(CharacterChooser.class).warn("[MultiSector] couldn't bring back our character", e);
+            autoShown = false; // show the chooser instead
+            return false;
+        }
+        Session.get().notice("Welcome back, " + name + ": your character from last time. To choose each time instead, "
+                + "press F8 and switch off \"Bring my character back\".");
+        joinNow(name);
+        return true;
+    }
+
+    private static void joinNow(String name) {
+        String host = pendingHost;
+        int port = pendingPort;
+        clearPending();
+        Session s = Session.get();
+        if (host != null && !s.isActive()) {
+            s.join(host, port, name);
+            s.notice("Joining " + host + "...");
+        }
     }
 
     /** Opens on the next free frame, e.g. after another window has closed. */
@@ -90,7 +127,13 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
     private final List<TooltipMakerAPI> elements = new ArrayList<TooltipMakerAPI>();
     private TextFieldAPI nameField;
 
-    private final JSONObject export = ProfileApplier.readExport();
+    /** Your character from your last session in this world, or null. */
+    private final JSONObject world = ProfileApplier.readWorldExport();
+    /** The character you exported by hand (F8), or null. */
+    private final JSONObject manual = ProfileApplier.readExport();
+    /** Which of the two "import" means: world (true) or the manual export. */
+    private boolean worldMode = world != null;
+    private JSONObject export = world != null ? world : manual;
     private boolean importMode = export != null;
     private String nameText;
     private Gender gender = Gender.MALE;
@@ -147,12 +190,22 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
     private void onButton(String id) {
         rememberName();
         error = null;
-        if (id.equals("mode_import") && export != null) {
-            if (!importMode) {
-                String exported = exportName(export);
+        if (id.equals("mode_world") && world != null) {
+            String exported = exportName(world);
+            if (!exported.isEmpty()) nameText = exported;
+            worldMode = true;
+            export = world;
+            importMode = true;
+        } else if (id.equals("mode_import") && manual != null) {
+            if (!importMode || worldMode) {
+                String exported = exportName(manual);
                 if (!exported.isEmpty()) nameText = exported;
             }
+            worldMode = false;
+            export = manual;
             importMode = true;
+        } else if (id.equals("auto")) {
+            GamePrefs.setAutoCharacter(!GamePrefs.isAutoCharacter());
         } else if (id.equals("mode_new")) {
             importMode = false;
         } else if (id.equals("male")) {
@@ -200,14 +253,7 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
         Session.get().notice(msg);
 
         // Now connect, under the chosen name.
-        String host = pendingHost;
-        int port = pendingPort;
-        clearPending();
-        Session s = Session.get();
-        if (host != null && !s.isActive()) {
-            s.join(host, port, name);
-            Session.get().notice("Joining " + host + "...");
-        }
+        joinNow(name);
         if (holder != null) holder.dismiss();
     }
 
@@ -231,9 +277,15 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
         head.addTitle("Choose your character");
         head.addPara("You're joining a MultiSector world. Your character and fleet replace the host's in your copy; "
                 + "the world itself stays exactly as the host has it.", gray, 6f);
-        ButtonAPI imp = checkbox(head, "Use my exported character", "mode_import", 260f, importMode, 12f);
-        imp.setEnabled(export != null);
-        ButtonAPI fresh = checkbox(head, "New character", "mode_new", 200f, !importMode, 0f);
+        ButtonAPI back = null;
+        if (world != null) {
+            back = checkbox(head, "Continue as " + exportName(world), "mode_world", 230f, importMode && worldMode, 12f);
+        }
+        ButtonAPI imp = checkbox(head, "Use my exported character", "mode_import", 230f, importMode && !worldMode,
+                back == null ? 12f : 0f);
+        imp.setEnabled(manual != null);
+        if (back != null) imp.getPosition().rightOfTop(back, 10f);
+        ButtonAPI fresh = checkbox(head, "New character", "mode_new", 160f, !importMode, 0f);
         fresh.getPosition().rightOfTop(imp, 10f);
         head.addPara("Name (you can change it):", 12f);
         nameField = head.addTextField(320f, 4f);
@@ -241,6 +293,11 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
         nameField.setHandleCtrlV(true);
         nameField.setText(nameText);
         if (error != null) head.addPara(error, Misc.getNegativeHighlightColor(), 6f);
+        if (world != null) {
+            ButtonAPI auto = checkbox(head, "Next time, bring my character back without asking", "auto", 420f,
+                    GamePrefs.isAutoCharacter(), 6f);
+            auto.setChecked(GamePrefs.isAutoCharacter());
+        }
         add(head, 0f, 0f);
 
         if (importMode) buildImport(hl, gray);
@@ -255,6 +312,7 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
             add(t, 0f, HEADER_H);
             return;
         }
+        if (worldMode) t.addPara("Your character as you left them at your last session in this world.", hl, 10f);
         JSONObject ch = export.optJSONObject("character");
         String portrait = ch == null ? "" : ch.optString("portrait", "");
         if (loadSprite(portrait)) t.addImage(portrait, 128f, 128f, 10f);

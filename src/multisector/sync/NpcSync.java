@@ -204,6 +204,14 @@ public class NpcSync implements EveryFrameScript {
     }
 
     /** Follower: the owner's handle for a fleet we're showing on their behalf, or -1 if it isn't one. */
+    /** Follower: our fleet (stand-in or steered copy) for one of the owner's fleets, or null. */
+    static CampaignFleetAPI fleetOfHandle(int handle) {
+        NpcSync s = current;
+        if (s == null) return null;
+        Driven d = s.driven.get(handle);
+        return d == null ? null : d.fleet;
+    }
+
     static int handleOf(CampaignFleetAPI f) {
         NpcSync s = current;
         if (s == null) return -1;
@@ -503,6 +511,38 @@ public class NpcSync implements EveryFrameScript {
     }
 
     /** An ordinary NPC fleet: not a player, not one of our stand-ins, not a station. */
+    private static int boostFailures;
+
+    /**
+     * Host, while a friend fast-forwards and we don't: our own fleet and the
+     * NPC fleets around us get this much extra game time, as if this game
+     * were fast-forwarding too (the game's own fast-forward only follows its
+     * key). Fleets in a battle, held by a player, steered to another world or
+     * hidden are left alone. Moved in small steps, like the game's own.
+     */
+    static void boostLocalFleets(float seconds) {
+        if (seconds <= 0f || boostFailures >= MAX_FAILURES) return;
+        CampaignFleetAPI me = Global.getSector().getPlayerFleet();
+        LocationAPI loc = me == null ? null : me.getContainingLocation();
+        if (loc == null) return;
+        boolean hyper = loc.isHyperspace();
+        for (CampaignFleetAPI f : new ArrayList<CampaignFleetAPI>(loc.getFleets())) {
+            boolean mine = f == me;
+            if (!mine && !isNpc(f)) continue;
+            com.fs.starfarer.api.campaign.rules.MemoryAPI mem = f.getMemoryWithoutUpdate();
+            if (mem.getBoolean(DRIVEN_FLAG) || mem.getBoolean(HIDDEN_FLAG)) continue;
+            if (f.getBattle() != null || FleetLocks.isHeld(f)) continue;
+            if (!mine && hyper && dist(f.getLocation(), me.getLocation()) > PUB_RADIUS) continue;
+            try {
+                for (float left = seconds; left > 0f; left -= MAX_STEP_SECONDS) f.advance(Math.min(left, MAX_STEP_SECONDS));
+            } catch (RuntimeException e) {
+                if (++boostFailures == MAX_FAILURES) {
+                    Global.getLogger(NpcSync.class).warn("[MultiSector] stopped speeding up fleets for a friend's fast-forward after repeated errors", e);
+                }
+            }
+        }
+    }
+
     private static boolean isNpc(CampaignFleetAPI f) {
         if (f.isPlayerFleet() || f.isStationMode()) return false;
         if (f.getMemoryWithoutUpdate().getBoolean(PuppetManager.PUPPET_FLAG)) return false;
@@ -568,12 +608,12 @@ public class NpcSync implements EveryFrameScript {
                 if (d == null) continue;
                 driven.put(info.handle, d);
             }
-            if (d.hash != info.hash && d.fleet != FleetLocks.activeFleet()) {
+            if (d.hash != info.hash && !FleetLocks.isActive(d.fleet)) {
                 match(d, info); // ships lost or gained on the owner's game, or never matched yet
                 d.hash = info.hash;
                 d.extraHash = 0; // the ships may be new: put their damage back on
             }
-            if (d.extraHash != info.extra.hashCode() && d.fleet != FleetLocks.activeFleet()) {
+            if (d.extraHash != info.extra.hashCode() && !FleetLocks.isActive(d.fleet)) {
                 applyExtra(d.fleet, info);
                 d.extraHash = info.extra.hashCode();
             }

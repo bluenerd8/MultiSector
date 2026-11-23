@@ -612,3 +612,115 @@ From testing 0.0.38: commanding works, but the crash came back when ordering shi
 - **Autopilot:** flying the ship yourself (any move or fire key) takes it off autopilot, as in the game (`shipControlsTurnOffAutopilot`). The game's own switch can't see our controls, since they're blocked locally and sent to the leader. It stays off until autopilot is switched off and on again. Giving your own ship an order still puts it on autopilot to carry the order out, and pressing a control takes it back.
 - **The view runs unpaused.** It's only paused under the deployment panel (`CombatUIAPI.isShowingDeploymentDialog`). It's unpaused under the command map (so transferring command works) and otherwise, and left alone under other menus. When the leader pauses, the view runs at 2% speed with every ship held where the leader's paused battle has it, instead of pausing.
 - `PROTOCOL_VERSION` 20.
+
+## 21. One shared world (0.1.1)
+
+From testing 0.0.39: autopilot behaves. Transfer command turned the joiner into a stuck command shuttle, and a crash still happened with nobody doing anything. Both are fixed, along with a batch of world-state work.
+
+### Battle view fixes
+
+- **The crash** ("Cannot invoke ReadableVector2f.getX() because src is null") was in the battle view, inside a ship system: `Ship.advance` → `systems.<displacer>.systemActivated` → `Vector2f.set(null)`. The view switches systems on directly (`forceState`) to mirror the leader. A teleport system (Phase Skimmer, displacer, phase teleporter: types `DISPLACER` and `TELEPORTER`) jumps to a spot that only the game's own "use system" sets, so it was still null. The view now only switches on systems that change the ship's own stats or engines (`STAT_MOD`, `ENGINE_MOD`, `PHASE_CLOAK`, `SHIELD_MOD`, `AMMO_RELOAD`, `FAST_RELOAD`, from the system's spec JSON). Teleports, drones, weapon and EMP systems aren't switched on; the stream moves those ships anyway. It's logged once per system. Any Wolf or Afflictor in the fight could set it off, which fits "crashed while doing nothing".
+- **Transfer command:** the game flies you to the new ship in a command shuttle, a ship of its own. The view removed it as "a ship the battle view didn't make" (log: `removing ... shuttlepod`), leaving camera and controls on a ship that no longer existed. Shuttles are now left alone and can't be hurt. While you're in one, your old ship flies on its AI on the leader's game; when the shuttle lands, the controls move to the new ship as before. The leader doesn't announce its own command shuttle to views.
+- **Which systems the view switches on, audited.** Beyond the type check, a system's script must be the game's own (`com.fs.starfarer.api.impl.combat`, or the self-contained ones in `data/shipsystems/scripts`). It also must not be one that acts on a target, the mouse or the AI's chosen spot, or that spawns things: acausal disruptor, drone strike, entropy amplifier, interdictor array, mine strike (and its station version), mote control, and the Dweller and Threat systems (convulsive lunge, darkened gaze, tenebrous expulsion, energy lash, extraction protocol, fragment volley, incursion mode, construction swarm). Convulsive lunge does `new Vector2f(ship.getMouseTarget())` with no check: the displacer crash again. Mods' system scripts can't be checked, so they're shown without being switched on; their ships still move with the stream.
+- **Thrusters on the ship you fly.** The view blocked every command on it, including movement, and only hinted "accelerating", so its turning, strafing and braking jets never showed. Movement commands now go through on the view (they only light the engines; the stream still decides where the ship is), along with picking a weapon group. Weapons, shields, systems and venting stay blocked. The leader's engine state is also given to it, for autopilot and the moment you're in the command shuttle.
+- **The leader follows the ship the controls are for.** Control datagrams always carried the flown ship's id. The leader now switches the joiner's helm to that ship too, not only on the `cpilot` message (TCP, through the host), so a transfer of command takes effect with the first control packet. Autopilot packets don't move the helm.
+- **Spots for flown ships' systems.** On the leader, the joiner's flown ship has its mouse target and the AI's `SYSTEM_TARGET_COORDS` kept at the joiner's mouse. Teleports, mine strikes and the like then go where the joiner aims, and never read an empty spot.
+- **Transfer command, checked against the game.** `CombatState.setPlayerShip` gives the old ship back the AI it had before you flew it (the view's do-nothing AI) and clears the new ship's while you fly it. The command shuttle keeps no AI record. When you have no ship at all, the engine shows a stand-in "Command Shuttle" (`shuttlepod_xfer`, `getFakePlayerShip`): that's the shuttle interface seen when the view deleted the real transfer shuttle.
+- **Comparison checks:** a wreck is side 100 on every game, so wrecks' sides aren't reported as differences any more (0.0.38's "side 100, leader says 1" lines were that).
+- **The view's do-nothing AI stays on.** The game gives the old flagship a real AI when command is transferred. A real AI in the view fights and uses systems by itself. Four times a second, any view ship other than the one you fly whose AI isn't ours gets it back (logged).
+
+### Time
+
+- **The world waits while nobody is on the map** (`holdWhileEveryoneBusy`). After each joint battle the log said "caught up 13-24 days": the shared clock ran on through the whole battle, then everyone's date jumped, with nothing simulated meanwhile. The host's network thread now holds the clock (`SharedClock.setIdle`, flag `IDLE` in `CLOCK`) while no player is on the campaign map. A player's map, or map while paused, counts as on it; dialogs, menus and battles don't. The check runs on the network thread because the campaign doesn't run during battles; a position more than 3 s old counts as not on the map. The host's own map frames clear it at once.
+- **Anyone can fast-forward** (`friendsCanFastForward`). A friend holding fast-forward sends `FAST_REQUEST` (on, their `campaignSpeedupMult`), repeated every second. The host's shared clock then runs fast (`fastBy` in `CLOCK`), so every friend's speed-up cap lifts. The host's own fast-forward flag can only be set by its key: `CampaignState.fastForward` is private and re-read from the keyboard every frame. So while a friend fast-forwards and the host doesn't, the host's game gives its own fleet and the NPC fleets around it the extra time itself (`NpcSync.boostLocalFleets`, in 0.1 s steps, at most 1 s per frame). The date and the planets step forward in 6-hour pieces. Everyone is told who is fast-forwarding.
+
+### Session rules (`SessionGuard`)
+
+- **Waiting for the host** (`waitForHost`): a friend's world that has joined (or tried to) stays paused while not connected, and retries every 6 s. Loading before the host, or the host's game restarting, never lets that copy run on alone. F8 has "Stop waiting".
+- **The host ends the session** (`endWhenHostLeaves`): a BYE "The host stopped hosting". A host whose world hasn't run a frame (campaign, battle or battle view) for 90 s (back at the main menu, say) stops hosting by itself, so its port closes and nobody can join a session with no world behind it; loading the world again hosts again. Friends' characters are saved and their world saved, then a dialog takes them to the main menu (or lets them stay offline). A lost connection without a goodbye is waited out instead.
+- **Saving together** (`saveWithHost`): the host's `beforeGameSave` sends `HOST_ORDER {"k":"save"}`; friends save on their next map frame (from input handling, like `HostSaver`). A friend's every save also saves their character for that world (section 22).
+- **Waiting for everyone** (`waitForAllPlayers`, off by default): the host's save remembers who was playing (`$multisector_lastPlayers`). After loading, the clock holds for each of them, using the joining hold, so it ends when they connect or when someone unpauses.
+- **Another world loaded:** a session started in one world ends when a different world (seed) loads. Reloading the same world while hosting tells friends their copy is now ahead and to download again.
+
+### World state (`WorldState`, on the world-event channel)
+
+| What | Who sends | How it's applied |
+|---|---|---|
+| Raids, disruptions, bombardments (`ColonyPlayerHostileActListener`) | The player who did it, once the dialog closes | Disrupted industries (longer only), unrest (`RecentUnrest`, more only), raid timestamp, raid-defender bonus, pollution, size reduction, or decivilization. Deferred while the receiver is docked there. |
+| Surveys, `$ruinsExplored`, `$explored`, `$siteExplored`, `$defenderFleetDefeated`, `$hasDefenders` false | Whoever's there (scanned every 2 s, arriving only takes stock) | Raised to match (`Misc.setFullySurveyed`/`setPreliminarySurveyed`), never lowered |
+| Relations between NPC factions | Host, every 5 s on change, every 60 s regardless | Pairs involving the player faction are skipped: reputation stays per player |
+| System bounties (`SystemBountyIntel`, not commerce-mode) | Host, every 10 s on change | Missing ones are posted, extras of the friend's own game ended (usually before they're shown), elapsed time and duration matched. Payments stay per player. |
+
+Not shared yet: NPC factions' own raids, expeditions and invasions; pirate and Pathers bases; market ownership; player colonies.
+
+### Markets
+
+Ship and item stock already came from the host on docking. Now, after any trade at a shared submarket (the host's own, or a friend's), the host sends the new stock to every player docked at that market (`FleetState.dockedAt`), at most twice a second. Stock that arrives while the trade screen is open is applied when it closes, instead of being dropped. A ship someone just bought can no longer still be for sale on another player's screen.
+
+### Players together
+
+- **Escort:** clicking another player's fleet now offers Hail or Escort. Escorting flies a little behind their fleet with no dialog on either side. It clears any plotted course, follows through the jump point nearest where they were last seen, and ends when you set another course or they leave.
+- **Fleets in menus** (`keepMovingInMenus`, F8 switch): in the cargo, refit, character or map screen (not dialogs), your fleet keeps flying its course at the shared clock's speed, instead of freezing while the world goes on. Off: it stays put.
+- **Respawn:** losing every ship opens MultiSector's respawn (`CampaignPlugin.pickRespawnPlugin`) when someone else is playing. It's the game's new start (a Wayfarer and a Kite, crew, supplies, fuel; credits, officers and mission items kept, other cargo lost). You're placed next to the player you pick, or at the nearest friendly port.
+
+### NPC battles
+
+A battle between NPC fleets in the world you follow can now be joined (`joinNpcBattles`). The owner's claim answers with the whole battle: every fleet in it is held and described (handle, side, exact ships). The follower rebuilds each, puts them into a local battle (`FactoryAPI.createBattle`, then `join`), and the normal fleet dialog's "join the battle" takes over. When the dialog closes, each fleet's losses go back separately, and the local battle is left. The owner's battle goes on with what's left. Battles with a player or stand-in in them, or with a fleet the owner doesn't publish, are refused as before.
+
+### Nexerelin
+
+- Taking over a held NPC fleet opened the game's own `FleetInteractionDialogPluginImpl`, but Nexerelin replaces that dialog for every fleet (`NexFleetInteractionDialogPluginImpl`, `MOD_GENERAL`). With Nexerelin enabled, its dialog is now loaded by name, so there's no compile dependency.
+- Faction relations (its diplomacy) follow the host. Its invasions, market transfers and alliances still run separately on each game.
+- The Nexerelin in this install is 0.10.4c for 0.95.1a and won't load on 0.98.5a; it needs a 0.98 build.
+
+### Launcher
+
+- **Host and launch:** starts sharing the save, makes it the newest (so the main menu's Continue loads it), and starts the game. **Join and launch:** check, download, start.
+- **Update MultiSector:** fetches a release zip from this repo's GitHub releases (the newest, or the host's build when the check finds a mismatch, `LobbyClient.VersionMismatch`). It's unpacked to `mods/MultiSector.update`. A script waits for the launcher to exit, mirrors it over the mod (keeping `multisector.json`) and reopens the launcher. It refuses while Starsector runs or while hosting.
+- The last hosted save is remembered.
+
+`PROTOCOL_VERSION` 21 (`CLOCK` gained `fastBy`; new `FAST_REQUEST` and `HOST_ORDER`).
+
+## 22. Joining without friction (0.1.1)
+
+The aim: a friend opens the launcher, clicks one button, clicks Continue, and plays. Every step that used to need knowing something (which mods, which character, whether the host is ready, whether the copy is current) is now handled or explained where it happens.
+
+### Before the game starts (launcher)
+
+- **Mods follow the host.** Join and launch compares the friend's enabled mods with the host's. If they differ and every one of the host's is installed, it switches Starsector's `mods/enabled_mods.json` to exactly the host's list (plus MultiSector). The friend's own list is kept the first time in `enabled_mods.json.multisector-backup`, and **Put my mods back** restores it. If a mod isn't installed, it stops and names it rather than starting a game whose save won't load. It won't change the list while Starsector runs, since the game only reads it at start. **Use the host's mods** does the switch alone.
+- **MultiSector is always ticked.** Launching from the launcher ticks MultiSector in the game's mod list if it isn't.
+- **Is the host ready?** `LOBBY_INFO` ends with a byte saying whether the host's game is in the world and hosting (its launcher tries the game port on loopback). The friend's launcher then also tries that port across the network. It says "in the world and hosting", "not hosting yet (download now; your game waits for theirs)", or "hosting, but this PC can't reach it" with the firewall fix to ask for.
+- **The host's firewall.** The Host tab reads Windows Firewall through PowerShell's firewall commands, which need no admin rights and don't depend on the Windows language. It accepts MultiSector's port rules, or allow rules for the game's `java.exe` and `javaw.exe` on public networks (what clicking Allow on Windows' prompt makes; Hamachi is usually public), and flags any block rule for them, since a block beats an allow. If friends would be blocked, **Open it for friends** runs `tools/firewall.cmd`, which asks for admin, and checks again.
+- **Mismatched builds** show on the host's launcher too ("Febl has 0.0.39 and you have 0.1.1").
+- **Any save, any build.** A save doesn't need making again for a new MultiSector build. The game doesn't check a mod's version when loading: `descriptor.xml` only records it, and rewrites it on the next save. MultiSector keeps almost nothing in a save, just its ability-bar button (`MultiplayerAbility`, unchanged since it was added) and a few string flags. A save never played with MultiSector gets it when it loads. The Host tab shows which version last saved each one.
+- **Updating mid-session.** Update MultiSector works while Starsector runs: it downloads and stages first, asks you to save and quit, and swaps the mod once the game has closed. It then carries on with what you were doing: hosting the same save (Host and launch), or joining the same host (Join and launch). It's kept in the launcher's prefs (`resume`, ignored after 20 minutes). A friend's launcher that's waiting for the host notices when they come back on another build, and offers that build; once updated, it joins by itself.
+
+### Coming back as yourself (character)
+
+- Your character in a shared world is saved by MultiSector to its own file per world (`multisector_world_<seed>.json` in `saves/common`): at every save while connected, and when you leave. Your hand-made export (F8, Export character) is never overwritten by play.
+- When a fresh download of a world you've played in loads, you come straight back as that character ("Welcome back"), with no chooser (`GamePrefs.autoCharacter`, on by default; the chooser has a checkbox and F8 a switch). A new world, or no saved character, opens the chooser, which now offers "Continue as <name>" first, then your export, then a new character.
+
+### Always the host's current world (fresh copies)
+
+- **World ids.** Each load of a world gets a random id. A hosting game writes it into every save it makes (`$multisector_epoch`), so the copy a friend downloads says which load of the host's world it came from. Friends' saves never change it. As a friend joins, the host sends its current id (`HOST_ORDER {"k":"epoch"}`), and again if it loads its world again while hosting.
+- **A copy that doesn't match** (the host loaded a save since, or it's a copy from an earlier session) opens "This copy of the world isn't the host's any more": **Get a fresh copy** or **Play on in this copy**. Copies from before world ids can't tell, and are left alone.
+- **Getting a fresh copy:** your character is saved, you leave the session and go to the main menu without saving the old copy, and the game asks the launcher for the world (`saves/common/multisector_rejoin.json`). The launcher polls for that every 2 s, downloads the host's world (a fresh save, with the usual hold), and says "click Continue". On load you come back as yourself (above) and join. F8 has **Get a fresh copy** at any time while connected.
+- **When the host ends the session,** "Return to the main menu" also asks the launcher to wait for them. Every 10 s it checks whether their game is in the world and hosting again, then downloads it. It gives up after an hour or on **Stop waiting for the host**. A request more than 30 minutes old is ignored.
+
+### Host side
+
+- **A world that closes stops hosting.** A host with no world frames for 90 s stops hosting (BYE to friends) instead of keeping a session open with no world, which a waiting friend's launcher would mistake for "hosting".
+- **Reconnects replace the old connection.** A player connecting again under the same name from the same address (after a drop) replaces their old connection at once. That connection's cleanup still frees their locks and battles, but doesn't announce a leave. Before, the old one lingered as a ghost player until it timed out (15 s).
+
+## Still to do
+
+Kept here so they aren't lost between test rounds:
+
+- **NPC factions' own activity** is still rolled separately on every game: their raids, expeditions, invasions, pirate and Pathers bases, inspections, and commodity events. Fixing it means switching those managers off on friends' games and copying the host's results, one kind at a time.
+- **Market ownership** (Nexerelin invasions, and any mod that moves markets) and **player colonies** aren't shared. A safe ownership change needs Nexerelin's own transfer code, to be tested once a 0.98 build of Nexerelin is installed. Colonies are larger still.
+- **NPC battles a friend joins** keep fighting on the owner's game meanwhile, so both games can wear down the same fleets. Pausing the owner's copy of the battle needs a way to hold its autoresolve.
+- **Joint battle view:** no objectives (so no capture orders), the joiner's ship answers one ping late, and muzzle flashes, armour damage marks and the systems the view can't switch on (teleports, drones, EMP, targeted systems, and all of mods' own system scripts) aren't shown. Showing mods' systems safely would need the leader to stream each system's effect, not just its state.
+- **Friends' characters in the host's save** (agreed design, not built): every player's character stored inside the host's save at each shared save, dormant unless hosting, so a rewind rewinds everyone and a friend can recover theirs from the host.
+- **Fast-forward from a friend** moves the host's fleets and date, not the host's whole simulation; the host's own fast-forward key can't be pressed for them.
+- **The updater** works once a build is published as a GitHub release with its zip.
+- **Mod updates beyond MultiSector:** the launcher can match which mods are enabled, but can't install a mod the host has and the friend doesn't.

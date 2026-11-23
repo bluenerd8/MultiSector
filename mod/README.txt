@@ -19,17 +19,17 @@ PLAYING OVER HAMACHI
   (keep a shortcut to it on your desktop).
 
   Host:
-    1. In the game, save. Then in the launcher, "Host a game" tab:
-       pick that save and click "Start hosting".
-    2. Send friends the address the launcher shows (25.x.x.x).
-    3. Click "Launch Starsector" and load that save. The game starts
-       hosting by itself. Keep the launcher open while friends download.
+    1. "Host a game" tab: pick the save and click "Host and launch".
+    2. Click Continue on the game's main menu. The game starts hosting by
+       itself. Send friends the address the launcher shows (25.x.x.x), and
+       keep the launcher open while they download.
 
   Friends:
-    1. "Join a game" tab: type the host's address, click "Check host".
-       It warns you if your mods don't match the host's.
-    2. Click "Download save", then "Launch Starsector", then Continue on
-       the main menu.
+    1. "Join a game" tab: type the host's address, click "Join and launch".
+       It switches your mods to the host's if they differ ("Put my mods
+       back" undoes it), and offers the host's MultiSector build if yours
+       differs. It also says whether the host's game is ready.
+    2. Click Continue on the game's main menu.
     3. The game asks you to choose your character: your exported one (see
        below) or a new one (name, portrait, starting fleet). Then it joins
        the host by itself. The host's world stays as it is; only the
@@ -49,7 +49,17 @@ PLAYING OVER HAMACHI
   - Pause on the map pauses everyone. Anyone can unpause.
   - Your own menus and markets only pause your game; your date catches
     up when you close them.
-  - Fast-forward follows the host. Turn yours on when they do.
+  - Anyone can fast-forward: the world speeds up for everyone.
+  - While everyone is in a battle, dialog or menu, the world waits.
+  - In the cargo, refit or map screen your fleet keeps flying its course
+    (F8 switches it to stay put).
+  - Load before the host and your game waits, paused, until it can join.
+    When the host ends the session, you're saved and sent to the menu,
+    and the launcher fetches their world again once they're back.
+  - Next time you join a world, you're back as your character from last
+    time. If your copy doesn't match the host's, the game offers a fresh
+    copy (one click; the launcher downloads it). F8 has it too.
+    When the host saves, everyone saves.
   - When you download, the host's game saves a fresh copy, and everyone
     waits (paused) until you're in. Unpause to stop waiting.
   - Where players are together, everyone sees the same NPC fleets: in a
@@ -59,7 +69,8 @@ PLAYING OVER HAMACHI
     objectives (comm relays, sensor arrays...) are shared everywhere.
   Players far apart in hyperspace each have their own hyperspace fleets.
 
-  Click another player's fleet to hail them. They can answer or decline.
+  Click another player's fleet to hail or escort them (escort follows
+  them closely, through jump points too). A hail can be answered or declined.
   While you talk, both fleets hold still. You can offer each other
   credits, cargo and ships; what you offer comes back if they say no.
 
@@ -69,7 +80,17 @@ PLAYING OVER HAMACHI
   and you fly one of your own ships: WASD move, Q/E
   strafe, mouse aims, left button fires group 1-7, right button shields,
   F system, V vent. Your other ships fight beside theirs under the battle
-  AI. Losses and damage are applied to your fleet afterwards.
+  AI. Losses and damage are applied to your fleet afterwards. Battles
+  between NPC fleets can be joined too: click one of the fleets.
+
+  Shared by everyone: raids and bombardments, planet surveys and explored
+  ruins, wars between factions, and faction bounties on star systems.
+  Lose your whole fleet and you can be picked up next to another player.
+
+  UPDATING: the launcher's "Update MultiSector" button installs the newest
+  build. With the game open, it updates once you save and quit, then hosts
+  your save (or joins your host) again. Your multisector.json is kept.
+  Your saves work with every MultiSector build: no new game needed.
 
   The players panel (top right of the map, F7 hides it) shows where the
   others are and what they're doing. F8 shows their fleet, level and
@@ -85,6 +106,7 @@ SETTINGS
   data\config\multisector.json : hotkey (default F8) and port (default 7777)
     holdWhileJoining: pause everyone while a friend joins (default on)
     syncNpcFleets: show the host's NPC fleets in shared systems (default on)
+    The file explains every other setting (time, saving, what's shared).
     showPlayersHud, hudHotkey, hudCorner, hudOffsetX/Y: the players panel
 
 UNINSTALL

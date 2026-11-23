@@ -32,6 +32,22 @@ final class GameLink {
     private GameLink() {
     }
 
+    /** Is the game running a world and hosting? (Its port answers on this PC.) */
+    static boolean isHosting(int gamePort) {
+        Socket s = new Socket();
+        try {
+            s.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(), gamePort), 500);
+            return true;
+        } catch (IOException e) {
+            return false;
+        } finally {
+            try {
+                s.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
     /** Asks the game to save now because friend is about to download. Waits up to about 25 s. */
     static Result requestSave(int gamePort, String friend) {
         Socket s = new Socket();

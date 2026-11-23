@@ -58,6 +58,17 @@ public final class ProfileApplier {
         }
     }
 
+    /** Your character from your last session in this world (saved by MultiSector), or null. */
+    public static JSONObject readWorldExport() {
+        try {
+            String text = Global.getSettings().readTextFileFromCommon(
+                    CharacterExporter.worldFile(Global.getSector().getSeedString()));
+            return text == null || text.trim().isEmpty() ? null : new JSONObject(text);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     // ================================================================ import
 
     /** Brings in the exported character, optionally renamed. Returns a message for the player. */

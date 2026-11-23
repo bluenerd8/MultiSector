@@ -93,6 +93,10 @@ final class JointCombat {
     private static final int K_W = 1, K_S = 2, K_A = 4, K_D = 8, K_Q = 16, K_E = 32, K_FIRE = 64, K_DECEL = 128;
     /** The joiner switched their ship to autopilot: the leader gives it its AI. */
     private static final int K_AUTO = 256;
+    /** Commands the flown ship in the view may carry out itself: they only show (engines, the selected group). */
+    private static final java.util.EnumSet<ShipCommand> LOCAL_COMMANDS = java.util.EnumSet.of(ShipCommand.SELECT_GROUP,
+            ShipCommand.ACCELERATE, ShipCommand.ACCELERATE_BACKWARDS, ShipCommand.DECELERATE, ShipCommand.TURN_LEFT,
+            ShipCommand.TURN_RIGHT, ShipCommand.STRAFE_LEFT, ShipCommand.STRAFE_RIGHT);
     /** Toggle counters in an input packet: shield, system, vent, fighters, autofire. */
     private static final int TOGGLES = 5;
 
@@ -396,6 +400,7 @@ final class JointCombat {
             Set<ShipAPI> seen = java.util.Collections.newSetFromMap(new IdentityHashMap<ShipAPI, Boolean>());
             for (ShipAPI ship : engine.getShips()) {
                 if (ship.isFighter() || ship.getParentStation() != null || ship.getFleetMember() == null) continue;
+                if (ship.isShuttlePod()) continue; // a command shuttle: not a ship of the battle
                 seen.add(ship);
                 if (ids.containsKey(ship)) continue;
                 int id = nextId++;
@@ -743,6 +748,19 @@ final class JointCombat {
          * old AI be called once replaced, so it gets a fresh default AI back.
          */
         private void pilot(JointBattle.Joiner jn) {
+            // Their controls say which ship they're for. After a transfer of command that's the new ship, even if
+            // the message saying so (TCP, through the host) hasn't arrived yet.
+            Input named = inputs.get(jn.id);
+            if (named != null && named.ship > 0 && System.nanoTime() - named.arrived < INPUT_STALE_NANOS
+                    && (named.keys & K_AUTO) == 0) {
+                ShipAPI to = byId.get(named.ship);
+                FleetMemberAPI tm = to == null ? null : to.getFleetMember();
+                if (tm != null && playerOf(to) == jn.id && to.isAlive() && !to.isHulk()
+                        && !tm.getId().equals(jn.pilotPuppetId)) {
+                    log.info("[MultiSector] " + jn.name + "'s controls are for " + tm.getShipName() + " now");
+                    jn.pilotPuppetId = tm.getId();
+                }
+            }
             for (ShipAPI ship : new ArrayList<ShipAPI>(piloted)) {
                 // They took the helm of another ship: this one is back on its AI.
                 if (playerOf(ship) != jn.id || ship.getFleetMember() == null) continue;
@@ -925,9 +943,69 @@ final class JointCombat {
      * leader's, set directly: the effect and its visuals run as there. A
      * system that's already running its course isn't restarted.
      */
+    /** Ship system types that only change the ship's own stats or engines, so they can be switched on directly. */
+    private static final Set<String> FORCIBLE_SYSTEMS = new HashSet<String>(java.util.Arrays.asList(
+            "STAT_MOD", "ENGINE_MOD", "PHASE_CLOAK", "SHIELD_MOD", "AMMO_RELOAD", "FAST_RELOAD"));
+    private static final Map<String, Boolean> forcible = new HashMap<String, Boolean>();
+    /** The game's own system scripts outside the API package (data/shipsystems/scripts), all self-contained. */
+    private static final Set<String> VANILLA_DATA_SCRIPTS = new HashSet<String>(java.util.Arrays.asList(
+            "AmmoFeedStats", "BurnDriveStats", "CombatBurnStats", "DynamicStabilizerStats", "FortressShieldStats",
+            "HighEnergyFocusStats", "ManeuveringJetsStats", "MicroBurnOmegaStats", "MicroBurnStats", "TravelDriveStats",
+            "PhaseCloakStatsOld"));
+    /**
+     * The game's own scripts that act on a target, the mouse or the AI's
+     * chosen spot, or spawn things (mines, motes, drones, lightning). In the
+     * view they'd aim at nothing: ConvulsiveLunge does new Vector2f(mouse
+     * target) with no check, the same crash as the displacer's.
+     */
+    private static final Set<String> TARGETED_SCRIPTS = new HashSet<String>(java.util.Arrays.asList(
+            "AcausalDisruptorStats", "DroneStrikeStats", "EntropyAmplifierStats", "InterdictorArrayStats",
+            "MineStrikeStats", "MineStrikeStationStats", "MoteControlScript", "ConvulsiveLungeSystemScript",
+            "DarkenedGazeSystemScript", "TenebrousExpulsionSystemScript", "EnergyLashSystemScript",
+            "ExtractionProtocolSystemScript", "FragmentVolleySystemScript", "IncursionModeSystemScript",
+            "ConstructionSwarmSystemScript"));
+
+    /** A system script the view may run by switching the system on: none, or one of the game's self-contained ones. */
+    private static boolean safeScript(String script) {
+        if (script == null || script.isEmpty()) return true;
+        String simple = script.substring(script.lastIndexOf('.') + 1);
+        if (TARGETED_SCRIPTS.contains(simple)) return false;
+        if (script.startsWith("com.fs.starfarer.api.impl.combat.")) return true;
+        return script.startsWith("data.shipsystems.scripts.") && VANILLA_DATA_SCRIPTS.contains(simple);
+    }
+
+    /**
+     * Whether the view may switch this system on by itself. Not teleports
+     * (phase skimmer, displacer, phase teleporter): they jump to a spot only
+     * the game's "use system" sets, and switched on directly they crashed the
+     * game ("getX() because src is null"). The stream moves those ships anyway.
+     * Not drone, weapon or EMP systems either, which act on targets.
+     */
+    private static boolean forcible(ShipSystemAPI sys) {
+        try {
+            com.fs.starfarer.api.combat.ShipSystemSpecAPI spec = sys.getSpecAPI();
+            if (spec == null) return false;
+            String id = spec.getId();
+            Boolean known = forcible.get(id);
+            if (known == null) {
+                JSONObject json = spec.getSpecJson();
+                String type = json == null ? "" : json.optString("type", "");
+                String script = spec.getStatsScriptClassName();
+                // A mod's own script can't be checked here, so it isn't run: its ship still moves with the stream.
+                known = (FORCIBLE_SYSTEMS.contains(type) || spec.isPhaseCloak()) && safeScript(script);
+                forcible.put(id, known);
+                if (!known) log.info("[MultiSector] battle view shows ship system " + id + " (" + type
+                        + (script == null || script.isEmpty() ? "" : ", " + script) + ") without switching it on");
+            }
+            return known;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     private static void syncSystem(ShipSystemAPI sys, int state) {
         ShipSystemAPI.SystemState[] all = ShipSystemAPI.SystemState.values();
-        if (sys == null || state < 0 || state >= all.length) return;
+        if (sys == null || state < 0 || state >= all.length || !forcible(sys)) return;
         ShipSystemAPI.SystemState want = all[state];
         ShipSystemAPI.SystemState have = sys.getState();
         if (have == want) return;
@@ -993,6 +1071,12 @@ final class JointCombat {
             if (target != null && target.isAlive()) ship.setShipTarget(target);
 
             Vector2f mouse = new Vector2f(in.mx, in.my);
+            // Systems that act on a spot (teleports, mine and drone strikes) read the ship's mouse target, or for
+            // an AI the "system target" it picked. This ship is flown, not AI-chosen: both are where the joiner aims,
+            // as for a player, and never left empty (an empty one is the "src is null" crash).
+            Vector2f mt = ship.getMouseTarget();
+            if (mt != null) mt.set(mouse);
+            flags.setFlag(ShipwideAIFlags.AIFlags.SYSTEM_TARGET_COORDS, 0.5f, new Vector2f(mouse));
             if (!groups.isEmpty()) {
                 for (WeaponAPI w : groups.get(group).getWeaponsCopy()) aim(w, mouse);
             }
@@ -1136,6 +1220,11 @@ final class JointCombat {
         private long nextAsk, nextClean;
         /** Every ship this view made. Anything else on the field isn't the leader's battle. */
         private final Set<ShipAPI> ours = java.util.Collections.newSetFromMap(new IdentityHashMap<ShipAPI, Boolean>());
+        /** Command shuttles (transfer command): the game's own, left alone. */
+        private final Set<ShipAPI> shuttles = java.util.Collections.newSetFromMap(new IdentityHashMap<ShipAPI, Boolean>());
+        /** The AI we gave each view ship (the game's wrapper of our Idle), to notice the game giving it another. */
+        private final Map<ShipAPI, ShipAIPlugin> idleAi = new IdentityHashMap<ShipAPI, ShipAIPlugin>();
+        private long nextAiCheck;
         private long openedAt;
         private boolean synced;
         /**
@@ -1196,6 +1285,7 @@ final class JointCombat {
         public void advance(float amount, List<InputEventAPI> events) {
             if (engine == null) return;
             Session s = Session.get();
+            s.gameAlive(); // our world is still open behind this view
             try {
                 JointBattle.handleMessages(s);
                 long now = System.nanoTime();
@@ -1214,6 +1304,7 @@ final class JointCombat {
                 clean(now);
                 followSpeed();
                 followPilot(s);
+                keepIdle(now);
                 sendOrders(s, now);
                 int me = s.getMyId();
                 for (Map.Entry<Integer, Shown> te : shown.entrySet()) {
@@ -1263,7 +1354,7 @@ final class JointCombat {
                 if (sh.ship != ps || sh.player != me) continue;
                 if (pilot != null) {
                     pilot.pilot = false;
-                    if (pilot.ship != null && pilot.ship.isAlive()) pilot.ship.setShipAI(new Idle()); // the stream moves it again
+                    if (pilot.ship != null && pilot.ship.isAlive()) idle(pilot.ship); // the stream moves it again
                 }
                 sh.pilot = true;
                 pilot = sh;
@@ -1376,7 +1467,7 @@ final class JointCombat {
             }
             ours.add(ship);
             fm.removeFromReserves(m);
-            ship.setShipAI(new Idle());
+            idle(ship);
             immune(ship.getMutableStats(), true);
             if (ship.getOwner() != owner) ship.setOwner(owner);
             ship.setAlly(owner == 0 && !mine);
@@ -1387,7 +1478,7 @@ final class JointCombat {
         /** A ship we deployed here, now in the leader's battle: it's that one. */
         private void adopt(int id, ShipAPI ship, JSONObject j) {
             noTravelDrive(ship);
-            ship.setShipAI(new Idle());
+            idle(ship);
             immune(ship.getMutableStats(), true);
             if (ship.getOwner() != 0) ship.setOwner(0);
             ship.setAlly(false);
@@ -1465,7 +1556,7 @@ final class JointCombat {
             if (!requested.add(id)) return;
             ours.add(ship);
             noTravelDrive(ship);
-            ship.setShipAI(new Idle());
+            idle(ship);
             immune(ship.getMutableStats(), true);
             adopting.put(id, ship);
             adoptingSince.put(id, System.nanoTime());
@@ -1527,9 +1618,12 @@ final class JointCombat {
                         .append(' ').append(aiName(ship)).append(sh.hasState ? "" : " NO-STATE");
                 if (!sh.hasState) continue;
                 String id = e.getKey() + " " + ship.getHullSpec().getHullId() + ": ";
-                if (ship.getOwner() != sh.owner) wrong.add(id + "side " + ship.getOwner() + ", leader says " + sh.owner);
-                if (ship.isAlly() != sh.ally) wrong.add(id + "ally " + ship.isAlly() + ", leader says " + sh.ally);
                 boolean hulk = (sh.flags & F_HULK) != 0;
+                // A wreck belongs to nobody (side 100) on every game: only living ships' sides can differ.
+                if (!hulk && !ship.isHulk()) {
+                    if (ship.getOwner() != sh.owner) wrong.add(id + "side " + ship.getOwner() + ", leader says " + sh.owner);
+                    if (ship.isAlly() != sh.ally) wrong.add(id + "ally " + ship.isAlly() + ", leader says " + sh.ally);
+                }
                 if (ship.isHulk() != hulk) wrong.add(id + (ship.isHulk() ? "wrecked here, alive on the leader's game"
                         : "alive here, wrecked on the leader's game"));
                 if (!hulk && Math.abs(ship.getCurrentCR() - sh.cr) > 0.1f) {
@@ -1577,6 +1671,33 @@ final class JointCombat {
             }
         }
 
+        /** The view's do-nothing AI on a ship, remembered so a swap by the game is noticed. */
+        private void idle(ShipAPI ship) {
+            ship.setShipAI(new Idle());
+            idleAi.put(ship, ship.getShipAI());
+        }
+
+        /**
+         * The game gives a ship its own AI in some cases (the old flagship
+         * when we transfer command, for one). A real AI here would fight on
+         * its own and use its systems, so ours goes back on: the stream moves
+         * every ship but the one we fly.
+         */
+        private void keepIdle(long now) {
+            if (now - nextAiCheck < 0) return;
+            nextAiCheck = now + 250_000_000L;
+            ShipAPI flown = engine.getPlayerShip();
+            for (Shown sh : shown.values()) {
+                ShipAPI ship = sh.ship;
+                if (ship == null || ship == flown || ship.isHulk() || !ship.isAlive()) continue;
+                ShipAIPlugin had = idleAi.get(ship);
+                if (had != null && ship.getShipAI() == had) continue;
+                if (had != null) log.info("[MultiSector] the game gave " + aiName(ship) + " to view ship "
+                        + ship.getHullSpec().getHullId() + "; back to following the stream");
+                idle(ship);
+            }
+        }
+
         private static void noTravelDrive(ShipAPI ship) {
             try {
                 if (arriving(ship)) ship.turnOffTravelDrive();
@@ -1621,6 +1742,15 @@ final class JointCombat {
             Session s = Session.get();
             for (ShipAPI ship : new ArrayList<ShipAPI>(engine.getShips())) {
                 if (ship.isFighter() || ship.isHulk() || ship.getParentStation() != null || ours.contains(ship)) continue;
+                if (ship.isShuttlePod()) {
+                    // Our command shuttle (transfer command): the game flies us in it to our new ship. Removing it
+                    // left the camera and controls on a ship that was gone. Shots here can't hurt it either.
+                    if (shuttles.add(ship)) {
+                        immune(ship.getMutableStats(), true);
+                        log.info("[MultiSector] command shuttle on its way; our old ship flies on its AI meanwhile");
+                    }
+                    continue;
+                }
                 FleetMemberAPI m = ship.getFleetMember();
                 String real = ship.getOwner() == 0 ? realIdOf(m) : null;
                 if (real != null) {
@@ -1791,18 +1921,16 @@ final class JointCombat {
             boolean phased = (sh.flags & F_PHASED) != 0;
             if (ship.isPhased() != phased) ship.setPhased(phased);
             if ((sh.flags & F_VENT) != 0 && !ft.isVenting() && !ft.isOverloaded()) ft.ventFlux();
-            if (!sh.pilot) {
-                // Engine flames: same commands as the leader's ship (the move itself is overwritten above).
-                if ((sh.eng & E_ACCEL) != 0) ship.giveCommand(ShipCommand.ACCELERATE, null, 0);
-                if ((sh.eng & E_BACK) != 0) ship.giveCommand(ShipCommand.ACCELERATE_BACKWARDS, null, 0);
-                if ((sh.eng & E_DECEL) != 0) ship.giveCommand(ShipCommand.DECELERATE, null, 0);
-                if ((sh.eng & E_LEFT) != 0) ship.giveCommand(ShipCommand.TURN_LEFT, null, 0);
-                if ((sh.eng & E_RIGHT) != 0) ship.giveCommand(ShipCommand.TURN_RIGHT, null, 0);
-                if ((sh.eng & E_SLEFT) != 0) ship.giveCommand(ShipCommand.STRAFE_LEFT, null, 0);
-                if ((sh.eng & E_SRIGHT) != 0) ship.giveCommand(ShipCommand.STRAFE_RIGHT, null, 0);
-            } else if ((sh.eng & E_ACCEL) != 0 && ship.getEngineController() != null) {
-                ship.getEngineController().forceShowAccelerating();
-            }
+            // Engine flames: same commands as the leader's ship (the move itself is overwritten above). Our own
+            // flown ship gets them too (autopilot, or the leader's ship still moving): our movement keys aren't
+            // blocked here, so they light its engines at once as well.
+            if ((sh.eng & E_ACCEL) != 0) ship.giveCommand(ShipCommand.ACCELERATE, null, 0);
+            if ((sh.eng & E_BACK) != 0) ship.giveCommand(ShipCommand.ACCELERATE_BACKWARDS, null, 0);
+            if ((sh.eng & E_DECEL) != 0) ship.giveCommand(ShipCommand.DECELERATE, null, 0);
+            if ((sh.eng & E_LEFT) != 0) ship.giveCommand(ShipCommand.TURN_LEFT, null, 0);
+            if ((sh.eng & E_RIGHT) != 0) ship.giveCommand(ShipCommand.TURN_RIGHT, null, 0);
+            if ((sh.eng & E_SLEFT) != 0) ship.giveCommand(ShipCommand.STRAFE_LEFT, null, 0);
+            if ((sh.eng & E_SRIGHT) != 0) ship.giveCommand(ShipCommand.STRAFE_RIGHT, null, 0);
             List<WeaponAPI> weapons = ship.getAllWeapons();
             boolean beams = false;
             boolean fresh = now - sh.arrived < 250_000_000L;
@@ -1840,8 +1968,11 @@ final class JointCombat {
         /** Our piloted ship: its controls go to the leader, not to it. */
         private void controls(Session s, long now) {
             ShipAPI ship = pilot.ship;
-            // Everything goes to the leader, except picking a weapon group: that happens here too, so it shows.
-            for (ShipCommand c : ShipCommand.values()) if (c != ShipCommand.SELECT_GROUP) ship.blockCommandForOneFrame(c);
+            // Everything goes to the leader. Picking a weapon group happens here too, so it shows, and so do the
+            // movement commands: they only light the engines here (the stream overwrites where the ship is),
+            // so the ship you fly shows its thrusters the moment you press a key. Weapons, shields, systems and
+            // venting stay blocked: those happen on the leader's game only.
+            for (ShipCommand c : ShipCommand.values()) if (!LOCAL_COMMANDS.contains(c)) ship.blockCommandForOneFrame(c);
             if (engine.isUIShowingDialog()) return; // the game's own menus have the keyboard
             boolean rmb = Mouse.isButtonDown(1);
             if (rmb && !wasRmb) toggles[0]++;
@@ -1871,6 +2002,17 @@ final class JointCombat {
             if (Keyboard.isKeyDown(Keyboard.KEY_E)) keys |= K_E;
             if (Keyboard.isKeyDown(Keyboard.KEY_X)) keys |= K_DECEL;
             if (Mouse.isButtonDown(0)) keys |= K_FIRE;
+            if (engine.getPlayerShip() != ship) {
+                // We're in the command shuttle on the way to another ship: the old one flies on its AI
+                // on the leader's game until we arrive (then followPilot moves our controls over).
+                ByteBuffer bb = ByteBuffer.allocate(64);
+                bb.put(INPUT).putInt(inputSeq++).putShort((short) idOf(pilot)).putInt(K_AUTO).putFloat(mx).putFloat(my)
+                        .put((byte) group).putShort((short) target);
+                for (int t : toggles) bb.put((byte) t);
+                bb.flip();
+                s.sendCombatPacket(leader, bb);
+                return;
+            }
             boolean autopilotUi = engine.isUIAutopilotOn();
             if (!autopilotUi) autopilotAtStart = false;
             // Flying it yourself (move or fire) takes it off autopilot, as in the game, even though the game's own

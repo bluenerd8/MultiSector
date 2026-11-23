@@ -23,6 +23,18 @@ public final class MultiSectorConfig {
     private static boolean jointBattleView = true;
     private static boolean jointBattleDeployAll = true;
     private static boolean jointBattleChecks = true;
+    private static boolean holdWhileEveryoneBusy = true;
+    private static boolean friendsCanFastForward = true;
+    private static boolean waitForHost = true;
+    private static boolean endWhenHostLeaves = true;
+    private static boolean saveWithHost = true;
+    private static boolean waitForAllPlayers = false;
+    private static boolean shareSurveys = true;
+    private static boolean keepMovingInMenus = true;
+    private static boolean joinNpcBattles = true;
+    private static boolean shareRaids = true;
+    private static boolean shareSystemBounties = true;
+    private static boolean shareFactionRelations = true;
     private static int hudHotkey = Keyboard.KEY_F7;
     private static String hudHotkeyName = "F7";
     private static String hudCorner = "topRight";
@@ -55,6 +67,18 @@ public final class MultiSectorConfig {
             jointBattleView = json.optBoolean("jointBattleView", true);
             jointBattleDeployAll = json.optBoolean("jointBattleDeployAll", true);
             jointBattleChecks = json.optBoolean("jointBattleChecks", true);
+            holdWhileEveryoneBusy = json.optBoolean("holdWhileEveryoneBusy", true);
+            friendsCanFastForward = json.optBoolean("friendsCanFastForward", true);
+            waitForHost = json.optBoolean("waitForHost", true);
+            endWhenHostLeaves = json.optBoolean("endWhenHostLeaves", true);
+            saveWithHost = json.optBoolean("saveWithHost", true);
+            waitForAllPlayers = json.optBoolean("waitForAllPlayers", false);
+            shareSurveys = json.optBoolean("shareSurveys", true);
+            keepMovingInMenus = json.optBoolean("keepMovingInMenus", true);
+            joinNpcBattles = json.optBoolean("joinNpcBattles", true);
+            shareRaids = json.optBoolean("shareRaids", true);
+            shareSystemBounties = json.optBoolean("shareSystemBounties", true);
+            shareFactionRelations = json.optBoolean("shareFactionRelations", true);
             String hk = json.optString("hudHotkey", "F7").trim().toUpperCase();
             int hidx = Keyboard.getKeyIndex(hk);
             if (hidx != Keyboard.KEY_NONE) {
@@ -95,6 +119,30 @@ public final class MultiSectorConfig {
     public static boolean isJointBattleDeployAll() { return jointBattleDeployAll; }
     /** Joint battles write comparison tables of every ship to starsector.log, on both games. */
     public static boolean isJointBattleChecks() { return jointBattleChecks; }
+    /** Host: the shared world waits while nobody is on the map (everyone in a battle, dialog or menu). */
+    public static boolean isHoldWhileEveryoneBusy() { return holdWhileEveryoneBusy; }
+    /** Host: a friend's fast-forward speeds the world up for everyone, the host's game included. */
+    public static boolean isFriendsCanFastForward() { return friendsCanFastForward; }
+    /** Friends: a shared world loaded before the host is up waits, paused, and keeps trying to join. */
+    public static boolean isWaitForHost() { return waitForHost; }
+    /** Friends: when the host ends the session, your character is saved and you go back to the main menu. */
+    public static boolean isEndWhenHostLeaves() { return endWhenHostLeaves; }
+    /** Friends: when the host saves, your game saves too (your copy of the world and your character). */
+    public static boolean isSaveWithHost() { return saveWithHost; }
+    /** Host: after loading, the world waits until everyone who was playing at the last save has joined. */
+    public static boolean isWaitForAllPlayers() { return waitForAllPlayers; }
+    /** Planet surveys, explored ruins and similar one-off finds are shared by every player. */
+    public static boolean isShareSurveys() { return shareSurveys; }
+    /** Raids and bombardments on planets reach everyone's world. */
+    public static boolean isShareRaids() { return shareRaids; }
+    /** Faction bounties on star systems are the host's, on every player's world. */
+    public static boolean isShareSystemBounties() { return shareSystemBounties; }
+    /** Relations between NPC factions (wars, peace, Nexerelin diplomacy) follow the host's world. */
+    public static boolean isShareFactionRelations() { return shareFactionRelations; }
+    /** Your fleet keeps flying its course while the cargo, refit, character or map screen is open. */
+    public static boolean isKeepMovingInMenus() { return keepMovingInMenus; }
+    /** Owner: a friend can join a battle between NPC fleets in our world (it's held for them while they do). */
+    public static boolean isJoinNpcBattles() { return joinNpcBattles; }
     public static int getHudHotkey() { return hudHotkey; }
     public static String getHudHotkeyName() { return hudHotkeyName; }
     /** topLeft, topRight, bottomLeft or bottomRight. */

@@ -20,6 +20,8 @@ public final class NetConfig {
 
     /** File in saves/common through which the launcher tells the mod to host or join. */
     public static final String SESSION_FILE = "multisector_session.json";
+    /** The game asks the launcher for a fresh copy of the host's world (saves/common, see SessionGuard). */
+    public static final String REJOIN_FILE = "multisector_rejoin.json";
 
     /**
      * Largest UDP payload we send. Hamachi's adapter MTU is 1404 bytes, and
@@ -36,7 +38,7 @@ public final class NetConfig {
     public static final int MAGIC = 0x4D534543;
 
     /** Bump when the wire format changes. Host and client must match. */
-    public static final short PROTOCOL_VERSION = 20;
+    public static final short PROTOCOL_VERSION = 21;
 
     public static final int CONNECT_TIMEOUT_MS = 5000;
 

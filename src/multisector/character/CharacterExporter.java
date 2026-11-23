@@ -34,8 +34,26 @@ public final class CharacterExporter {
     private CharacterExporter() {
     }
 
+    /**
+     * Your character as it is in one shared world, saved by MultiSector
+     * itself (every save, and when a session ends). Kept apart from the
+     * export you make by hand, so playing together never overwrites it.
+     */
+    public static String worldFile(String seed) {
+        StringBuilder b = new StringBuilder("multisector_world_");
+        for (char c : (seed == null ? "" : seed).toCharArray()) {
+            b.append(Character.isLetterOrDigit(c) || c == '-' ? c : '_');
+        }
+        return b.append(".json").toString();
+    }
+
     /** Writes the export and returns a one-line summary for the player. */
     public static String export() throws Exception {
+        return export(EXPORT_FILE);
+    }
+
+    /** Writes the export to that common file and returns a one-line summary for the player. */
+    public static String export(String file) throws Exception {
         CampaignFleetAPI fleet = Global.getSector().getPlayerFleet();
         PersonAPI player = Global.getSector().getPlayerPerson();
 
@@ -76,7 +94,7 @@ public final class CharacterExporter {
         if (text.length() > 1000000) {
             throw new IllegalStateException("the export is too big (" + text.length() / 1024 + " KB, the limit is 1 MB)");
         }
-        Global.getSettings().writeTextFileToCommon(EXPORT_FILE, text);
+        Global.getSettings().writeTextFileToCommon(file, text);
         return player.getNameString() + ", level " + ch.getInt("level") + ", " + ships.length() + " ships, "
                 + officerArr.length() + " officers, " + root.getLong("credits") + " credits";
     }

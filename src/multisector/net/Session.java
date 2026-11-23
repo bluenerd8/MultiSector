@@ -175,6 +175,9 @@ public final class Session {
     public int getPort() { return port; }
     /** Client: the host address we're connected to. */
     public String getRemote() { return remote; }
+    /** The last join: {host, port, name}, or null. To try again after the host drops. */
+    public String[] getLastJoin() { return lastJoin; }
+    private volatile String[] lastJoin;
     /** Client: last measured round trip to the host, or -1. */
     public int getPingMs() { return pingMs; }
     public int getMyId() { return myId; }
@@ -183,6 +186,48 @@ public final class Session {
     /** The game thread reports where this player's fleet is. Sent at the next sync tick. */
     public void setLocalFleet(FleetState s) {
         localFleet = s;
+        localFleetAt = System.nanoTime();
+    }
+
+    private volatile long localFleetAt;
+    /** Host: the world waits while nobody is on the map (MultiSectorConfig.isHoldWhileEveryoneBusy). */
+    private volatile boolean holdWhileBusy = true;
+    /** A player whose position hasn't come for this long isn't on the map (in a battle, loading, gone). */
+    private static final long ON_MAP_NANOS = 3_000_000_000L;
+
+    public void setHoldWhileBusy(boolean on) {
+        holdWhileBusy = on;
+    }
+
+    /** Last time the game itself was running a world (campaign or battle), System.nanoTime, or 0. */
+    private volatile long gameAliveAt;
+
+    /** The game thread: a campaign or combat frame of this world just ran. */
+    public void gameAlive() {
+        gameAliveAt = System.nanoTime();
+    }
+
+    private static boolean onMap(FleetState st, long at, long now) {
+        return st != null && now - at < ON_MAP_NANOS
+                && (st.activity == FleetState.ON_MAP || st.activity == FleetState.PAUSED);
+    }
+
+    private volatile long onMapAt;
+
+    /** The game thread: we're on the campaign map this frame (sooner than our next position report). */
+    public void markOnMap() {
+        onMapAt = System.nanoTime();
+    }
+
+    /** Host: is anyone (us included) on the campaign map right now? */
+    public boolean anyoneOnMap(long now) {
+        if (now - onMapAt < 500_000_000L) return true;
+        if (onMap(localFleet, localFleetAt, now)) return true;
+        for (Conn c : conns) {
+            FleetState.Received r = remoteFleets.get(c.id);
+            if (r != null && onMap(r.state, r.arrivedNanos, now)) return true;
+        }
+        return false;
     }
 
     /** Other players' latest fleet positions, by player id. Read by the game thread. */
@@ -198,6 +243,74 @@ public final class Session {
     /** Client: the host's clock as last received, or null before the first one arrives. */
     public ClockState.Received getRemoteClock() {
         return remoteClock;
+    }
+
+    /** Host: no world frame for this long means our world closed (main menu, or another save loading). */
+    private static final long HOST_GONE_NANOS = 90_000_000_000L;
+
+    /** Host: friends fast-forwarding right now: id -> {mult, last heard (nanos)}. */
+    private final ConcurrentHashMap<Integer, float[]> fastMults = new ConcurrentHashMap<Integer, float[]>();
+    private final ConcurrentHashMap<Integer, Long> fastHeard = new ConcurrentHashMap<Integer, Long>();
+    /** A fast-forward request not refreshed for this long has ended (the friend opened a menu, say). */
+    private static final long FAST_STALE_NANOS = 2_500_000_000L;
+
+    /** Client: we're fast-forwarding (or stopped). Sent on change and every second while on. */
+    public void requestFast(boolean on, float mult) {
+        if (state != State.CONNECTED) return;
+        ByteBuffer bb = Protocol.begin(Protocol.FAST_REQUEST, 5);
+        bb.put((byte) (on ? 1 : 0)).putFloat(mult).flip();
+        outbox.add(bb);
+    }
+
+    /** Host: a friend fast-forwarding right now, as {playerId, mult}, or null. The fastest one wins. */
+    public float[] fastRequest(long nanos) {
+        float[] best = null;
+        for (Map.Entry<Integer, Long> e : fastHeard.entrySet()) {
+            if (nanos - e.getValue() > FAST_STALE_NANOS) continue;
+            float[] m = fastMults.get(e.getKey());
+            if (m == null) continue;
+            if (best == null || m[0] > best[1]) best = new float[]{e.getKey(), m[0]};
+        }
+        return best;
+    }
+
+    // ---- orders from the host to everyone (save now, the host is leaving)
+    private final ConcurrentLinkedQueue<String> hostOrders = new ConcurrentLinkedQueue<String>();
+    /** Client: the host ended the session on purpose (stopped hosting, or their world closed). */
+    private volatile boolean hostEnded;
+
+    /** Client: did the host end the last session on purpose? Cleared by {@link #clearHostEnded}. */
+    public boolean hostEnded() {
+        return hostEnded;
+    }
+
+    public void clearHostEnded() {
+        hostEnded = false;
+    }
+
+    /** Host: tells every friend something about the whole session (json with "k"). */
+    public void sendHostOrder(String json) {
+        if (state != State.HOSTING) return;
+        outbox.add(hostOrderMessage(json));
+    }
+
+    /** Host: this load of our world (see SessionGuard), sent to every friend as they join. */
+    private volatile String worldEpoch;
+
+    public void setWorldEpoch(String epoch) {
+        worldEpoch = epoch;
+    }
+
+    private static ByteBuffer hostOrderMessage(String json) {
+        ByteBuffer bb = Protocol.begin(Protocol.HOST_ORDER, Protocol.longStringSize(json));
+        Protocol.putLongString(bb, json);
+        bb.flip();
+        return bb;
+    }
+
+    /** Client: the next order from the host, or null. */
+    public String pollHostOrder() {
+        return hostOrders.poll();
     }
 
     /** Client: ask the host to pause or resume the game for everyone. */
@@ -635,6 +748,9 @@ public final class Session {
         this.port = port;
         remote = null;
         myId = HOST_ID;
+        gameAliveAt = System.nanoTime();
+        fastHeard.clear();
+        fastMults.clear();
         final int gen = ++generation;
         state = State.HOSTING;
         status = "Hosting on port " + port;
@@ -653,6 +769,8 @@ public final class Session {
     public synchronized void join(String address, int port, String name) {
         if (state != State.IDLE) throw new IllegalStateException("already " + state);
         lastError = null;
+        hostEnded = false;
+        hostOrders.clear();
         localName = Protocol.cleanName(name);
         String host = address == null ? "" : address.trim();
         int colon = host.lastIndexOf(':');
@@ -667,6 +785,7 @@ public final class Session {
         final int targetPort = port;
         this.port = port;
         remote = host + ":" + port;
+        lastJoin = new String[]{host, String.valueOf(port), name == null ? "Player" : name};
         pingMs = -1;
         myId = -1;
         final int gen = ++generation;
@@ -725,6 +844,15 @@ public final class Session {
             int id;
             synchronized (this) {
                 if (!alive(gen)) return;
+                // The same player again from the same address: a reconnect after a drop. Their old connection
+                // would linger as a ghost until it timed out, so it goes now (its thread tidies up as for a leave).
+                for (Conn old : conns) {
+                    if (old.name.equals(name) && old.socket.getInetAddress().equals(s.getInetAddress())) {
+                        old.replaced = true;
+                        closeQuietly(old.socket);
+                        notices.add(name + " reconnected");
+                    }
+                }
                 if (conns.size() + 1 >= MAX_PLAYERS) {
                     reject(s, "Server full (" + MAX_PLAYERS + " players).");
                     return;
@@ -754,6 +882,8 @@ public final class Session {
                 for (NpcInfo i : f.infos.values()) conn.send(npcInfoMessage(e.getKey(), f.location, i));
             }
             conn.send(zonesMessage(follows));
+            String epoch = worldEpoch;
+            if (epoch != null) conn.send(hostOrderMessage("{\"k\":\"epoch\",\"id\":\"" + epoch + "\"}"));
             notices.add(name + " joined (" + from + ")");
             if (clock.release(name, System.nanoTime())) {
                 notices.add(clock.isRunning() ? "Everyone's in, so the game carries on." : name + " is in.");
@@ -768,6 +898,15 @@ public final class Session {
                 int type = Protocol.readHeader(msg, null);
                 if (type == Protocol.PING_REPORT && msg.remaining() >= 4) {
                     conn.pingMs = msg.getInt();
+                } else if (type == Protocol.FAST_REQUEST && msg.remaining() >= 5) {
+                    boolean on = msg.get() != 0;
+                    float mult = msg.getFloat();
+                    if (on && mult > 1f && mult <= 50f) {
+                        fastMults.put(conn.id, new float[]{mult});
+                        fastHeard.put(conn.id, System.nanoTime());
+                    } else {
+                        fastHeard.remove(conn.id);
+                    }
                 } else if (type == Protocol.PAUSE_REQUEST && msg.remaining() >= 1) {
                     boolean p = msg.get() != 0;
                     boolean waited = clock.isHeld();
@@ -859,6 +998,8 @@ public final class Session {
                 remoteFleets.remove(conn.id);
                 udpAddresses.remove(conn.id);
                 comps.remove(conn.id);
+                fastHeard.remove(conn.id);
+                fastMults.remove(conn.id);
                 // Anyone talking or trading with them, or holding fleets for or from them, is told.
                 for (byte ch : new byte[]{CHANNEL_TALK, CHANNEL_LOCK, CHANNEL_BATTLE}) {
                     received(ch, new PlayerMessage(conn.id, conn.name, LEFT_JSON));
@@ -869,7 +1010,7 @@ public final class Session {
                 outbox.add(npcResetMessage(conn.id, ""));
             }
             if (conn != null && conns.remove(conn) && alive(gen)) {
-                notices.add(conn.name + " left");
+                if (!conn.replaced) notices.add(conn.name + " left");
                 refreshHostPlayers();
                 broadcastPlayers();
             }
@@ -1068,8 +1209,19 @@ public final class Session {
                 }
             }
             DatagramSocket cu = hostUdp;
+            long tick = System.nanoTime();
+            // Nobody on the map (everyone in a battle, dialog or menu): the world waits. Checked here, not in the
+            // game, because the campaign doesn't run during battles. A host whose world has closed doesn't count.
+            clock.setIdle(holdWhileBusy && clock.isStarted() && !anyoneOnMap(tick), tick);
+            if (gameAliveAt != 0 && tick - gameAliveAt > HOST_GONE_NANOS) {
+                // Our world closed (back at the main menu, say): stop hosting, so friends are told the session is
+                // over and nobody can join a session with no world behind it. Loading the world again hosts again.
+                notices.add("Your world closed, so you stopped hosting. Load it again to host.");
+                stopWith(gen, null, "Not connected");
+                return;
+            }
             if (cu != null && clock.isStarted()) {
-                ClockState cs = clock.snapshot(System.nanoTime());
+                ClockState cs = clock.snapshot(tick);
                 ByteBuffer cb = Protocol.begin(Protocol.CLOCK, cs.size());
                 cs.write(cb);
                 for (SocketAddress to : udpAddresses.values()) {
@@ -1286,6 +1438,10 @@ public final class Session {
                 } else if (type == Protocol.MARKET_SNAPSHOT) {
                     String marketId = Protocol.getString(msg);
                     marketSnapshots.put(marketId, Protocol.getLongString(msg));
+                } else if (type == Protocol.HOST_ORDER) {
+                    String order = Protocol.getLongString(msg);
+                    hostOrders.add(order);
+                    if (order.contains("\"end\"") || order.contains("\"gone\"")) hostEnded = true;
                 } else if (type == Protocol.NPC_RESET) {
                     int pub = msg.getInt();
                     String loc = Protocol.getString(msg);
@@ -1306,7 +1462,9 @@ public final class Session {
                         f.states.remove(handle);
                     }
                 } else if (type == Protocol.BYE) {
-                    endReason = "Host: " + Protocol.getString(msg);
+                    String why = Protocol.getString(msg);
+                    endReason = "Host: " + why;
+                    if (why.startsWith("The host stopped")) hostEnded = true;
                     break;
                 }
             }
@@ -1551,6 +1709,8 @@ public final class Session {
         final int id;
         final String name;
         volatile int pingMs = -1;
+        /** Closed because the same player reconnected: its cleanup doesn't announce a leave. */
+        volatile boolean replaced;
 
         Conn(Socket socket, int id, String name) {
             this.socket = socket;

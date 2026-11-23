@@ -48,6 +48,8 @@ final class LobbyClient {
         long zipBytes;
         String zipHash;
         String hostVersion;
+        /** The host's game is in the world and hosting: 1, not yet: 0, unknown (older launcher): -1. */
+        int gameHosting = -1;
         List<String> mods = new ArrayList<String>();
     }
 
@@ -368,8 +370,9 @@ final class LobbyClient {
         if (bb == null) throw new IOException("The host closed the connection. Their launcher may be a different MultiSector version.");
         int type = Protocol.readHeader(bb, ver);
         if (ver[0] != NetConfig.PROTOCOL_VERSION) {
-            throw new IOException("The host has a different MultiSector build (you have " + BuildInfo.VERSION
-                    + "). You both need the same build.");
+            String theirs = type == Protocol.LOBBY_INFO ? readHostVersion(bb) : "";
+            throw new VersionMismatch("The host has a different MultiSector build" + (theirs.isEmpty() ? "" : " (" + theirs + ")")
+                    + "; you have " + BuildInfo.VERSION + ". You both need the same build.", theirs);
         }
         if (type != Protocol.LOBBY_INFO) throw new IOException("Something answered, but it isn't a MultiSector launcher.");
         Info info = new Info();
@@ -385,11 +388,57 @@ final class LobbyClient {
         info.zipBytes = bb.getLong();
         info.zipHash = Protocol.getString(bb);
         info.hostVersion = bb.remaining() >= 2 ? Protocol.getString(bb) : "?";
+        if (bb.remaining() >= 1) info.gameHosting = bb.get() != 0 ? 1 : 0;
         if (!BuildInfo.VERSION.equals(info.hostVersion)) {
-            throw new IOException("Different MultiSector builds: the host has " + info.hostVersion + ", you have "
-                    + BuildInfo.VERSION + ". You both need the same build.");
+            throw new VersionMismatch("Different MultiSector builds: the host has " + info.hostVersion + ", you have "
+                    + BuildInfo.VERSION + ". You both need the same build.", "?".equals(info.hostVersion) ? "" : info.hostVersion);
         }
         return info;
+    }
+
+    /** The host runs another MultiSector build. hostVersion is theirs, or "" if it couldn't be read. */
+    static final class VersionMismatch extends IOException {
+        private static final long serialVersionUID = 1L;
+        final String hostVersion;
+
+        VersionMismatch(String message, String hostVersion) {
+            super(message);
+            this.hostVersion = hostVersion == null ? "" : hostVersion;
+        }
+    }
+
+    /** The host's build from a LOBBY_INFO of another protocol version, if its layout is still readable. */
+    private static String readHostVersion(ByteBuffer bb) {
+        try {
+            for (int i = 0; i < 4; i++) Protocol.getString(bb); // host, character, save date, game version
+            bb.getLong();
+            bb.getInt();
+            int n = bb.getInt();
+            if (n < 0 || n > 1000) return "";
+            for (int i = 0; i < n; i++) Protocol.getString(bb);
+            bb.getLong();
+            Protocol.getString(bb);
+            String v = bb.remaining() >= 2 ? Protocol.getString(bb) : "";
+            return v.matches("[0-9A-Za-z.-]{1,32}") ? v : "";
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    /** Can this PC reach the host's game port? (Only meaningful while their game is hosting.) */
+    static boolean canReachGame(String host, int port) {
+        Socket s = new Socket();
+        try {
+            s.connect(new InetSocketAddress(host, port), 3000);
+            return true;
+        } catch (IOException e) {
+            return false;
+        } finally {
+            try {
+                s.close();
+            } catch (IOException ignored) {
+            }
+        }
     }
 
     static String safeName(String s) {
