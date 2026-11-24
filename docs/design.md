@@ -729,6 +729,32 @@ From testing 0.1.1: the joiner can transfer command normally now. Problems found
 - **Loading an autosave mid-session:** a friend loading one of their own saves keeps the host's world id, since their copy came from the host's current load. So nobody is prompted, and the date, fleets and objects catch up from the host. Only the host loading a save gives friends a new world id and the fresh-copy prompt.
 - `PROTOCOL_VERSION` 22.
 
+## 24. Second 0.1 test round (0.1.3)
+
+From testing 0.1.2. Weapons now keep working through autopilot and transfers. Found:
+
+- **The joiner's controls were hard-wired, and some were wrong.** The view read W/A/S/D/Q/E, X for decelerate, T for autofire and nothing for the strafe key. The game's own bindings (read from its settings) are: decelerate C (X is hold fire), autofire Ctrl+1-7 for each group (T is something else), and Shift held turns the ship to the mouse with A/D strafing. Now:
+  - movement is read off the flown ship's own engines (`ShipEngineControllerAPI`), which show what the game made of the joiner's keys with their bindings, strafe mode included. The stream's engine commands are no longer given to that ship. If the engines never answer while keys are held (some mod in the way), the default keys are read instead, and the log says so;
+  - the strafe key (`SHIP_STRAFE_KEY`, toggle or hold per `isStrafeKeyAToggle`) sends `K_FACE`, and the leader turns the real ship to the mouse itself, with its real facing, braking in time to stop on it;
+  - autofire and hold fire are the game's own on the joiner's ship (`TOGGLE_AUTOFIRE`, `HOLD_FIRE` allowed locally). Each input carries the groups on autofire (a byte) and hold fire; the leader sets them on the real ship. A ship taken over starts with its loadout's autofire groups;
+  - system, vent, fighters and target keys come from the joiner's bindings (`getControlStringForEnumName`, parsed; defaults if it names something else). The log lists them.
+- **Autopilot was backwards.** `CombatEngineAPI.isUIAutopilotOn()` returns the opposite of the game's autopilot setting (it's `!CombatState.isAutopilotOn()`). With autopilot off, the view asked the leader for autopilot; with it on, it sent manual controls. The 0.0.x workaround ("autopilot at start doesn't count") only hid it. Now autopilot is exactly the game's switch, read the right way round; the game itself turns it off when you steer (`shipControlsTurnOffAutopilot`).
+- **Missile ammo never went down in the view.** View shots are spawned projectiles, which use no ammo. The stream carries each ammo weapon's count when it changes, and all of them every tenth update for each ship (a datagram can be lost): a count byte, then index and ammo for each.
+- **NPC battles:** the second player's controls were the same hard-wired keys; covered above.
+- **Fast-forward is the host's** (`friendsCanFastForward` now off by default). A friend who wasn't holding fast-forward got the boost on their own fleets (in chunks) and a date that snapped forward 3 hours at a time, moving every orbit in the sector (27,000 with Nexerelin, about 8 ms each time): jumpy fleets, jumping planets and a date skipping ahead. Now a friend's date follows the host's in a small step every frame. Only the orbits where they are turn with it; the rest of the sector is owed that time and settled once a game day has built up, when fast-forward ends, or for one place as you arrive there (`ClockAccess.follow`, `payUp`, `settle`). Fleets copied from the host already predict at the host's speed. A friend holding fast-forward too runs at the host's speed natively. Everyone is told: the players panel shows "You're fast-forwarding" or "Febs is fast-forwarding (x3)" on a line of its own, the host gets a message (at most once a minute), friends a message saying to hold fast-forward too. A friend who presses fast-forward while the host isn't is told only the host can.
+- **Campaign speed-up mods** (SpeedUp) write `campaignSpeedupMult`, the same setting a friend's cap uses; the cap is now kept every frame, so a friend can't run ahead with one.
+- **Battle speed** stays the leader's: the joiner's view cancels any speed-up of its own (as before) and now says so when the joiner presses theirs. Both sides get a message when the leader's speed settles on a new one (slow motion from ship systems doesn't count). Battle speed never touches the campaign.
+- **Recovering ships after a joint battle** (`JointSpoils`):
+  - the joiner's own lost ships are held aside, prepared as the game prepares yours (d-mods, weapons and wings kept by the usual chances, `Misc.isShipRecoverable` for which need a story point) and offered on the game's own recovery screen (`showFleetMemberRecoveryDialog`) from the battle's dialog, or on the map if that's closed. Recovering uses `FleetEncounterContext.recoverShips`; officers and AI cores go back on their ships, and an AI core on a ship left behind goes back into the cargo;
+  - the leader notes the enemy's disabled and destroyed ships as combat ends (exact copies, before its own recovery screen changes them). When the leader's dialog closes, the ones not in its fleet go to everyone who fought (`spoils`). Each joiner can recover them like any enemy ship;
+  - held in memory only: a save before they're recovered or left doesn't keep them. Vanilla may also leave some unrecovered ships in space as derelicts, so one could be claimed twice.
+- **Your character in each world** now also keeps AI cores commanding ships (`aiCore`, `unremovable` on a person; `aiCaptain` on a ship), your standing with every faction, and where your fleet was. Standing and position come back only into the same world (`sourceWorld`). Before, every fresh copy put you at the host's position with the host's reputation.
+- **The Multiplayer window and the character chooser drew over themselves.** Each rebuild removed its scrolling section, but the game wraps that section in a scroll panel, and the wrapper stayed. Every rebuild (a player joining, a status change) left another copy underneath. Now the wrapper is removed (`Panels.remove`).
+- **Found in the log:**
+  - in hyperspace, hidden NPC fleets were parked far away, so the game took each route fleet for gone and spawned a new one near the player, which was hidden in turn (1,120 fleets in 14 seconds). In hyperspace they're now hidden where they are (nobody can detect them, they don't move), despawned ones are dropped, and at most 400 are hidden;
+  - cargo pods with no cargo hold at all (from an earlier session) failed every scan, and the game's own pods dialog failed on them. They're faded away, and pods are never made without a hold.
+- `PROTOCOL_VERSION` 23.
+
 ## Still to do (roadmap)
 
 Kept here so they aren't lost between test rounds:
@@ -738,8 +764,9 @@ Kept here so they aren't lost between test rounds:
 - **NPC battles a friend joins** keep fighting on the owner's game meanwhile, so both games can wear down the same fleets. Pausing the owner's copy of the battle needs a way to hold its autoresolve.
 - **Joint battle view:** no objectives (so no capture orders), the joiner's ship answers one ping late, and muzzle flashes, armour damage marks and the systems the view can't switch on (teleports, drones, EMP, targeted systems, and all of mods' own system scripts) aren't shown. Showing mods' systems safely would need the leader to stream each system's effect, not just its state.
 - **Friends' characters in the host's save** (agreed design, not built): every player's character stored inside the host's save at each shared save, dormant unless hosting, so a rewind rewinds everyone and a friend can recover theirs from the host.
-- **Fast-forward from a friend** moves the host's fleets and date, not the host's whole simulation; the host's own fast-forward key can't be pressed for them.
-- **The updater** is first used for real going from 0.1.1 to 0.1.2.
+- **Fast-forward from a friend** (`friendsCanFastForward`, off by default) moves the host's fleets and date, not the host's whole simulation; the host's own fast-forward key can't be pressed for them. A friend not holding fast-forward while the host does moves their own fleet at normal speed.
+- **The updater:** not yet confirmed by a test report (0.1.2 is installed here; it isn't known whether by the button or by hand).
+- **Recovery offers** after a joint battle aren't saved: a save before they're recovered or left loses them.
 - **Mod updates beyond MultiSector:** the launcher can match which mods are enabled, but can't install a mod the host has and the friend doesn't.
 
 ### Pitched for 0.1.3 (agreed to note, not built)
@@ -751,13 +778,13 @@ Protecting the campaign and catching bugs:
 1. **Rolling backups of the host's save:** the launcher copies the save folder each time hosting starts, keeps the last 5, and offers a restore button.
 2. **"Send my log to the host":** a launcher button sends a friend's `starsector.log` over the lobby link, saved next to the host's, so crashes on a friend's PC can be read.
 3. **Mod versions, not just mod ids:** the join check compares only which mods are enabled (`GameInstall.installedMods` reads ids and names). Compare each mod's `version` from `mod_info.json` and warn on a mismatch (Nexerelin especially).
-4. **Salvage locks:** two players salvaging the same derelict, cache or debris at the same moment both get the loot. Claim world objects through the same lock channel as fleets (`FleetLocks`) while their dialog is open.
+4. **Salvage locks:** two players salvaging the same derelict, cache or debris at the same moment both get the loot. Claim world objects through the same lock channel as fleets (`FleetLocks`) while their dialog is open. (Also covers a derelict left by vanilla after a joint battle being claimed as well as recovered from the leader's leftovers.)
 5. **Desync check:** every minute or so each friend compares a small fingerprint with the host's (date, fleets in the system, market stock hashes, world objects). On drift, say so and offer the fresh copy. Today only a new world id (the host loading a save) prompts it.
 6. **Dropout and soak tests (no game needed):** leader or joiner dropping mid-battle, a lock holder disconnecting, and an hour-long three-session run for leaks and stuck states.
 
 Flow and fun:
 
-7. **Rewards for helping:** loot, XP and bounty payouts from a joint battle go to the leader only. Either split credits, bounty and XP by deployed strength, or offer a "share the spoils" screen after the battle on top of `PlayerTalk`'s escrowed offers.
+7. **Rewards for helping:** loot, XP and bounty payouts from a joint battle go to the leader only. Either split credits, bounty and XP by deployed strength, or offer a "share the spoils" screen after the battle on top of `PlayerTalk`'s escrowed offers. (Ships are done in 0.1.3: joiners recover their own, and the enemy ships the leader leaves.)
 8. **Map pings:** Alt+click on the map marks a spot everyone sees for 30 s, with the player's name.
 9. **In-game chat:** none yet. A text line in the Multiplayer window; messages shown as notices.
 10. **"While you were away":** on joining, a short summary since your last session (days passed, raids, big battles), from the world events.

@@ -85,10 +85,27 @@ public final class CharacterExporter {
                 if (officers.get(i).getPerson() == m.getCaptain()) officer = i;
             }
             s.put("officer", officer);
+            // An AI core commanding a ship isn't one of the fleet's officers: it goes with its ship.
+            PersonAPI c = m.getCaptain();
+            if (officer < 0 && !m.isFlagship() && c != null && c.isAICore()) s.put("aiCaptain", person(c, c.getStats()));
             ships.put(s);
         }
         root.put("fleet", ships);
         root.put("cargo", cargo(fleet));
+        // Where you were and how the factions see you: brought back only into this same world.
+        if (fleet.getContainingLocation() != null) {
+            root.put("where", new JSONObject()
+                    .put("loc", fleet.getContainingLocation().isHyperspace() ? multisector.net.FleetState.HYPERSPACE
+                            : fleet.getContainingLocation().getId())
+                    .put("x", fleet.getLocation().x).put("y", fleet.getLocation().y));
+        }
+        JSONObject relations = new JSONObject();
+        com.fs.starfarer.api.campaign.FactionAPI me = Global.getSector().getPlayerFaction();
+        for (com.fs.starfarer.api.campaign.FactionAPI f : Global.getSector().getAllFactions()) {
+            if (f == me || f.isPlayerFaction()) continue;
+            relations.put(f.getId(), me.getRelationship(f.getId()));
+        }
+        root.put("relations", relations);
 
         String text = root.toString();
         if (text.length() > 1000000) {

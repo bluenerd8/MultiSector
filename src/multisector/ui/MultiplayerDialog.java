@@ -217,7 +217,7 @@ public class MultiplayerDialog extends BaseCustomDialogDelegate implements Dialo
     private void build() {
         if (content != null) {
             if (addressField != null) lastJoinAddress = addressField.getText();
-            panel.removeComponent(content);
+            Panels.remove(panel, content); // the scroll panel around it too, or the old one stays under the new
         }
         Session s = Session.get();
         Session.State st = s.getState();

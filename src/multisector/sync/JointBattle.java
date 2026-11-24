@@ -108,10 +108,16 @@ public final class JointBattle implements EveryFrameScript {
         handleMessages(s);
         try {
             leaderFrame(s);
+            JointSpoils.leaderFrame(s);
         } catch (RuntimeException e) {
             log.warn("[MultiSector] joint battle (leader) failed this frame", e);
         }
         joinerFrame(s);
+        try {
+            JointSpoils.frame();
+        } catch (RuntimeException e) {
+            log.warn("[MultiSector] couldn't offer ships to recover", e);
+        }
     }
 
     // ================================================================ messages
@@ -441,6 +447,7 @@ public final class JointBattle implements EveryFrameScript {
         for (Joiner jn : joiners.values()) {
             try {
                 JSONArray lost = new JSONArray();
+                JSONArray destroyed = new JSONArray();
                 JSONArray ships = new JSONArray();
                 int back = 0;
                 for (Map.Entry<String, String> e : jn.lastState.entrySet()) {
@@ -448,6 +455,7 @@ public final class JointBattle implements EveryFrameScript {
                     String state = e.getValue();
                     if ("destroyed".equals(state) || "disabled".equals(state)) {
                         lost.put(owner);
+                        if ("destroyed".equals(state)) destroyed.put(owner);
                         continue;
                     }
                     float[] hc = jn.lastHullCr.get(owner);
@@ -455,7 +463,8 @@ public final class JointBattle implements EveryFrameScript {
                     ships.put(new JSONObject().put("id", owner).put("hull", hc[0]).put("cr", hc[1]));
                     back++;
                 }
-                s.sendBattleMessage(jn.id, msg("result").put("lost", lost).put("ships", ships).toString());
+                s.sendBattleMessage(jn.id, msg("result").put("lost", lost).put("destroyed", destroyed)
+                        .put("ships", ships).toString());
                 log.info("[MultiSector] " + jn.name + "'s part in the battle: " + lost.length() + " ships lost, "
                         + back + " came back");
             } catch (Exception e) {
@@ -619,6 +628,11 @@ public final class JointBattle implements EveryFrameScript {
             fights.remove(m.from);
             return;
         }
+        if ("spoils".equals(k)) {
+            JointSpoils.leftovers(m.fromName, j);
+            refresh();
+            return;
+        }
         if (m.from != leader) return; // not ours
         if (joinBattle == 0 && "joined".equals(k)) joinBattle = b; // we asked to join "whatever they're fighting"
         if (b != joinBattle && joinBattle != 0) return;
@@ -734,6 +748,7 @@ public final class JointBattle implements EveryFrameScript {
         if (d == null || d.getPlugin() != open) {
             // Closed some other way. A battle we joined still reports back; we apply it whenever it comes.
             open = null;
+            JointSpoils.offerOnMap();
             if (phase == Phase.ASKED || phase == Phase.DONE) phase = Phase.NONE;
         }
     }
@@ -768,6 +783,10 @@ public final class JointBattle implements EveryFrameScript {
         Set<String> lost = new HashSet<String>();
         JSONArray la = j.optJSONArray("lost");
         for (int i = 0; la != null && i < la.length(); i++) lost.add(la.optString(i));
+        Set<String> destroyed = new HashSet<String>();
+        JSONArray da = j.optJSONArray("destroyed");
+        for (int i = 0; da != null && i < da.length(); i++) destroyed.add(da.optString(i));
+        List<FleetMemberAPI> wrecks = new ArrayList<FleetMemberAPI>();
         Map<String, JSONObject> after = new HashMap<String, JSONObject>();
         JSONArray sa = j.optJSONArray("ships");
         for (int i = 0; sa != null && i < sa.length(); i++) {
@@ -790,6 +809,7 @@ public final class JointBattle implements EveryFrameScript {
                 lostNames.add(m.getShipName() + " (" + m.getHullSpec().getHullName() + ")");
                 if (m == flag) flagLost = true;
                 data.removeFleetMember(m);
+                wrecks.add(m);
                 continue;
             }
             JSONObject o = after.get(m.getId());
@@ -812,6 +832,10 @@ public final class JointBattle implements EveryFrameScript {
         say2(lostNames.isEmpty()
                 ? "The battle is over. All your ships came back."
                 : "The battle is over. Lost: " + join(lostNames) + ".");
+        JointSpoils.ownLost(leaderName, wrecks, destroyed);
+        String recover = JointSpoils.summary();
+        if (recover != null) say2(recover);
+        if (open == null) JointSpoils.offerOnMap();
         if (saved) say2("Every ship went down, but your flagship limped away, barely holding together.");
         if (flagLost && !saved && me.getFlagship() != null) {
             say2("Your flagship was lost; you've moved to " + me.getFlagship().getShipName() + ".");
@@ -847,6 +871,7 @@ public final class JointBattle implements EveryFrameScript {
 
     /** A save is loading (or the session ended): nothing carries over. */
     public static void forget() {
+        JointSpoils.forget();
         joiners.clear();
         told.clear();
         queued.clear();
@@ -923,7 +948,12 @@ public final class JointBattle implements EveryFrameScript {
                 op.addOption("Order your ships to retreat", "retreat");
                 if (quietOffered) op.addOption("Stop waiting (anything still to come is applied when it arrives)", "leave");
             } else {
-                op.addOption("Leave", "leave");
+                if (phase == Phase.DONE && JointSpoils.hasAny()) {
+                    op.addOption("Recover ships (" + JointSpoils.count() + ")", "recover");
+                    op.addOption("Leave (ships not recovered are lost)", "leave");
+                } else {
+                    op.addOption("Leave", "leave");
+                }
                 dialog.setOptionOnEscape("Leave", "leave");
             }
         }
@@ -964,8 +994,18 @@ public final class JointBattle implements EveryFrameScript {
             } else if ("retreat".equals(id)) {
                 s.sendBattleMessage(leader, msg("retreat", joinBattle).toString());
                 dialog.getTextPanel().addPara("You order your ships to pull out.");
+            } else if ("recover".equals(id)) {
+                JointSpoils.pick(dialog, new Runnable() {
+                    public void run() {
+                        menu();
+                    }
+                });
+                return;
             } else if ("leave".equals(id)) {
-                if (phase == Phase.DONE) phase = Phase.NONE;
+                if (phase == Phase.DONE) {
+                    phase = Phase.NONE;
+                    JointSpoils.leave();
+                }
                 open = null;
                 dialog.dismiss();
                 return;

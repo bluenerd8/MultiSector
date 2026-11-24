@@ -47,9 +47,11 @@
 	# or a menu), the world waits. Off: it keeps running, and your date jumps ahead when
 	# you're back (a few minutes of battle is weeks of game time).
 	"holdWhileEveryoneBusy":true,
-	# When anyone fast-forwards, the world speeds up for everyone, whether or not they hold
-	# fast-forward too. Off (host): only the host's fast-forward counts.
-	"friendsCanFastForward":true,
+	# Off (the default): only the host's fast-forward counts. Everyone is told when the host
+	# speeds up; a friend who holds fast-forward too moves at the host's speed, one who doesn't
+	# follows the host's date smoothly. On: a friend's fast-forward speeds up the world as well,
+	# but the host's game then has to push its fleets along itself, which looks jumpy.
+	"friendsCanFastForward":false,
 
 	# Friends: if you load the shared world before the host is in the game, yours waits,
 	# paused, and keeps trying to join. F8 lets you stop waiting.

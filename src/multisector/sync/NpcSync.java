@@ -144,6 +144,9 @@ public class NpcSync implements EveryFrameScript {
     private static final float PARK_OFFSET = 150000f;
     /** At most this many hidden fleets are named in the log per shared stretch. */
     private static final int LOG_HIDDEN = 30;
+    /** More of our own fleets than this hidden in one place: something keeps spawning them; leave the rest. */
+    private static final int MAX_HIDDEN = 400;
+    private static boolean warnedHidden;
     private int loggedHidden;
 
     public NpcSync() {
@@ -638,6 +641,14 @@ public class NpcSync implements EveryFrameScript {
             }
             if (f.getBattle() != null) continue; // never pull a fleet out of a battle
             if (here.isHyperspace() && (ownerAt == null || dist(f.getLocation(), ownerAt) > HIDE_RADIUS)) continue;
+            if (hidden.size() >= MAX_HIDDEN) {
+                if (!warnedHidden) {
+                    warnedHidden = true;
+                    log.warn("[MultiSector] " + hidden.size() + " of this game's own fleets hidden here already;"
+                            + " leaving the rest (something keeps making new ones)");
+                }
+                continue;
+            }
             hidden.put(f, hide(f));
             if (loggedHidden++ < LOG_HIDDEN) {
                 log.info("[MultiSector] hiding this game's own " + f.getName() + " (" + f.getFaction().getId()
@@ -647,7 +658,9 @@ public class NpcSync implements EveryFrameScript {
         }
         for (Iterator<Map.Entry<CampaignFleetAPI, Hidden>> it = hidden.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<CampaignFleetAPI, Hidden> e = it.next();
-            if (e.getKey().getContainingLocation() != here) {
+            if (e.getKey().isExpired()) {
+                it.remove(); // despawned by the game: nothing to give back
+            } else if (e.getKey().getContainingLocation() != here) {
                 unhide(e.getKey(), e.getValue());
                 it.remove();
             }
@@ -822,9 +835,17 @@ public class NpcSync implements EveryFrameScript {
         return h;
     }
 
-    /** Out beyond every sensor range, standing still. Its routes and managers don't look at where it is. */
+    /**
+     * In a star system: out beyond every sensor range, standing still.
+     * In hyperspace: where it is, unseen (nobody can detect it) and still.
+     * A route fleet moved far from the player in hyperspace counts as gone:
+     * the game spawns a new one for its route near the player, which would
+     * then be hidden in turn, over and over (thousands of fleets).
+     */
     private static void park(CampaignFleetAPI f, Hidden h) {
-        f.setLocation(h.x + PARK_OFFSET, h.y + PARK_OFFSET);
+        LocationAPI loc = f.getContainingLocation();
+        if (loc != null && loc.isHyperspace()) f.setLocation(h.x, h.y);
+        else f.setLocation(h.x + PARK_OFFSET, h.y + PARK_OFFSET);
         f.getVelocity().set(0f, 0f);
     }
 

@@ -5,6 +5,7 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CargoAPI;
 import com.fs.starfarer.api.campaign.FleetDataAPI;
+import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SpecialItemData;
 import com.fs.starfarer.api.characters.FullName;
 import com.fs.starfarer.api.characters.FullName.Gender;
@@ -79,6 +80,11 @@ final class CharacterImporter {
             if (s.optBoolean("flagship")) flagship = m;
             int oi = s.optInt("officer", -1);
             if (oi >= 0 && oi < officers.size() && !s.optBoolean("flagship")) m.setCaptain(officers.get(oi));
+            JSONObject ai = s.optJSONObject("aiCaptain");
+            if (ai != null && oi < 0 && !s.optBoolean("flagship")) {
+                PersonAPI core = aiCaptain(ai);
+                if (core != null) m.setCaptain(core);
+            }
             m.getRepairTracker().setCR((float) s.optDouble("cr", m.getRepairTracker().getMaxCR()));
             m.getStatus().setHullFraction((float) s.optDouble("hullFraction", 1));
             if (s.optBoolean("mothballed")) m.getRepairTracker().setMothballed(true);
@@ -93,10 +99,18 @@ final class CharacterImporter {
         data.setSyncNeeded();
         data.syncIfNeeded();
 
+        // Back in the same world: your standing with the factions, and where you were.
+        boolean sameWorld = Global.getSector().getSeedString().equals(export.optString("sourceWorld", ""));
+        String where = "";
+        if (sameWorld) {
+            relations(export.optJSONObject("relations"));
+            where = place(fleet, export.optJSONObject("where"));
+        }
+
         String name = player.getNameString();
         log.info("[MultiSector] imported character " + name + ": " + shipCount + " ships, " + officers.size()
                 + " officers; skipped " + skipped);
-        String msg = "you're now " + name + " with your imported fleet (" + shipCount + " ships).";
+        String msg = "you're now " + name + " with your imported fleet (" + shipCount + " ships)" + where + ".";
         if (!skipped.isEmpty()) {
             msg += " Left behind because this game doesn't have them (missing mods?): " + summarize(skipped) + ".";
         }
@@ -104,6 +118,68 @@ final class CharacterImporter {
     }
 
     // ---------------------------------------------------------------- people
+
+    /** An AI core commanding a ship, as it was (made by the core's own plugin where there is one). */
+    private PersonAPI aiCaptain(JSONObject o) {
+        String core = o.optString("aiCore", "");
+        if (core.isEmpty() || !exists("commodity", core)) {
+            if (!core.isEmpty()) skipped.add("AI core " + core);
+            return null;
+        }
+        PersonAPI p = null;
+        try {
+            com.fs.starfarer.api.campaign.AICoreOfficerPlugin plugin = com.fs.starfarer.api.util.Misc.getAICoreOfficerPlugin(core);
+            if (plugin != null) p = plugin.createPerson(core, com.fs.starfarer.api.impl.campaign.ids.Factions.PLAYER, new java.util.Random());
+        } catch (RuntimeException e) {
+            p = null;
+        }
+        if (p == null) p = Global.getFactory().createPerson();
+        applyPerson(p, p.getStats(), o, null);
+        p.setAICoreId(core);
+        p.setFaction(com.fs.starfarer.api.impl.campaign.ids.Factions.PLAYER);
+        return p;
+    }
+
+    /** Your standing with each faction, as you left it in this world. */
+    private void relations(JSONObject o) {
+        if (o == null) return;
+        com.fs.starfarer.api.campaign.FactionAPI me = Global.getSector().getPlayerFaction();
+        Iterator<?> it = o.keys();
+        int n = 0;
+        while (it.hasNext()) {
+            String id = (String) it.next();
+            com.fs.starfarer.api.campaign.FactionAPI f = Global.getSector().getFaction(id);
+            if (f == null || f == me || f.isPlayerFaction()) continue;
+            me.setRelationship(id, (float) o.optDouble(id, me.getRelationship(id)));
+            n++;
+        }
+        log.info("[MultiSector] put back our standing with " + n + " factions");
+    }
+
+    /** Your fleet back where it was in this world. Returns " back where you left off" (or "" if it stays). */
+    private String place(CampaignFleetAPI fleet, JSONObject w) {
+        if (w == null) return "";
+        LocationAPI loc = multisector.sync.FleetSync.findLocation(w.optString("loc", ""));
+        if (loc == null) return "";
+        float x = (float) w.optDouble("x", fleet.getLocation().x);
+        float y = (float) w.optDouble("y", fleet.getLocation().y);
+        LocationAPI was = fleet.getContainingLocation();
+        try {
+            if (was != loc) {
+                if (was != null) was.removeEntity(fleet);
+                loc.addEntity(fleet);
+                Global.getSector().setCurrentLocation(loc);
+            }
+            fleet.setLocation(x, y);
+            fleet.setMoveDestination(x, y);
+            log.info("[MultiSector] back where we left off: " + loc.getName() + " (" + Math.round(x) + ", " + Math.round(y) + ")");
+            return ", back where you left off in " + loc.getName();
+        } catch (RuntimeException e) {
+            log.warn("[MultiSector] couldn't put our fleet back where it was", e);
+            if (fleet.getContainingLocation() == null && was != null) was.addEntity(fleet);
+            return "";
+        }
+    }
 
     private void applyPerson(PersonAPI p, MutableCharacterStatsAPI stats, JSONObject o, String nameOverride) {
         ShipJson.applyPerson(p, stats, o, nameOverride);

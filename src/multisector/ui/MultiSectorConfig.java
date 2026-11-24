@@ -24,7 +24,7 @@ public final class MultiSectorConfig {
     private static boolean jointBattleDeployAll = true;
     private static boolean jointBattleChecks = true;
     private static boolean holdWhileEveryoneBusy = true;
-    private static boolean friendsCanFastForward = true;
+    private static boolean friendsCanFastForward = false;
     private static boolean waitForHost = true;
     private static boolean endWhenHostLeaves = true;
     private static boolean saveWithHost = true;
@@ -68,7 +68,7 @@ public final class MultiSectorConfig {
             jointBattleDeployAll = json.optBoolean("jointBattleDeployAll", true);
             jointBattleChecks = json.optBoolean("jointBattleChecks", true);
             holdWhileEveryoneBusy = json.optBoolean("holdWhileEveryoneBusy", true);
-            friendsCanFastForward = json.optBoolean("friendsCanFastForward", true);
+            friendsCanFastForward = json.optBoolean("friendsCanFastForward", false);
             waitForHost = json.optBoolean("waitForHost", true);
             endWhenHostLeaves = json.optBoolean("endWhenHostLeaves", true);
             saveWithHost = json.optBoolean("saveWithHost", true);

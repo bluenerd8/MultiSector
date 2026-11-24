@@ -4,7 +4,9 @@ import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignClockAPI;
+import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.util.Misc;
 import multisector.net.ClockState;
@@ -28,10 +30,11 @@ import java.util.Locale;
  *     however long their game spent loading or in a market.</li>
  * <li><b>Pause:</b> pressing pause on the map pauses everyone, and anyone
  *     can resume. Pauses caused by your own menus and dialogs stay local.</li>
- * <li><b>Fast-forward:</b> anyone. A friend's fast-forward is sent to the
- *     host, the shared clock speeds up, and the host's game moves its fleets
- *     the extra time itself (its own fast-forward key can't be pressed for
- *     it). Everyone else is told to fast-forward too.</li>
+ * <li><b>Fast-forward:</b> the host's (unless friendsCanFastForward is
+ *     on). Everyone is told. A friend who holds fast-forward too runs at the
+ *     host's speed; one who doesn't follows the host's date in small steps
+ *     every frame, the planets around them with it (a game's fast-forward
+ *     can't be switched on for it).</li>
  * <li><b>Nobody on the map:</b> the world waits (Session, on the host's
  *     network thread, since campaigns don't run during battles).</li>
  * </ul>
@@ -71,8 +74,16 @@ public class ClockSync implements EveryFrameScript {
     private boolean speedupHintShown;
     private boolean sentFast;
     private long nextFastSend;
+    private long hostOnlyHintAt;
+    private LocationAPI followedIn;
     // host
     private int shownFastBy = -1;
+    private long ownFastNoticeAt;
+    private boolean wasHostFast;
+
+    public ClockSync() {
+        ClockAccess.forget(); // a new world loading: nothing owed from the last one
+    }
 
     public boolean isDone() {
         return false;
@@ -141,6 +152,12 @@ public class ClockSync implements EveryFrameScript {
             if (localPaused == running) sector.setPaused(!running);
             CampaignUIAPI ui = sector.getCampaignUI();
             boolean hostFast = ui.isFastForward();
+            if (hostFast && !wasHostFast && running && session.getPlayers().size() > 1
+                    && nanos - ownFastNoticeAt > 60_000_000_000L) {
+                ownFastNoticeAt = nanos;
+                session.notice("You're fast-forwarding: the world speeds up for everyone.");
+            }
+            wasHostFast = hostFast;
             float[] asked = MultiSectorConfig.isFriendsCanFastForward() ? session.fastRequest(nanos) : null;
             // A friend fast-forwarding while we aren't: the world speeds up anyway, and this game keeps up below.
             boolean boosted = running && !hostFast && asked != null;
@@ -201,12 +218,16 @@ public class ClockSync implements EveryFrameScript {
 
         capSpeedup(st.isFast() ? st.fastMult : 1f);
         askToFastForward(session, sector, nanos);
-        // Someone else is fast-forwarding and we aren't: our game can't press the key for us, so our fleet and the
-        // fleets of our own world here get the extra time directly (stand-ins follow their owner's game anyway).
         CampaignUIAPI fui = sector.getCampaignUI();
-        boolean boosted = st.isFast() && st.fastBy != session.getMyId() && !sector.isPaused()
-                && fui != null && !fui.isFastForward();
-        if (boosted) NpcSync.boostLocalFleets(Math.min(amount * (st.fastMult - 1f), MAX_BOOST_SECONDS));
+        boolean holdingFast = fui != null && fui.isFastForward();
+        if (holdingFast && !st.isFast() && !MultiSectorConfig.isFriendsCanFastForward()
+                && nanos - hostOnlyHintAt > 60_000_000_000L) {
+            hostOnlyHintAt = nanos;
+            session.notice("Only the host can fast-forward. When they do, hold fast-forward too to move at their speed.");
+        }
+        // Someone else is fast-forwarding and we aren't: our game's own fast-forward can't be switched on for us,
+        // so the date follows the host's in a small step every frame, with the planets here (see ClockAccess).
+        boolean following = st.isFast() && st.fastBy != session.getMyId() && !sector.isPaused() && !holdingFast;
 
         int ping = session.getPingMs();
         long target = st.extrapolate(r.arrivedNanos, nanos, ping > 0 ? ping / 2f : 0f);
@@ -220,7 +241,18 @@ public class ClockSync implements EveryFrameScript {
             }
             log.info("[MultiSector] first clock sync: " + days(diff) + " days off the host");
         }
-        if (Math.abs(diff) > (st.isStopped() ? STOPPED_SNAP : CLIENT_DRIFT)) ClockAccess.set(target, boosted);
+        CampaignFleetAPI me = sector.getPlayerFleet();
+        LocationAPI here = me == null ? null : me.getContainingLocation();
+        if (here != followedIn) {
+            followedIn = here;
+            ClockAccess.payUp(here); // somewhere new: its planets are where they'd be by now
+        }
+        if (following && diff > 0 && diff < DAY) {
+            ClockAccess.follow(target);
+        } else if (Math.abs(diff) > (st.isStopped() ? STOPPED_SNAP : CLIENT_DRIFT)) {
+            ClockAccess.set(target, following);
+        }
+        if (!st.isFast()) ClockAccess.settle(false); // fast-forward is over: the rest of the sector catches up once
         lastLocalPaused = sector.isPaused();
         wasMapView = true;
     }
@@ -259,8 +291,9 @@ public class ClockSync implements EveryFrameScript {
         if (!prev.isHeld() && st.isHeld()) session.notice(waitingText(st));
         if (prev.isHeld() && !st.isHeld() && !st.isPaused()) session.notice("Done waiting; the game carries on.");
         if ((!prev.isFast() || prev.fastBy != st.fastBy) && st.isFast() && st.fastBy != session.getMyId()) {
-            session.notice(session.playerName(st.fastBy < 0 ? 0 : st.fastBy)
-                    + " is fast-forwarding, so the world speeds up for everyone.");
+            session.notice(session.playerName(st.fastBy < 0 ? 0 : st.fastBy) + " is fast-forwarding (x"
+                    + JointCombat.speedText(st.fastMult) + "), so the world speeds up for everyone."
+                    + " Hold fast-forward too to move at their speed.");
         }
     }
 
@@ -272,12 +305,14 @@ public class ClockSync implements EveryFrameScript {
      * Fast-forward multiplies how many times the game advances per frame by
      * campaignSpeedupMult. Setting it to 1 makes a friend's fast-forward do
      * nothing while the host isn't fast-forwarding, so they can't run ahead.
+     * Kept every frame: a campaign speed-up mod (SpeedUp and the like) writes
+     * the same setting when its key is pressed.
      */
     private void capSpeedup(float mult) {
-        if (mult == appliedSpeedup) return;
         SettingsAPI settings = Global.getSettings();
-        if (originalSpeedup == null) originalSpeedup = settings.getFloat(SPEEDUP);
         float m = mult <= 1f ? 1f : mult;
+        if (mult == appliedSpeedup && settings.getFloat(SPEEDUP) == m) return;
+        if (originalSpeedup == null) originalSpeedup = settings.getFloat(SPEEDUP);
         settings.setFloat(SPEEDUP, m);
         appliedSpeedup = mult;
         if (m <= 1f && !speedupHintShown && originalSpeedup > 1f) {
@@ -287,8 +322,10 @@ public class ClockSync implements EveryFrameScript {
     }
 
     private void resetFriendState() {
+        ClockAccess.settle(false); // nothing owed into another session, or none at all
         pendingPause = null;
         sentFast = false;
+        followedIn = null;
         shownFastBy = -1;
         synced = false;
         lastSeq = -1;
@@ -340,7 +377,7 @@ public class ClockSync implements EveryFrameScript {
 
     // ================================================================ shared
 
-    /** "Febl is fast-forwarding (x3)" while someone else speeds the world up, for the players panel; else null. */
+    /** "Febl is fast-forwarding (x3)", or "You're fast-forwarding (x3)", for the players panel; else null. */
     public static String fastText() {
         Session s = Session.get();
         int by;
@@ -356,8 +393,9 @@ public class ClockSync implements EveryFrameScript {
             by = r.state.fastBy;
             mult = r.state.fastMult;
         }
-        if (by == s.getMyId() || by < 0) return null; // our own shows on the game's own speed indicator
-        return s.playerName(by) + " is fast-forwarding (x" + Math.round(mult) + ")";
+        if (by < 0) return null;
+        if (by == s.getMyId()) return "You're fast-forwarding (x" + JointCombat.speedText(mult) + "): everyone speeds up";
+        return s.playerName(by) + " is fast-forwarding (x" + JointCombat.speedText(mult) + ")";
     }
 
     /** On the campaign map itself: no dialog, menu or core screen (cargo, refit, intel...) open. */

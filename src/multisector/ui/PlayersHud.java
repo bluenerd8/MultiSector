@@ -37,6 +37,9 @@ public class PlayersHud implements CampaignUIRenderingListener {
 
     private final List<LabelAPI[]> rows = new ArrayList<LabelAPI[]>();
     private LabelAPI title;
+    /** Who's fast-forwarding, on a line of its own under the title (too long to share it), or null. */
+    private LabelAPI fastLine;
+    private boolean showFast;
     private List<PlayerInfo> info = new ArrayList<PlayerInfo>();
     private long nextRefresh;
 
@@ -85,7 +88,8 @@ public class PlayersHud implements CampaignUIRenderingListener {
 
         float width = PAD * 2;
         for (float c : COLS) width += c;
-        float height = PAD * 2 + LINE * (info.size() + 1);
+        int extra = showFast ? 1 : 0;
+        float height = PAD * 2 + LINE * (info.size() + 1 + extra);
         float sw = Global.getSettings().getScreenWidth();
         float sh = Global.getSettings().getScreenHeight();
         String corner = MultiSectorConfig.getHudCorner();
@@ -98,9 +102,10 @@ public class PlayersHud implements CampaignUIRenderingListener {
 
         float top = bottom + height - PAD;
         place(title, left + PAD, top - LINE, width - PAD * 2);
+        if (showFast) place(fastLine, left + PAD, top - LINE * 2, width - PAD * 2);
         for (int i = 0; i < info.size(); i++) {
             float x = left + PAD;
-            float y = top - LINE * (i + 2);
+            float y = top - LINE * (i + 2 + extra);
             LabelAPI[] row = rows.get(i);
             for (int c = 0; c < COLS.length; c++) {
                 place(row[c], x, y, COLS[c]);
@@ -108,15 +113,18 @@ public class PlayersHud implements CampaignUIRenderingListener {
             }
         }
         title.render(1f);
+        if (showFast) fastLine.render(1f);
         for (int i = 0; i < info.size(); i++) for (LabelAPI l : rows.get(i)) l.render(1f);
     }
 
     private void updateLabels() {
         if (title == null) title = label();
+        if (fastLine == null) fastLine = label();
         String fast = ClockSync.fastText();
-        title.setText("Players (" + (info.size() + 1) + ")   " + MultiSectorConfig.getHudHotkeyName() + " hides"
-                + (fast == null ? "" : "   >> " + fast));
-        title.setColor(fast == null ? Misc.getGrayColor() : Misc.getHighlightColor());
+        set(title, "Players (" + (info.size() + 1) + ")   " + MultiSectorConfig.getHudHotkeyName() + " hides",
+                Misc.getGrayColor());
+        showFast = fast != null;
+        if (showFast) set(fastLine, ">> " + shorten(fast, 70), Misc.getHighlightColor());
         while (rows.size() < info.size()) {
             rows.add(new LabelAPI[]{label(), label(), label(), label()});
         }

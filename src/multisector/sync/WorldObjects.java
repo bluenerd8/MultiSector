@@ -206,9 +206,30 @@ public final class WorldObjects implements EveryFrameScript {
             if (t.getPlugin() instanceof DebrisFieldTerrainPlugin && t.getId() != null) out.put(t.getId(), t);
         }
         for (CustomCampaignEntityAPI c : loc.getCustomEntities()) {
-            if (c.getId() != null && kind(c) != null) out.put(c.getId(), c);
+            if (c.getId() == null || kind(c) == null) continue;
+            if (PODS.equals(kind(c)) && c.getCargo() == null) {
+                broken(c);
+                continue;
+            }
+            out.put(c.getId(), c);
         }
         return out;
+    }
+
+    /**
+     * Cargo pods with no cargo at all (not empty: none). The game's own pods
+     * dialog fails on them, and there's nothing in them to share: let them
+     * fade away, on this game, which tells the others they're gone.
+     */
+    private static void broken(CustomCampaignEntityAPI pods) {
+        if (pods.isExpired() || pods.getMemoryWithoutUpdate().getBoolean("$multisector_brokenPods")) return;
+        pods.getMemoryWithoutUpdate().set("$multisector_brokenPods", true);
+        try {
+            Misc.fadeAndExpire(pods);
+            log.info("[MultiSector] cargo pods " + pods.getId() + " have no cargo hold (the game can't open them): removing them");
+        } catch (RuntimeException e) {
+            log.warn("[MultiSector] couldn't remove broken cargo pods " + pods.getId(), e);
+        }
     }
 
     private static String kind(SectorEntityToken e) {
@@ -407,6 +428,10 @@ public final class WorldObjects implements EveryFrameScript {
             e = createWreck(loc, id, j);
         } else if (PODS.equals(kind)) {
             CustomCampaignEntityAPI pods = loc.addCustomEntity(id, null, Entities.CARGO_PODS, Factions.NEUTRAL);
+            if (pods.getCargo() == null) {
+                loc.removeEntity(pods); // pods nobody could open: better none
+                return null;
+            }
             pods.setDiscoverable(null);
             pods.setDiscoveryXP(null);
             pods.setSensorProfile(1f);
@@ -538,7 +563,10 @@ public final class WorldObjects implements EveryFrameScript {
             if (p instanceof CampaignObjective && j.has("hacked")) ((CampaignObjective) p).setHacked(j.optBoolean("hacked"));
         } else if (PODS.equals(kind)) {
             CargoAPI c = e.getCargo();
-            if (c == null) return;
+            if (c == null) {
+                if (e instanceof CustomCampaignEntityAPI) broken((CustomCampaignEntityAPI) e);
+                return;
+            }
             c.clear();
             JSONArray stacks = j.optJSONArray("cargo");
             for (int i = 0; stacks != null && i < stacks.length(); i++) MarketSync.add(c, stacks.getJSONObject(i));

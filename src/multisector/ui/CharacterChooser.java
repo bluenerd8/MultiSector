@@ -268,7 +268,7 @@ public class CharacterChooser extends BaseCustomDialogDelegate implements Dialog
     // ---------------------------------------------------------------- layout
 
     private void build() {
-        for (TooltipMakerAPI e : elements) panel.removeComponent(e);
+        for (TooltipMakerAPI e : elements) Panels.remove(panel, e); // with their scroll panels
         elements.clear();
         Color hl = Misc.getHighlightColor();
         Color gray = Misc.getGrayColor();

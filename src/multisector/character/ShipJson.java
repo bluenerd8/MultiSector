@@ -47,6 +47,8 @@ public final class ShipJson {
         o.put("personality", p.getPersonalityAPI() == null ? "" : p.getPersonalityAPI().getId());
         o.put("rank", p.getRankId() == null ? "" : p.getRankId());
         o.put("post", p.getPostId() == null ? "" : p.getPostId());
+        if (p.isAICore() && p.getAICoreId() != null) o.put("aiCore", p.getAICoreId());
+        if (com.fs.starfarer.api.util.Misc.isUnremovable(p)) o.put("unremovable", true);
         o.put("level", stats.getLevel());
         o.put("xp", stats.getXP());
         o.put("bonusXp", stats.getBonusXp());
@@ -77,6 +79,8 @@ public final class ShipJson {
         if (!o.optString("personality", "").isEmpty()) p.setPersonality(o.optString("personality"));
         if (!o.optString("rank", "").isEmpty()) p.setRankId(o.optString("rank"));
         if (!o.optString("post", "").isEmpty()) p.setPostId(o.optString("post"));
+        if (!o.optString("aiCore", "").isEmpty()) p.setAICoreId(o.optString("aiCore"));
+        if (o.optBoolean("unremovable")) com.fs.starfarer.api.util.Misc.setUnremovable(p, true);
 
         stats.resetSkills();
         stats.setLevel(o.optInt("level", 1));

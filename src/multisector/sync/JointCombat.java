@@ -70,12 +70,17 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * the leader's do. They can't be hurt there (shots hit, nothing is
  * damaged), so everything that counts comes from the leader. The joiner's
  * piloted ship is their "own" ship there, camera and all, but its controls
- * are read and sent to the leader instead of moving it: WASD/QE to move,
- * mouse to aim, left button fires the selected group (1-7), right button
- * shields, F system, V vent, Z fighters, T autofire, R target.
+ * go to the leader instead of moving it. Movement is read from what the
+ * game itself makes of the joiner's keys (their own bindings, the strafe key
+ * that turns the ship to the mouse included); autofire per group (Ctrl+1-7
+ * by default) is the joiner's own setting there; mouse aims and fires the
+ * selected group, right button shields, then system, vent, fighters and
+ * target from the joiner's bindings.
  *
  * <p>The view follows the leader's combat speed and pause, so speed-up mods
- * (2x combat speed and the like) on the leader show at the same speed.
+ * (2x combat speed and the like) on the leader show at the same speed. Only
+ * the leader sets it: a joiner's own speed-up key does nothing in the view.
+ * Both sides are told when it changes.
  */
 final class JointCombat {
 
@@ -93,10 +98,22 @@ final class JointCombat {
     private static final int K_W = 1, K_S = 2, K_A = 4, K_D = 8, K_Q = 16, K_E = 32, K_FIRE = 64, K_DECEL = 128;
     /** The joiner switched their ship to autopilot: the leader gives it its AI. */
     private static final int K_AUTO = 256;
-    /** Commands the flown ship in the view may carry out itself: they only show (engines, the selected group). */
+    /** The strafe key is held (or toggled on): the ship turns to face the mouse; the turn keys strafe. */
+    private static final int K_FACE = 512;
+    /** The packet carries the joiner's autofire setting for each weapon group. */
+    private static final int K_MASK = 1024;
+    /** Hold fire: autofiring weapons stay quiet. */
+    private static final int K_HOLD = 2048;
+    /**
+     * Commands the flown ship in the view may carry out itself. Movement only
+     * lights its engines (the stream overwrites where it is) and is what we
+     * read back as the joiner's controls; group selection, autofire and hold
+     * fire are the joiner's settings, read back the same way.
+     */
     private static final java.util.EnumSet<ShipCommand> LOCAL_COMMANDS = java.util.EnumSet.of(ShipCommand.SELECT_GROUP,
             ShipCommand.ACCELERATE, ShipCommand.ACCELERATE_BACKWARDS, ShipCommand.DECELERATE, ShipCommand.TURN_LEFT,
-            ShipCommand.TURN_RIGHT, ShipCommand.STRAFE_LEFT, ShipCommand.STRAFE_RIGHT);
+            ShipCommand.TURN_RIGHT, ShipCommand.STRAFE_LEFT, ShipCommand.STRAFE_RIGHT, ShipCommand.TOGGLE_AUTOFIRE,
+            ShipCommand.HOLD_FIRE);
     /** Toggle counters in an input packet: shield, system, vent, fighters, autofire. */
     private static final int TOGGLES = 5;
 
@@ -209,6 +226,8 @@ final class JointCombat {
         int group;
         int target;
         final int[] toggles = new int[TOGGLES];
+        /** Weapon groups the joiner has on autofire (first 8), when keys has K_MASK. */
+        int autoMask;
         long arrived;
     }
 
@@ -238,6 +257,11 @@ final class JointCombat {
         private final Map<Integer, Input> inputs = new ConcurrentHashMap<Integer, Input>();
         /** Per ship a joiner flies: which weapon groups they want on autofire (kept when autopilot swaps the AI). */
         private final Map<ShipAPI, boolean[]> autofire = new IdentityHashMap<ShipAPI, boolean[]>();
+        /** The ammo we last sent for each weapon that uses it (missiles and the like). */
+        private final Map<WeaponAPI, Integer> sentAmmo = new IdentityHashMap<WeaponAPI, Integer>();
+        /** Battle speed the joiners were last told about, and a new one waiting to settle. */
+        private float toldSpeed = 1f, newSpeed = 1f;
+        private long newSpeedSince;
         /** Ships flown from a joiner's controls right now (the rest of the time they have their own AI). */
         private final Set<ShipAPI> piloted = java.util.Collections.newSetFromMap(new IdentityHashMap<ShipAPI, Boolean>());
 
@@ -368,6 +392,7 @@ final class JointCombat {
                 }
                 countShots();
                 long now = System.nanoTime();
+                tellSpeed(now);
                 if (now - nextState >= 0) {
                     nextState = now + STATE_NANOS;
                     sendStates(s);
@@ -382,6 +407,9 @@ final class JointCombat {
                 }
                 if (over && !ended) {
                     ended = true;
+                    java.util.Set<Integer> fought = new HashSet<Integer>();
+                    for (JointBattle.Joiner jn : JointBattle.joiners()) fought.add(jn.id);
+                    JointSpoils.noteEnemyLosses(engine, fought); // before our recovery screen changes them
                     for (JointBattle.Joiner jn : JointBattle.joiners()) s.sendBattleMessage(jn.id, JointBattle.msg("cend").toString());
                     JointBattle.finishJoiners(s);
                     JointBattle.tellFightSoon();
@@ -615,7 +643,7 @@ final class JointCombat {
             short count = 0;
             int room = NetConfig.MAX_DATAGRAM - 7 - 8;
             for (Map.Entry<ShipAPI, Integer> e : ids.entrySet()) {
-                byte[] entry = encode(e.getValue(), e.getKey(), shots);
+                byte[] entry = encode(e.getValue(), e.getKey(), shots, ammoFor(e.getValue(), e.getKey()));
                 if (bb == null || bb.remaining() < entry.length) {
                     if (bb != null) {
                         bb.putShort(countPos, count);
@@ -643,7 +671,25 @@ final class JointCombat {
             }
         }
 
-        private static byte[] encode(int id, ShipAPI ship, Map<WeaponAPI, int[]> shots) {
+        /**
+         * Weapons whose ammo changed since we last sent it, and every few
+         * updates all of them (a datagram can be lost): index and ammo.
+         */
+        private List<int[]> ammoFor(int id, ShipAPI ship) {
+            List<int[]> out = new ArrayList<int[]>();
+            boolean all = (seq + id) % 10 == 0;
+            List<WeaponAPI> weapons = ship.getAllWeapons();
+            for (int i = 0; i < weapons.size() && i < 255 && out.size() < 40; i++) {
+                WeaponAPI w = weapons.get(i);
+                if (!w.usesAmmo()) continue;
+                int a = Math.max(0, Math.min(w.getAmmo(), Short.MAX_VALUE));
+                Integer was = sentAmmo.put(w, a);
+                if (all || was == null || was != a) out.add(new int[]{i, a});
+            }
+            return out;
+        }
+
+        private static byte[] encode(int id, ShipAPI ship, Map<WeaponAPI, int[]> shots, List<int[]> ammo) {
             List<WeaponAPI> weapons = ship.getAllWeapons();
             List<int[]> firing = new ArrayList<int[]>();
             for (int i = 0; i < weapons.size() && firing.size() < 40; i++) {
@@ -653,7 +699,7 @@ final class JointCombat {
                 // count 0: a beam, firing right now; otherwise how many shots since the last update
                 if (beam || c != null) firing.add(new int[]{i, Math.round(w.getCurrAngle() * 10f), beam ? 0 : Math.min(255, c[0])});
             }
-            ByteBuffer bb = ByteBuffer.allocate(44 + firing.size() * 4);
+            ByteBuffer bb = ByteBuffer.allocate(45 + firing.size() * 4 + ammo.size() * 3);
             bb.putShort((short) id);
             bb.putFloat(ship.getLocation().x).putFloat(ship.getLocation().y);
             bb.putFloat(ship.getVelocity().x).putFloat(ship.getVelocity().y);
@@ -698,6 +744,11 @@ final class JointCombat {
                 bb.putShort((short) f[1]);
                 bb.put((byte) f[2]);
             }
+            bb.put((byte) ammo.size());
+            for (int[] a : ammo) {
+                bb.put((byte) a[0]);
+                bb.putShort((short) a[1]);
+            }
             byte[] out = new byte[bb.position()];
             bb.flip();
             bb.get(out);
@@ -718,6 +769,7 @@ final class JointCombat {
                 in.group = bb.get();
                 in.target = bb.getShort();
                 for (int i = 0; i < TOGGLES; i++) in.toggles[i] = bb.get() & 0xff;
+                in.autoMask = bb.remaining() > 0 ? bb.get() & 0xff : 0;
                 in.arrived = System.nanoTime();
                 Input old = inputs.get(p.from);
                 if (old == null || in.seq > old.seq || old.seq - in.seq > 1000) inputs.put(p.from, in);
@@ -915,6 +967,26 @@ final class JointCombat {
             }
         }
 
+        /**
+         * Our battle speed (a speed-up mod, at our end only) is everyone's in
+         * this battle: say so when it settles on a new one. Slow motion from
+         * a ship system (time dilation and the like) isn't worth a line.
+         */
+        private void tellSpeed(long now) {
+            if (JointBattle.joiners().isEmpty()) return;
+            float r = Math.round(engine.getTimeMult().getModifiedValue() * 4f) / 4f;
+            if (r < 1f) r = 1f;
+            if (Math.abs(r - newSpeed) > 0.01f) {
+                newSpeed = r;
+                newSpeedSince = now;
+                return;
+            }
+            if (Math.abs(newSpeed - toldSpeed) < 0.01f || now - newSpeedSince < 700_000_000L) return;
+            toldSpeed = newSpeed;
+            banner(toldSpeed > 1.01f ? "Battle speed x" + speedText(toldSpeed) + " for everyone in this battle"
+                    : "Battle speed back to normal for everyone in this battle");
+        }
+
         /** A line in the battle's message log, for the leader, from anywhere in combat. */
         static void message(String text) {
             Leader l = active;
@@ -1071,10 +1143,15 @@ final class JointCombat {
         public void advance(float amount) {
             Input in = inputs.get(joiner);
             if (in == null || System.nanoTime() - in.arrived > INPUT_STALE_NANOS) return; // the leader switches us out
+            Vector2f mouse = new Vector2f(in.mx, in.my);
             if ((in.keys & K_W) != 0) ship.giveCommand(ShipCommand.ACCELERATE, null, 0);
             if ((in.keys & K_S) != 0) ship.giveCommand(ShipCommand.ACCELERATE_BACKWARDS, null, 0);
-            if ((in.keys & K_A) != 0) ship.giveCommand(ShipCommand.TURN_LEFT, null, 0);
-            if ((in.keys & K_D) != 0) ship.giveCommand(ShipCommand.TURN_RIGHT, null, 0);
+            if ((in.keys & K_FACE) != 0) {
+                faceMouse(mouse); // here, with the real facing: the joiner's view is a ping behind
+            } else {
+                if ((in.keys & K_A) != 0) ship.giveCommand(ShipCommand.TURN_LEFT, null, 0);
+                if ((in.keys & K_D) != 0) ship.giveCommand(ShipCommand.TURN_RIGHT, null, 0);
+            }
             if ((in.keys & K_Q) != 0) ship.giveCommand(ShipCommand.STRAFE_LEFT, null, 0);
             if ((in.keys & K_E) != 0) ship.giveCommand(ShipCommand.STRAFE_RIGHT, null, 0);
             if ((in.keys & K_DECEL) != 0) ship.giveCommand(ShipCommand.DECELERATE, null, 0);
@@ -1087,18 +1164,17 @@ final class JointCombat {
             ShipCommand[] toggles = {ShipCommand.TOGGLE_SHIELD_OR_PHASE_CLOAK, ShipCommand.USE_SYSTEM,
                     ShipCommand.VENT_FLUX, ShipCommand.PULL_BACK_FIGHTERS, null};
             for (int i = 0; i < TOGGLES; i++) {
-                if (seen[i] >= 0 && seen[i] != in.toggles[i]) {
-                    // Autofire is set on the group itself: the command only works for the game's own player ship.
-                    if (toggles[i] == null) {
-                        if (group < auto.length) auto[group] = !auto[group];
-                    } else {
-                        ship.giveCommand(toggles[i], null, group);
-                    }
-                }
+                if (seen[i] >= 0 && seen[i] != in.toggles[i] && toggles[i] != null) ship.giveCommand(toggles[i], null, group);
                 seen[i] = in.toggles[i];
             }
-            // The ship's AI may have left it holding fire (autopilot, or orders before a transfer): it's flown now.
-            if (ship.isHoldFire()) ship.setHoldFire(false);
+            // Autofire is the joiner's setting in their view (the game's own Ctrl+1-7 there), set on the groups
+            // here: the command only works for the game's own player ship.
+            if ((in.keys & K_MASK) != 0) {
+                for (int i = 0; i < auto.length && i < 8; i++) auto[i] = (in.autoMask & (1 << i)) != 0;
+            }
+            // Hold fire as the joiner has it. (The ship's AI may also have left it holding fire: it's flown now.)
+            boolean hold = (in.keys & K_HOLD) != 0;
+            if (ship.isHoldFire() != hold) ship.setHoldFire(hold);
             boolean firing = (in.keys & K_FIRE) != 0;
             for (int i = 0; i < groups.size() && i < auto.length; i++) {
                 // The selected group fires where they aim while they hold fire; otherwise each group as they set it.
@@ -1112,7 +1188,6 @@ final class JointCombat {
             ShipAPI target = in.target > 0 ? byId.get(in.target) : null;
             if (target != null && target.isAlive()) ship.setShipTarget(target);
 
-            Vector2f mouse = new Vector2f(in.mx, in.my);
             // Systems that act on a spot (teleports, mine and drone strikes) read the ship's mouse target, or for
             // an AI the "system target" it picked. This ship is flown, not AI-chosen: both are where the joiner aims,
             // as for a player, and never left empty (an empty one is the "src is null" crash).
@@ -1123,6 +1198,30 @@ final class JointCombat {
                 for (WeaponAPI w : groups.get(group).getWeaponsCopy()) aim(w, mouse);
             }
             if ((in.keys & K_FIRE) != 0) ship.giveCommand(ShipCommand.FIRE, mouse, group);
+        }
+
+        /**
+         * The strafe key: turn toward the mouse, easing off in time to stop
+         * on it (turning the other way brakes harder than letting go).
+         */
+        private void faceMouse(Vector2f mouse) {
+            Vector2f at = ship.getLocation();
+            if (Math.abs(mouse.x - at.x) + Math.abs(mouse.y - at.y) < 1f) return;
+            float want = (float) Math.toDegrees(Math.atan2(mouse.y - at.y, mouse.x - at.x));
+            float diff = wrap(want - ship.getFacing());
+            float w = ship.getAngularVelocity();
+            if (Math.abs(diff) < 0.5f && Math.abs(w) < 3f) return;
+            float brake = Math.max(1f, ship.getTurnDeceleration());
+            float stopping = w * w / (2f * brake);
+            boolean toward = w * diff > 0f;
+            if (toward && stopping >= Math.abs(diff)) {
+                // Letting go would carry it past the mouse: brake.
+                if (stopping > Math.abs(diff) * 1.2f) {
+                    ship.giveCommand(diff > 0f ? ShipCommand.TURN_RIGHT : ShipCommand.TURN_LEFT, null, 0);
+                }
+            } else {
+                ship.giveCommand(diff > 0f ? ShipCommand.TURN_LEFT : ShipCommand.TURN_RIGHT, null, 0);
+            }
         }
 
         /** Turns a weapon toward the mouse, as far as its arc allows. */
@@ -1157,6 +1256,12 @@ final class JointCombat {
         public ShipAIConfig getConfig() {
             return new ShipAIConfig();
         }
+    }
+
+    /** "2", "1.5", "2.25". */
+    static String speedText(float mult) {
+        return Math.abs(mult - Math.round(mult)) < 0.01f ? String.valueOf(Math.round(mult))
+                : String.format(java.util.Locale.ROOT, "%.2f", mult).replaceAll("0+$", "");
     }
 
     private static float wrap(float deg) {
@@ -1238,6 +1343,8 @@ final class JointCombat {
         int sys = 255, cloak = 255;
         /** Its weapon groups on autofire on the leader's game, one bit each (first 8). */
         int autofire;
+        /** Ammo the leader's weapons have now, by weapon index, not yet put on ours. */
+        final Map<Integer, Integer> ammoDue = new HashMap<Integer, Integer>();
         long arrived;
         boolean hasState;
     }
@@ -1256,7 +1363,19 @@ final class JointCombat {
         private int group;
         private int target;
         private final int[] toggles = new int[TOGGLES];
-        private boolean wasRmb, wasF, wasV, wasZ, wasT, wasR;
+        private boolean wasRmb, wasF, wasV, wasZ, wasR, wasStrafe, strafeOn;
+        /** The joiner's own bindings, from the game (defaults if it names a key we can't read). */
+        private int strafeKey = Keyboard.KEY_LSHIFT, systemKey = Keyboard.KEY_F, ventKey = Keyboard.KEY_V,
+                fightersKey = Keyboard.KEY_Z, targetKey = Keyboard.KEY_R;
+        private boolean strafeToggle;
+        /** We fly our ship ourselves right now (not autopilot, not in a shuttle): its engines show our keys. */
+        private boolean flyingLive;
+        private int liveTicks, rawTicks;
+        /** The engines answer our keys (seen once): read them. Otherwise, after a while, the keys themselves. */
+        private boolean enginesSeen, rawKeys;
+        /** Battle speed we last told the joiner about, a new one settling, and when we said only the leader sets it. */
+        private float toldSpeed = 1f, newSpeed = 1f;
+        private long newSpeedSince, toldOwnSpeedAt;
         private volatile boolean ending;
         /** Ships in the stream we haven't been told about (or couldn't make), and how often we've asked. */
         private final Set<Integer> unknown = new HashSet<Integer>();
@@ -1271,12 +1390,6 @@ final class JointCombat {
         private long nextAiCheck;
         private long openedAt;
         private boolean synced;
-        /**
-         * The game shows our flown ship as on autopilot from the start (it has
-         * the view's do-nothing AI). That isn't the player's choice: only once
-         * autopilot has been off does turning it on count.
-         */
-        private boolean autopilotAtStart;
         private long nextCheck, nextReserves, nextOrders, ordersSentAt;
         private String ordersSent = "";
         private boolean retreatSent;
@@ -1303,6 +1416,7 @@ final class JointCombat {
             view = this;
             viewOpening = 0;
             openedAt = System.nanoTime();
+            readBindings();
             try {
                 com.fs.starfarer.api.campaign.CampaignFleetAPI me = Global.getSector().getPlayerFleet();
                 if (me != null) for (FleetMemberAPI m : me.getFleetData().getMembersListCopy()) realIds.add(m.getId());
@@ -1323,6 +1437,57 @@ final class JointCombat {
         /** The leader's battle is over: close the view. */
         void end() {
             ending = true;
+        }
+
+        /** The joiner's key for system, vent, fighters, target and strafe, as the game has them bound. */
+        private void readBindings() {
+            StringBuilder b = new StringBuilder();
+            strafeKey = binding("SHIP_STRAFE_KEY", Keyboard.KEY_LSHIFT, b);
+            systemKey = binding("SHIP_USE_SYSTEM", Keyboard.KEY_F, b);
+            ventKey = binding("SHIP_VENT_FLUX", Keyboard.KEY_V, b);
+            fightersKey = binding("SHIP_PULL_BACK_FIGHTERS", Keyboard.KEY_Z, b);
+            targetKey = binding("SHIP_TARGET_SHIP", Keyboard.KEY_R, b);
+            try {
+                strafeToggle = Global.getSettings().isStrafeKeyAToggle();
+            } catch (RuntimeException e) {
+                strafeToggle = false;
+            }
+            log.info("[MultiSector] battle view keys:" + b + (strafeToggle ? " (strafe key toggles)" : ""));
+        }
+
+        private static int binding(String control, int fallback, StringBuilder log) {
+            String name = null;
+            try {
+                name = Global.getSettings().getControlStringForEnumName(control);
+            } catch (RuntimeException ignored) {
+                // not a control this game has
+            }
+            int key = keyOf(name);
+            log.append(' ').append(control).append("=\"").append(name).append("\"->")
+                    .append(key > 0 ? Keyboard.getKeyName(key) : "default " + Keyboard.getKeyName(fallback));
+            return key > 0 ? key : fallback;
+        }
+
+        /** A key from the game's name for it ("F", "LSHIFT", "Shift", "Ctrl+F"...); 0 if it isn't one we can read. */
+        static int keyOf(String name) {
+            if (name == null) return 0;
+            String n = name.trim().toUpperCase(java.util.Locale.ROOT);
+            int plus = n.lastIndexOf('+');
+            if (plus >= 0 && plus < n.length() - 1) n = n.substring(plus + 1);
+            n = n.replace(" ", "").replace("-", "").replace("_", "");
+            if (n.isEmpty() || n.contains("MOUSE") || n.contains("BUTTON")) return 0;
+            if (n.contains("SHIFT")) return n.startsWith("R") ? Keyboard.KEY_RSHIFT : Keyboard.KEY_LSHIFT;
+            if (n.contains("CTRL") || n.contains("CONTROL")) return n.startsWith("R") ? Keyboard.KEY_RCONTROL : Keyboard.KEY_LCONTROL;
+            if (n.contains("ALT")) return n.startsWith("R") ? Keyboard.KEY_RMENU : Keyboard.KEY_LMENU;
+            if (n.equals("SPACE")) return Keyboard.KEY_SPACE;
+            if (n.equals("TAB")) return Keyboard.KEY_TAB;
+            if (n.equals("CAPSLOCK") || n.equals("CAPS")) return Keyboard.KEY_CAPITAL;
+            try {
+                int k = Keyboard.getKeyIndex(n);
+                return k > 0 ? k : 0;
+            } catch (RuntimeException e) {
+                return 0;
+            }
         }
 
         @Override
@@ -1402,7 +1567,7 @@ final class JointCombat {
                 }
                 sh.pilot = true;
                 pilot = sh;
-                autopilotAtStart = engine.isUIAutopilotOn();
+                loadoutAutofire(ps);
                 try {
                     s.sendBattleMessage(leader, JointBattle.msg("cpilot", 0).put("id", e.getKey()).toString());
                 } catch (Exception ignored) {
@@ -1547,7 +1712,7 @@ final class JointCombat {
             if (sh.pilot && (pilot == null || pilot.ship == null || !pilot.ship.isAlive())) {
                 pilot = sh;
                 if (engine.getPlayerShip() != ship) engine.setPlayerShipExternal(ship);
-                autopilotAtStart = engine.isUIAutopilotOn();
+                loadoutAutofire(ship);
             }
         }
 
@@ -1888,6 +2053,11 @@ final class JointCombat {
                             sh.shotsDue.add(new float[]{sh.fireIdx[f], sh.fireAngle[f], fired});
                         }
                     }
+                    int na = bb.get() & 0xff;
+                    for (int a = 0; a < na; a++) {
+                        int idx = bb.get() & 0xff;
+                        sh.ammoDue.put(idx, (int) bb.getShort());
+                    }
                     sh.arrived = now;
                     sh.hasState = true;
                 }
@@ -1898,6 +2068,7 @@ final class JointCombat {
         private void followSpeed() {
             engine.getTimeMult().unmodify(TIME_ID);
             float local = engine.getTimeMult().getModifiedValue();
+            tellSpeed(local);
             float want = leaderPaused ? 0.02f : leaderTime;
             if (local > 0.001f && Math.abs(want - local) > 0.001f) {
                 engine.getTimeMult().modifyMult(TIME_ID, want / local);
@@ -1913,6 +2084,30 @@ final class JointCombat {
             } else if (engine.isPaused() && (commandMap || !engine.isUIShowingDialog())) {
                 engine.setPaused(false);
             }
+        }
+
+        /**
+         * The leader sets the battle speed (their speed-up mod): say when it
+         * settles on a new one. Our own speed-up key does nothing here, so
+         * say that once in a while if it's pressed.
+         */
+        private void tellSpeed(float local) {
+            long now = System.nanoTime();
+            String who = Session.get().playerName(leader);
+            if (local > 1.1f && now - toldOwnSpeedAt > 20_000_000_000L) {
+                toldOwnSpeedAt = now;
+                note("Only " + who + " sets the speed of this battle: it's theirs.");
+            }
+            float r = leaderPaused ? newSpeed : Math.max(1f, Math.round(leaderTime * 4f) / 4f);
+            if (Math.abs(r - newSpeed) > 0.01f) {
+                newSpeed = r;
+                newSpeedSince = now;
+                return;
+            }
+            if (Math.abs(newSpeed - toldSpeed) < 0.01f || now - newSpeedSince < 700_000_000L) return;
+            toldSpeed = newSpeed;
+            note(toldSpeed > 1.01f ? who + " speeds this battle up: x" + speedText(toldSpeed)
+                    : who + " puts this battle back to normal speed");
         }
 
         private void apply(Shown sh, long now) {
@@ -1966,29 +2161,26 @@ final class JointCombat {
             boolean phased = (sh.flags & F_PHASED) != 0;
             if (ship.isPhased() != phased) ship.setPhased(phased);
             if ((sh.flags & F_VENT) != 0 && !ft.isVenting() && !ft.isOverloaded()) ft.ventFlux();
-            // Engine flames: same commands as the leader's ship (the move itself is overwritten above). Our own
-            // flown ship gets them too (autopilot, or the leader's ship still moving): our movement keys aren't
-            // blocked here, so they light its engines at once as well.
-            if ((sh.eng & E_ACCEL) != 0) ship.giveCommand(ShipCommand.ACCELERATE, null, 0);
-            if ((sh.eng & E_BACK) != 0) ship.giveCommand(ShipCommand.ACCELERATE_BACKWARDS, null, 0);
-            if ((sh.eng & E_DECEL) != 0) ship.giveCommand(ShipCommand.DECELERATE, null, 0);
-            if ((sh.eng & E_LEFT) != 0) ship.giveCommand(ShipCommand.TURN_LEFT, null, 0);
-            if ((sh.eng & E_RIGHT) != 0) ship.giveCommand(ShipCommand.TURN_RIGHT, null, 0);
-            if ((sh.eng & E_SLEFT) != 0) ship.giveCommand(ShipCommand.STRAFE_LEFT, null, 0);
-            if ((sh.eng & E_SRIGHT) != 0) ship.giveCommand(ShipCommand.STRAFE_RIGHT, null, 0);
-            if (ship == engine.getPlayerShip()) {
-                // Our HUD shows which groups are on autofire: as the leader's game has them (T is carried out there).
-                List<WeaponGroupAPI> groups = ship.getWeaponGroupsCopy();
-                for (int i = 0; i < groups.size() && i < 8; i++) {
-                    boolean on = (sh.autofire & (1 << i)) != 0;
-                    WeaponGroupAPI g = groups.get(i);
-                    if (g.isAutofiring() != on) {
-                        if (on) g.toggleOn();
-                        else g.toggleOff();
-                    }
-                }
+            // Engine flames: same commands as the leader's ship (the move itself is overwritten above). Not on the
+            // ship we fly ourselves: its engines show our own keys at once, and are what we read them back from.
+            boolean ours = sh == pilot && flyingLive && ship == engine.getPlayerShip();
+            if (!ours) {
+                if ((sh.eng & E_ACCEL) != 0) ship.giveCommand(ShipCommand.ACCELERATE, null, 0);
+                if ((sh.eng & E_BACK) != 0) ship.giveCommand(ShipCommand.ACCELERATE_BACKWARDS, null, 0);
+                if ((sh.eng & E_DECEL) != 0) ship.giveCommand(ShipCommand.DECELERATE, null, 0);
+                if ((sh.eng & E_LEFT) != 0) ship.giveCommand(ShipCommand.TURN_LEFT, null, 0);
+                if ((sh.eng & E_RIGHT) != 0) ship.giveCommand(ShipCommand.TURN_RIGHT, null, 0);
+                if ((sh.eng & E_SLEFT) != 0) ship.giveCommand(ShipCommand.STRAFE_LEFT, null, 0);
+                if ((sh.eng & E_SRIGHT) != 0) ship.giveCommand(ShipCommand.STRAFE_RIGHT, null, 0);
             }
             List<WeaponAPI> weapons = ship.getAllWeapons();
+            // Missiles and other limited ammo: as the leader's (shots here are only shown, they use none).
+            for (Map.Entry<Integer, Integer> a : sh.ammoDue.entrySet()) {
+                if (a.getKey() >= weapons.size()) continue;
+                WeaponAPI w = weapons.get(a.getKey());
+                if (w.usesAmmo() && w.getAmmo() != a.getValue()) w.setAmmo(a.getValue());
+            }
+            sh.ammoDue.clear();
             boolean beams = false;
             boolean fresh = now - sh.arrived < 250_000_000L;
             for (int i = 0; i < sh.fireIdx.length; i++) {
@@ -2022,66 +2214,140 @@ final class JointCombat {
             if (!beams) ship.setHoldFireOneFrame(true);
         }
 
+        /** A ship we take the helm of starts with its loadout's autofire groups, as when a player takes one. */
+        private static void loadoutAutofire(ShipAPI ship) {
+            try {
+                ship.setHoldFire(false); // nothing an earlier AI left on it
+                List<WeaponGroupAPI> groups = ship.getWeaponGroupsCopy();
+                List<com.fs.starfarer.api.loading.WeaponGroupSpec> specs = ship.getVariant() == null ? null
+                        : ship.getVariant().getWeaponGroups();
+                if (specs == null || specs.size() != groups.size()) return;
+                for (int i = 0; i < groups.size(); i++) {
+                    boolean on = specs.get(i).isAutofireOnByDefault();
+                    if (groups.get(i).isAutofiring() != on) {
+                        if (on) groups.get(i).toggleOn();
+                        else groups.get(i).toggleOff();
+                    }
+                }
+            } catch (RuntimeException ignored) {
+                // as it is
+            }
+        }
+
         /** Our piloted ship: its controls go to the leader, not to it. */
         private void controls(Session s, long now) {
             ShipAPI ship = pilot.ship;
-            // Everything goes to the leader. Picking a weapon group happens here too, so it shows, and so do the
-            // movement commands: they only light the engines here (the stream overwrites where the ship is),
-            // so the ship you fly shows its thrusters the moment you press a key. Weapons, shields, systems and
-            // venting stay blocked: those happen on the leader's game only.
+            // Everything goes to the leader. Movement, group selection, autofire and hold fire happen here too, so
+            // they show at once and so we can read them back: movement only lights the engines (the stream
+            // overwrites where the ship is). Weapons, shields, systems and venting stay blocked: those happen on
+            // the leader's game only.
             for (ShipCommand c : ShipCommand.values()) if (!LOCAL_COMMANDS.contains(c)) ship.blockCommandForOneFrame(c);
             if (engine.isUIShowingDialog()) return; // the game's own menus have the keyboard
             boolean rmb = Mouse.isButtonDown(1);
             if (rmb && !wasRmb) toggles[0]++;
             wasRmb = rmb;
-            wasF = edge(Keyboard.KEY_F, wasF, 1);
-            wasV = edge(Keyboard.KEY_V, wasV, 2);
-            wasZ = edge(Keyboard.KEY_Z, wasZ, 3);
-            wasT = edge(Keyboard.KEY_T, wasT, 4);
-            for (int g = 0; g < 7; g++) if (Keyboard.isKeyDown(Keyboard.KEY_1 + g)) group = g;
+            wasF = edge(systemKey, wasF, 1);
+            wasV = edge(ventKey, wasV, 2);
+            wasZ = edge(fightersKey, wasZ, 3);
+            boolean strafe = Keyboard.isKeyDown(strafeKey)
+                    || (strafeKey == Keyboard.KEY_LSHIFT && Keyboard.isKeyDown(Keyboard.KEY_RSHIFT));
+            if (strafeToggle && strafe && !wasStrafe) strafeOn = !strafeOn;
+            wasStrafe = strafe;
+            boolean face = strafeToggle ? strafeOn : strafe;
             int selected = ship.getWeaponGroupsCopy().indexOf(ship.getSelectedGroupAPI());
             if (selected >= 0) group = selected;
             ViewportAPI vp = engine.getViewport();
             // The game's mouse position is in UI pixels (scaled), which is what the viewport expects.
             float mx = vp.convertScreenXToWorldX(Global.getSettings().getMouseX());
             float my = vp.convertScreenYToWorldY(Global.getSettings().getMouseY());
-            boolean r = Keyboard.isKeyDown(Keyboard.KEY_R);
+            boolean r = Keyboard.isKeyDown(targetKey);
             if (r && !wasR) target = nearestEnemy(mx, my);
             wasR = r;
             if (now - nextInput < 0) return;
             nextInput = now + INPUT_NANOS;
-            int keys = 0;
-            if (Keyboard.isKeyDown(Keyboard.KEY_W)) keys |= K_W;
-            if (Keyboard.isKeyDown(Keyboard.KEY_S)) keys |= K_S;
-            if (Keyboard.isKeyDown(Keyboard.KEY_A)) keys |= K_A;
-            if (Keyboard.isKeyDown(Keyboard.KEY_D)) keys |= K_D;
-            if (Keyboard.isKeyDown(Keyboard.KEY_Q)) keys |= K_Q;
-            if (Keyboard.isKeyDown(Keyboard.KEY_E)) keys |= K_E;
-            if (Keyboard.isKeyDown(Keyboard.KEY_X)) keys |= K_DECEL;
-            if (Mouse.isButtonDown(0)) keys |= K_FIRE;
+            // The autofire groups as we've set them here (the game's own keys for it, Ctrl+1-7 by default).
+            int mask = 0;
+            List<WeaponGroupAPI> groups = ship.getWeaponGroupsCopy();
+            for (int i = 0; i < groups.size() && i < 8; i++) if (groups.get(i).isAutofiring()) mask |= 1 << i;
             if (engine.getPlayerShip() != ship) {
                 // We're in the command shuttle on the way to another ship: the old one flies on its AI
                 // on the leader's game until we arrive (then followPilot moves our controls over).
-                ByteBuffer bb = ByteBuffer.allocate(64);
-                bb.put(INPUT).putInt(inputSeq++).putShort((short) idOf(pilot)).putInt(K_AUTO).putFloat(mx).putFloat(my)
-                        .put((byte) group).putShort((short) target);
-                for (int t : toggles) bb.put((byte) t);
-                bb.flip();
-                s.sendCombatPacket(leader, bb);
+                flyingLive = false;
+                send(s, K_AUTO, mx, my, mask);
                 return;
             }
-            boolean autopilotUi = engine.isUIAutopilotOn();
-            if (!autopilotUi) autopilotAtStart = false;
-            // Flying it yourself (move or fire) takes it off autopilot, as in the game, even though the game's own
-            // switch can't see our controls. It stays off until autopilot is switched off and on again.
-            if (autopilotUi && keys != 0) autopilotAtStart = true;
-            if (autopilotUi && !autopilotAtStart) keys = K_AUTO; // the player's autopilot: its AI flies it on the leader's game
+            // The game's own autopilot switch. (The API reports it the wrong way round: isUIAutopilotOn() is
+            // true while autopilot is off. The game itself turns autopilot off when you steer.)
+            boolean autopilot = engine.getCombatUI() != null && !engine.isUIAutopilotOn();
+            if (autopilot) {
+                flyingLive = false;
+                liveTicks = 0;
+                send(s, K_AUTO, mx, my, mask);
+                return;
+            }
+            int keys = movement(ship, face);
+            flyingLive = true;
+            if (Mouse.isButtonDown(0)) keys |= K_FIRE;
+            if (face) keys |= K_FACE;
+            if (ship.isHoldFire()) keys |= K_HOLD;
+            send(s, keys | K_MASK, mx, my, mask);
+        }
+
+        private void send(Session s, int keys, float mx, float my, int mask) {
             ByteBuffer bb = ByteBuffer.allocate(64);
             bb.put(INPUT).putInt(inputSeq++).putShort((short) idOf(pilot)).putInt(keys).putFloat(mx).putFloat(my)
                     .put((byte) group).putShort((short) target);
             for (int t : toggles) bb.put((byte) t);
+            bb.put((byte) mask);
             bb.flip();
             s.sendCombatPacket(leader, bb);
+        }
+
+        /**
+         * How we're moving the ship: what the game made of our keys, read off
+         * its engines (our own bindings, and the strafe key's "A/D strafe"
+         * included). If the engines never answer while keys are held (some
+         * mod in the way), the default keys themselves.
+         */
+        private int movement(ShipAPI ship, boolean face) {
+            int raw = 0;
+            if (Keyboard.isKeyDown(Keyboard.KEY_W)) raw |= K_W;
+            if (Keyboard.isKeyDown(Keyboard.KEY_S)) raw |= K_S;
+            if (Keyboard.isKeyDown(Keyboard.KEY_A)) raw |= face ? K_Q : K_A;
+            if (Keyboard.isKeyDown(Keyboard.KEY_D)) raw |= face ? K_E : K_D;
+            if (Keyboard.isKeyDown(Keyboard.KEY_Q)) raw |= K_Q;
+            if (Keyboard.isKeyDown(Keyboard.KEY_E)) raw |= K_E;
+            if (Keyboard.isKeyDown(Keyboard.KEY_C)) raw |= K_DECEL;
+            if (rawKeys) return raw;
+            int eng = 0;
+            com.fs.starfarer.api.combat.ShipEngineControllerAPI ec = ship.getEngineController();
+            if (ec != null) {
+                if (ec.isAccelerating()) eng |= K_W;
+                if (ec.isAcceleratingBackwards()) eng |= K_S;
+                if (ec.isDecelerating()) eng |= K_DECEL;
+                if (ec.isTurningLeft()) eng |= K_A;
+                if (ec.isTurningRight()) eng |= K_D;
+                if (ec.isStrafingLeft()) eng |= K_Q;
+                if (ec.isStrafingRight()) eng |= K_E;
+            }
+            // Only once the stream's own engine commands are off this ship (a couple of ticks of flying it).
+            if (++liveTicks > 3 && !enginesSeen) {
+                if (eng != 0) {
+                    enginesSeen = true;
+                } else if (raw != 0 && controllable(ship) && ++rawTicks > 45) {
+                    rawKeys = true;
+                    log.warn("[MultiSector] the battle view can't read the game's controls off our ship's engines;"
+                            + " reading the default keys (WASD, QE, C) instead");
+                    return raw;
+                }
+            }
+            return eng;
+        }
+
+        /** The game takes our controls right now (not overloaded, venting or out of readiness). */
+        private static boolean controllable(ShipAPI ship) {
+            FluxTrackerAPI ft = ship.getFluxTracker();
+            return ship.getCurrentCR() > 0f && (ft == null || (!ft.isOverloaded() && !ft.isVenting()));
         }
 
         private boolean edge(int key, boolean was, int toggle) {
