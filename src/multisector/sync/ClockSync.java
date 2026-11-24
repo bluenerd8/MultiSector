@@ -98,7 +98,7 @@ public class ClockSync implements EveryFrameScript {
             if (state == Session.State.HOSTING) {
                 host(session, nanos, amount);
             } else if (state == Session.State.CONNECTED) {
-                friend(session, nanos);
+                friend(session, nanos, amount);
             }
         } catch (RuntimeException e) {
             log.warn("[MultiSector] clock sync failed this frame", e);
@@ -173,7 +173,7 @@ public class ClockSync implements EveryFrameScript {
 
     // ================================================================ friends
 
-    private void friend(Session session, long nanos) {
+    private void friend(Session session, long nanos, float amount) {
         ClockState.Received r = session.getRemoteClock();
         if (r == null) return; // nothing from the host yet
         ClockState st = r.state;
@@ -201,6 +201,12 @@ public class ClockSync implements EveryFrameScript {
 
         capSpeedup(st.isFast() ? st.fastMult : 1f);
         askToFastForward(session, sector, nanos);
+        // Someone else is fast-forwarding and we aren't: our game can't press the key for us, so our fleet and the
+        // fleets of our own world here get the extra time directly (stand-ins follow their owner's game anyway).
+        CampaignUIAPI fui = sector.getCampaignUI();
+        boolean boosted = st.isFast() && st.fastBy != session.getMyId() && !sector.isPaused()
+                && fui != null && !fui.isFastForward();
+        if (boosted) NpcSync.boostLocalFleets(Math.min(amount * (st.fastMult - 1f), MAX_BOOST_SECONDS));
 
         int ping = session.getPingMs();
         long target = st.extrapolate(r.arrivedNanos, nanos, ping > 0 ? ping / 2f : 0f);
@@ -214,7 +220,7 @@ public class ClockSync implements EveryFrameScript {
             }
             log.info("[MultiSector] first clock sync: " + days(diff) + " days off the host");
         }
-        if (Math.abs(diff) > (st.isStopped() ? STOPPED_SNAP : CLIENT_DRIFT)) ClockAccess.set(target);
+        if (Math.abs(diff) > (st.isStopped() ? STOPPED_SNAP : CLIENT_DRIFT)) ClockAccess.set(target, boosted);
         lastLocalPaused = sector.isPaused();
         wasMapView = true;
     }
@@ -254,7 +260,7 @@ public class ClockSync implements EveryFrameScript {
         if (prev.isHeld() && !st.isHeld() && !st.isPaused()) session.notice("Done waiting; the game carries on.");
         if ((!prev.isFast() || prev.fastBy != st.fastBy) && st.isFast() && st.fastBy != session.getMyId()) {
             session.notice(session.playerName(st.fastBy < 0 ? 0 : st.fastBy)
-                    + " is fast-forwarding. Turn on fast-forward too to keep up.");
+                    + " is fast-forwarding, so the world speeds up for everyone.");
         }
     }
 
@@ -333,6 +339,26 @@ public class ClockSync implements EveryFrameScript {
     }
 
     // ================================================================ shared
+
+    /** "Febl is fast-forwarding (x3)" while someone else speeds the world up, for the players panel; else null. */
+    public static String fastText() {
+        Session s = Session.get();
+        int by;
+        float mult;
+        if (s.getState() == Session.State.HOSTING) {
+            SharedClock c = s.getSharedClock();
+            if (!c.isFast()) return null;
+            by = c.getFastBy();
+            mult = c.getFastMult();
+        } else {
+            ClockState.Received r = s.getRemoteClock();
+            if (r == null || !r.state.isFast()) return null;
+            by = r.state.fastBy;
+            mult = r.state.fastMult;
+        }
+        if (by == s.getMyId() || by < 0) return null; // our own shows on the game's own speed indicator
+        return s.playerName(by) + " is fast-forwarding (x" + Math.round(mult) + ")";
+    }
 
     /** On the campaign map itself: no dialog, menu or core screen (cargo, refit, intel...) open. */
     public static boolean isMapView() {

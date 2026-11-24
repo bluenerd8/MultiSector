@@ -712,7 +712,24 @@ The aim: a friend opens the launcher, clicks one button, clicks Continue, and pl
 - **A world that closes stops hosting.** A host with no world frames for 90 s stops hosting (BYE to friends) instead of keeping a session open with no world, which a waiting friend's launcher would mistake for "hosting".
 - **Reconnects replace the old connection.** A player connecting again under the same name from the same address (after a drop) replaces their old connection at once. That connection's cleanup still frees their locks and battles, but doesn't announce a leave. Before, the old one lingered as a ghost player until it timed out (15 s).
 
-## Still to do
+## 23. First 0.1 test round (0.1.2)
+
+From testing 0.1.1: the joiner can transfer command normally now. Problems found:
+
+- **The joiner's weapons stopped answering** (no manual fire, autofire toggle doing nothing) after autopilot or a transfer of command. While the AI flew the ship on the leader's game (autopilot, or as an ally before the transfer), it could leave the ship holding fire and its groups on autofire. Our pilot never undid either. `TOGGLE_AUTOFIRE` is also only carried out for the game's own player ship. Now the leader's pilot:
+  - keeps, per ship, which groups the joiner wants on autofire: the loadout's own settings at first (`WeaponGroupSpec.isAutofireOnByDefault`), kept across autopilot and AI swaps;
+  - toggles the group itself on T;
+  - takes the selected group off autofire while the joiner holds fire, so it fires where they aim;
+  - clears hold-fire every frame.
+
+  The stream carries each ship's autofire groups (a byte, first 8 groups), and the joiner's own flown ship shows them in its HUD.
+- **Moving in menus** only flew toward the spot the fleet was heading for when the menu opened. A course plotted on the map screen is followed by the game's autopilot, which only runs on the map. It's now followed step by step (`CampaignUIAPI.getNextStepForCourse` on the course target); jump points wait for the map. Escorting also goes on in menus, without taking jumps. It's still on by default (`keepMovingInMenus`).
+- **Saves come from the host.** A friend's game doesn't autosave while connected: the game's `autosaveFeatureEnabled` setting, which it reads at every autosave check, is turned off and put back afterwards. Manual saves can't be blocked, so a friend's own save sends `SAVE_REQUEST`. The host saves the world on its next map frame, which, as always, tells every friend to save; the one who just saved skips it (within 90 s). Saves the host asks for never ask back.
+- **Fast-forward for everyone.** A friend who isn't fast-forwarding while someone else is now gets what the host gets: their own fleet and their own world's fleets around them move the extra time (`NpcSync.boostLocalFleets`), and the date steps along quietly. The players panel's title shows "<name> is fast-forwarding (xN)" on every game but theirs, the host's included. The pop-up when someone starts no longer tells friends to fast-forward too.
+- **Loading an autosave mid-session:** a friend loading one of their own saves keeps the host's world id, since their copy came from the host's current load. So nobody is prompted, and the date, fleets and objects catch up from the host. Only the host loading a save gives friends a new world id and the fresh-copy prompt.
+- `PROTOCOL_VERSION` 22.
+
+## Still to do (roadmap)
 
 Kept here so they aren't lost between test rounds:
 
@@ -722,5 +739,32 @@ Kept here so they aren't lost between test rounds:
 - **Joint battle view:** no objectives (so no capture orders), the joiner's ship answers one ping late, and muzzle flashes, armour damage marks and the systems the view can't switch on (teleports, drones, EMP, targeted systems, and all of mods' own system scripts) aren't shown. Showing mods' systems safely would need the leader to stream each system's effect, not just its state.
 - **Friends' characters in the host's save** (agreed design, not built): every player's character stored inside the host's save at each shared save, dormant unless hosting, so a rewind rewinds everyone and a friend can recover theirs from the host.
 - **Fast-forward from a friend** moves the host's fleets and date, not the host's whole simulation; the host's own fast-forward key can't be pressed for them.
-- **The updater** works once a build is published as a GitHub release with its zip.
+- **The updater** is first used for real going from 0.1.1 to 0.1.2.
 - **Mod updates beyond MultiSector:** the launcher can match which mods are enabled, but can't install a mod the host has and the friend doesn't.
+
+### Pitched for 0.1.3 (agreed to note, not built)
+
+Suggested first: 1, 2, 3, 4 and 7; then 8 (above, friends' characters in the host's save) and 5.
+
+Protecting the campaign and catching bugs:
+
+1. **Rolling backups of the host's save:** the launcher copies the save folder each time hosting starts, keeps the last 5, and offers a restore button.
+2. **"Send my log to the host":** a launcher button sends a friend's `starsector.log` over the lobby link, saved next to the host's, so crashes on a friend's PC can be read.
+3. **Mod versions, not just mod ids:** the join check compares only which mods are enabled (`GameInstall.installedMods` reads ids and names). Compare each mod's `version` from `mod_info.json` and warn on a mismatch (Nexerelin especially).
+4. **Salvage locks:** two players salvaging the same derelict, cache or debris at the same moment both get the loot. Claim world objects through the same lock channel as fleets (`FleetLocks`) while their dialog is open.
+5. **Desync check:** every minute or so each friend compares a small fingerprint with the host's (date, fleets in the system, market stock hashes, world objects). On drift, say so and offer the fresh copy. Today only a new world id (the host loading a save) prompts it.
+6. **Dropout and soak tests (no game needed):** leader or joiner dropping mid-battle, a lock holder disconnecting, and an hour-long three-session run for leaks and stuck states.
+
+Flow and fun:
+
+7. **Rewards for helping:** loot, XP and bounty payouts from a joint battle go to the leader only. Either split credits, bounty and XP by deployed strength, or offer a "share the spoils" screen after the battle on top of `PlayerTalk`'s escrowed offers.
+8. **Map pings:** Alt+click on the map marks a spot everyone sees for 30 s, with the player's name.
+9. **In-game chat:** none yet. A text line in the Multiplayer window; messages shown as notices.
+10. **"While you were away":** on joining, a short summary since your last session (days passed, raids, big battles), from the world events.
+11. **Story and gate state:** the main questline, gate scans and activations happen separately on each game. Needs a design pass on which become world events.
+
+Nice to have:
+
+12. **Network overlay** on a hotkey: ping, packet loss, messages per second, puppets and mirrored fleets.
+13. **Friends' abilities on their puppets:** emergency burn, sensor burst, go dark, transponder.
+14. **Friendly sparring** between players, with the joint battle on opposite sides (large).

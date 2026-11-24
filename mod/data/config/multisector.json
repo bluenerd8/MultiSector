@@ -47,8 +47,8 @@
 	# or a menu), the world waits. Off: it keeps running, and your date jumps ahead when
 	# you're back (a few minutes of battle is weeks of game time).
 	"holdWhileEveryoneBusy":true,
-	# Host only: when a friend fast-forwards, the world speeds up for everyone, your game
-	# included. Off: only the host's fast-forward counts.
+	# When anyone fast-forwards, the world speeds up for everyone, whether or not they hold
+	# fast-forward too. Off (host): only the host's fast-forward counts.
 	"friendsCanFastForward":true,
 
 	# Friends: if you load the shared world before the host is in the game, yours waits,
@@ -58,14 +58,16 @@
 	# saved and you go back to the main menu, so nobody plays on in a world that's gone.
 	"endWhenHostLeaves":true,
 	# Friends: when the host saves, your game saves too: your copy of the world, and your
-	# character (the export the launcher uses next time).
+	# character for that world. While connected your game doesn't autosave, and a save you
+	# make yourself asks the host to save the world (the host's save is the one that counts).
 	"saveWithHost":true,
 	# Host only: after you load the world, it waits (paused) until everyone who was playing
 	# at your last save has joined. Unpausing stops the wait.
 	"waitForAllPlayers":false,
 
 	# Starsector stops your fleet while the cargo, refit, character or map screen is open,
-	# but the shared world keeps going. On: your fleet keeps flying its course meanwhile.
+	# but the shared world keeps going. On: your fleet keeps flying meanwhile, following a
+	# course you plot on the map screen and any player you escort (jumps wait for the map).
 	# Off: it stays put (anchored) until you close the screen. Also switchable in F8.
 	"keepMovingInMenus":true,
 

@@ -121,6 +121,10 @@ public final class SharedClock {
         return fastBy;
     }
 
+    public synchronized float getFastMult() {
+        return fastMult;
+    }
+
     /**
      * Nobody is on the map: stop the world until someone is. Otherwise a
      * battle or a long market visit everyone sits in moves the date on by

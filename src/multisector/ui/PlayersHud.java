@@ -113,8 +113,10 @@ public class PlayersHud implements CampaignUIRenderingListener {
 
     private void updateLabels() {
         if (title == null) title = label();
-        title.setText("Players (" + (info.size() + 1) + ")   " + MultiSectorConfig.getHudHotkeyName() + " hides");
-        title.setColor(Misc.getGrayColor());
+        String fast = ClockSync.fastText();
+        title.setText("Players (" + (info.size() + 1) + ")   " + MultiSectorConfig.getHudHotkeyName() + " hides"
+                + (fast == null ? "" : "   >> " + fast));
+        title.setColor(fast == null ? Misc.getGrayColor() : Misc.getHighlightColor());
         while (rows.size() < info.size()) {
             rows.add(new LabelAPI[]{label(), label(), label(), label()});
         }

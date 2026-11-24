@@ -308,6 +308,24 @@ public final class Session {
         return bb;
     }
 
+    /** Host: a friend asked us to save the world (their name), or null. */
+    private volatile String saveAskedBy;
+
+    /** Client: we saved on our own: the host should save the world (theirs is the save that counts). */
+    public void requestHostSave() {
+        if (state != State.CONNECTED) return;
+        ByteBuffer bb = Protocol.begin(Protocol.SAVE_REQUEST, 0);
+        bb.flip();
+        outbox.add(bb);
+    }
+
+    /** Host: who asked us to save, once, or null. */
+    public String pollFriendSaveRequest() {
+        String who = saveAskedBy;
+        saveAskedBy = null;
+        return who;
+    }
+
     /** Client: the next order from the host, or null. */
     public String pollHostOrder() {
         return hostOrders.poll();
@@ -898,6 +916,8 @@ public final class Session {
                 int type = Protocol.readHeader(msg, null);
                 if (type == Protocol.PING_REPORT && msg.remaining() >= 4) {
                     conn.pingMs = msg.getInt();
+                } else if (type == Protocol.SAVE_REQUEST) {
+                    saveAskedBy = conn.name;
                 } else if (type == Protocol.FAST_REQUEST && msg.remaining() >= 5) {
                     boolean on = msg.get() != 0;
                     float mult = msg.getFloat();

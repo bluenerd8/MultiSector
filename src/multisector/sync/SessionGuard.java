@@ -97,6 +97,14 @@ public final class SessionGuard implements EveryFrameScript, CampaignInputListen
         if (s.getState() == Session.State.HOSTING) s.sendHostOrder("{\"k\":\"epoch\",\"id\":\"" + epoch + "\"}");
     }
 
+    /** When we last saved on our own (not for the host), System.nanoTime, or 0. */
+    private static long ownSaveAt;
+    /** Saving because the host did: no request back to the host. */
+    private static boolean savingForHost;
+    /** The game's own autosave setting before we turned it off for a session (friends), or null. */
+    private static Boolean autosaveWas;
+    private static final String AUTOSAVE = "autosaveFeatureEnabled";
+
     private long nextTry;
     private long nextRemind;
     private boolean waitingShown;
@@ -152,6 +160,7 @@ public final class SessionGuard implements EveryFrameScript, CampaignInputListen
     public void advance(float amount) {
         Session s = Session.get();
         Session.State st = s.getState();
+        friendAutosave(st == Session.State.CONNECTED);
         if (st == Session.State.IDLE && !joinedHere) sessionWorld = null;
         else if (sessionWorld == null && st != Session.State.IDLE) sessionWorld = Global.getSector().getSeedString();
         if (st == Session.State.CONNECTING || st == Session.State.CONNECTED) {
@@ -217,7 +226,8 @@ public final class SessionGuard implements EveryFrameScript, CampaignInputListen
             JSONObject o = new JSONObject(json);
             String k = o.optString("k");
             if ("save".equals(k) && MultiSectorConfig.isSaveWithHost()) {
-                saveWanted = true;
+                // We saved ourselves a moment ago (and asked the host to): that save is current already.
+                if (System.nanoTime() - ownSaveAt > 90_000_000_000L || ownSaveAt == 0) saveWanted = true;
             } else if ("epoch".equals(k)) {
                 String ours = Global.getSector().getMemoryWithoutUpdate().getString(EPOCH_KEY);
                 String theirs = o.optString("id", "");
@@ -248,6 +258,33 @@ public final class SessionGuard implements EveryFrameScript, CampaignInputListen
             s.sendHostOrder("{\"k\":\"save\"}");
         } else if (s.getState() == Session.State.CONNECTED) {
             exportCharacter("saving");
+            if (!savingForHost) {
+                // A save of our own (a friend's copy isn't the world): the host saves the real one, and so everyone.
+                ownSaveAt = System.nanoTime();
+                s.requestHostSave();
+                log.info("[MultiSector] we saved on our own; asked the host to save the world");
+            }
+        }
+    }
+
+    /**
+     * A friend's game doesn't autosave while connected: its copy isn't the
+     * world, and saves come from the host. The game's own setting is put
+     * back afterwards. (The game reads it fresh at every autosave check.)
+     */
+    private static void friendAutosave(boolean connected) {
+        com.fs.starfarer.api.SettingsAPI set = Global.getSettings();
+        try {
+            if (connected && autosaveWas == null) {
+                autosaveWas = set.getBoolean(AUTOSAVE);
+                set.setBoolean(AUTOSAVE, false);
+                log.info("[MultiSector] autosave off while connected (the host's saves are the world's)");
+            } else if (!connected && autosaveWas != null) {
+                set.setBoolean(AUTOSAVE, autosaveWas);
+                autosaveWas = null;
+            }
+        } catch (RuntimeException e) {
+            autosaveWas = Boolean.TRUE; // a game without the setting: nothing to switch, and don't try again
         }
     }
 
@@ -285,6 +322,22 @@ public final class SessionGuard implements EveryFrameScript, CampaignInputListen
     public void processCampaignInputPreCore(List<InputEventAPI> events) {
         if (!ClockSync.isMapView()) return;
         CampaignUIAPI ui = Global.getSector().getCampaignUI();
+        Session ses = Session.get();
+        if (ses.getState() == Session.State.HOSTING) {
+            // A friend saved: the world's real save is ours (and saving tells every friend to save too).
+            String asked = ses.pollFriendSaveRequest();
+            if (asked != null) {
+                boolean saved = false;
+                try {
+                    saved = ui.cmdSave();
+                } catch (RuntimeException e) {
+                    log.warn("[MultiSector] save for " + asked + " failed", e);
+                }
+                log.info("[MultiSector] " + asked + " saved, so we saved the world: " + saved);
+                if (saved) ses.notice(asked + " saved, so the world was saved for everyone.");
+            }
+            return;
+        }
         if (exitWanted) {
             exitWanted = false;
             exportCharacter("leaving");
@@ -302,10 +355,13 @@ public final class SessionGuard implements EveryFrameScript, CampaignInputListen
         if (saveWanted && Session.get().getState() == Session.State.CONNECTED) {
             saveWanted = false;
             boolean saved = false;
+            savingForHost = true;
             try {
                 saved = ui.cmdSave(); // our beforeGameSave exports the character too
             } catch (RuntimeException e) {
                 log.warn("[MultiSector] save with the host failed", e);
+            } finally {
+                savingForHost = false;
             }
             log.info("[MultiSector] saved along with the host: " + saved);
             if (saved) Session.get().notice("Saved along with the host (your character too).");

@@ -35,6 +35,8 @@ public final class Protocol {
     public static final byte FAST_REQUEST = 38;
     /** host -> clients: json (long string). Session-wide orders from the host: save now, the host is leaving. */
     public static final byte HOST_ORDER = 39;
+    /** client -> host: (empty). "I saved: save the world" (the host's save is the one that counts). */
+    public static final byte SAVE_REQUEST = 40;
     /** client -> host: FleetComp of my fleet. host -> clients: playerId(int), FleetComp. */
     public static final byte FLEET_COMP = 8;
 

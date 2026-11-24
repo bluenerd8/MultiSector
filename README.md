@@ -8,9 +8,9 @@ Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), ai
 
 - **Pause** on the map pauses everyone, and anyone can resume. Your own menus, markets and dialogs only pause your game. The shared clock keeps going, and your date catches up when you close them.
 - **Ctrl+Space** pauses or resumes everyone from inside a dialog, market or menu, where the normal pause key doesn't reach.
-- **Fast-forward:** anyone can. When someone fast-forwards, the world speeds up for everyone, the host's game included. Turn yours on too to keep up.
+- **Fast-forward:** anyone can. When someone fast-forwards, the world speeds up for everyone, the host's game included, and the players panel says who.
 - **Nobody on the map:** while everyone is in a battle, dialog or menu, the world waits instead of running on (`holdWhileEveryoneBusy`).
-- **Menus:** while you're in the cargo, refit, character or map screen, your fleet keeps flying its course with the world. Switch it to stay put in the Multiplayer window (F8), or with `keepMovingInMenus`.
+- **Menus:** while you're in the cargo, refit, character or map screen, your fleet keeps flying with the world, following a course you plot on the map screen or the player you escort. Switch it to stay put in the Multiplayer window (F8), or with `keepMovingInMenus`.
 - **Joining:** when you click Download, the host's game saves a fresh copy for you. By default everyone waits, paused, until you're in the game, so you start in exactly the world you downloaded. The host (or anyone) can unpause to stop waiting. Turn this off with `holdWhileJoining` in `data/config/multisector.json`.
 - If your save is older or newer than the host's world, your date is set to the host's when you connect.
 
@@ -20,7 +20,7 @@ Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), ai
 - **When the host ends the session** (stops hosting or quits), friends' characters and worlds are saved and they go back to the main menu. The launcher then waits for the host and downloads their world as soon as they're back: just click Continue.
 - **Coming back as yourself:** your character in each shared world is saved separately (your own export is never overwritten). Next time you join that world, you're back as that character without choosing.
 - **Always the host's world:** if your copy doesn't match the host's (they loaded a save since), the game offers a fresh copy. One click, and the launcher fetches it; F8 has the same button.
-- **Saving:** when the host saves, everyone saves. The host can also have the world wait after loading until everyone from the last session is back (`waitForAllPlayers`).
+- **Saving:** when the host saves, everyone saves. Friends don't autosave while connected, and a friend's own save asks the host to save the world. The host can also have the world wait after loading until everyone from the last session is back (`waitForAllPlayers`).
 - **Shared:** raids and bombardments on planets, planet surveys and explored ruins, wars and peace between factions, and faction bounties on star systems. Your reputation, missions and bar events stay your own.
 - **Losing your whole fleet:** get picked up next to another player, or at the nearest friendly port.
 

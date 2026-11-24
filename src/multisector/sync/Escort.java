@@ -107,8 +107,10 @@ public final class Escort implements EveryFrameScript {
             return;
         }
         try {
-            moveInMenus(s);
-            if (target >= 0 && ClockSync.isMapView() && !Global.getSector().isPaused()) follow(s);
+            boolean menu = inMenu(s);
+            // Escorting goes on in menus too (the menu movement below then flies us there).
+            if (target >= 0 && ((ClockSync.isMapView() && !Global.getSector().isPaused()) || menu)) follow(s, menu);
+            moveInMenus(s, menu);
         } catch (RuntimeException e) {
             log.warn("[MultiSector] escort/menu movement failed this frame", e);
         }
@@ -116,7 +118,7 @@ public final class Escort implements EveryFrameScript {
 
     // ================================================================ escort
 
-    private void follow(Session s) {
+    private void follow(Session s, boolean menu) {
         if (!s.isPlayerHere(target)) {
             stop("they left the game");
             return;
@@ -176,6 +178,7 @@ public final class Escort implements EveryFrameScript {
             return;
         }
         if (Misc.getDistance(me.getLocation(), jp.getLocation()) < jp.getRadius() + me.getRadius() + 150f) {
+            if (menu) return; // jumps wait for the map: we're at the jump point, ready
             log.info("[MultiSector] following " + s.playerName(target) + " through " + jp.getName());
             lastSet = null;
             seenThere = false;
@@ -188,20 +191,37 @@ public final class Escort implements EveryFrameScript {
 
     // ================================================================ menus
 
-    /** In the cargo, refit, character or map screen: our fleet keeps flying its course with the world. */
-    private void moveInMenus(Session s) {
+    /** In the cargo, refit, character or map screen (not a dialog), with the world running and moving us on. */
+    private static boolean inMenu(Session s) {
+        CampaignUIAPI ui = Global.getSector().getCampaignUI();
+        CampaignFleetAPI me = Global.getSector().getPlayerFleet();
+        return keepMoving && ui != null && ui.getCurrentCoreTab() != null && ui.getCurrentInteractionDialog() == null
+                && me != null && me.getBattle() == null && worldRunning(s);
+    }
+
+    /**
+     * In the cargo, refit, character or map screen: our fleet keeps flying
+     * with the world. A course laid in (on the map screen too) is followed
+     * step by step, as the game's autopilot does on the map; jump points
+     * wait until you're back on the map.
+     */
+    private void moveInMenus(Session s, boolean inMenu) {
         long now = System.nanoTime();
         CampaignUIAPI ui = Global.getSector().getCampaignUI();
         CampaignFleetAPI me = Global.getSector().getPlayerFleet();
-        boolean inMenu = keepMoving && ui != null && ui.getCurrentCoreTab() != null
-                && ui.getCurrentInteractionDialog() == null && me != null && me.getBattle() == null
-                && worldRunning(s);
         if (!inMenu) {
             lastMenuNanos = 0;
             return;
         }
         float dt = lastMenuNanos == 0 ? 0f : Math.min((now - lastMenuNanos) / 1e9f, MAX_MENU_STEP);
         lastMenuNanos = now;
+        SectorEntityToken course = target >= 0 ? null : Global.getSector().getUIData().getCourseTarget();
+        if (course != null) {
+            SectorEntityToken next = ui.getNextStepForCourse(course);
+            if (next != null && next.getContainingLocation() == me.getContainingLocation()) {
+                me.setMoveDestination(next.getLocation().x, next.getLocation().y);
+            }
+        }
         if (dt <= 0f || me.getMoveDestination() == null) return;
         if (Misc.getDistance(me.getLocation(), me.getMoveDestination()) < 5f) return; // nowhere to go
         me.advance(dt * speedMult(s));

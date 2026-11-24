@@ -236,6 +236,8 @@ final class JointCombat {
         /** The assignment we made for each ship's current order, to give again rather than make another. */
         private final Map<ShipAPI, Object[]> made = new IdentityHashMap<ShipAPI, Object[]>();
         private final Map<Integer, Input> inputs = new ConcurrentHashMap<Integer, Input>();
+        /** Per ship a joiner flies: which weapon groups they want on autofire (kept when autopilot swaps the AI). */
+        private final Map<ShipAPI, boolean[]> autofire = new IdentityHashMap<ShipAPI, boolean[]>();
         /** Ships flown from a joiner's controls right now (the rest of the time they have their own AI). */
         private final Set<ShipAPI> piloted = java.util.Collections.newSetFromMap(new IdentityHashMap<ShipAPI, Boolean>());
 
@@ -651,7 +653,7 @@ final class JointCombat {
                 // count 0: a beam, firing right now; otherwise how many shots since the last update
                 if (beam || c != null) firing.add(new int[]{i, Math.round(w.getCurrAngle() * 10f), beam ? 0 : Math.min(255, c[0])});
             }
-            ByteBuffer bb = ByteBuffer.allocate(43 + firing.size() * 4);
+            ByteBuffer bb = ByteBuffer.allocate(44 + firing.size() * 4);
             bb.putShort((short) id);
             bb.putFloat(ship.getLocation().x).putFloat(ship.getLocation().y);
             bb.putFloat(ship.getVelocity().x).putFloat(ship.getVelocity().y);
@@ -686,6 +688,10 @@ final class JointCombat {
             bb.put((byte) eng);
             bb.putShort((short) Math.round((sh == null ? 0f : sh.getFacing()) * 10f));
             bb.put(stateOf(ship.getSystem())).put(stateOf(ship.getPhaseCloak()));
+            int auto = 0;
+            List<WeaponGroupAPI> groups = ship.getWeaponGroupsCopy();
+            for (int i = 0; i < groups.size() && i < 8; i++) if (groups.get(i).isAutofiring()) auto |= 1 << i;
+            bb.put((byte) auto);
             bb.put((byte) firing.size());
             for (int[] f : firing) {
                 bb.put((byte) f[0]);
@@ -783,7 +789,7 @@ final class JointCombat {
                 }
                 if (live && !flying) {
                     piloted.add(ship);
-                    ship.setShipAI(new RemotePilot(ship, jn.id, inputs, byId));
+                    ship.setShipAI(new RemotePilot(ship, jn.id, inputs, byId, autofire));
                     banner(jn.name + " takes the helm of " + m.getShipName());
                     log.info("[MultiSector] " + jn.name + " is piloting " + m.getShipName());
                 } else if (!live && flying) {
@@ -1037,12 +1043,29 @@ final class JointCombat {
         private final Map<Integer, ShipAPI> byId;
         private final int[] seen = {-1, -1, -1, -1, -1};
         private final ShipwideAIFlags flags = new ShipwideAIFlags();
+        /** Groups the joiner wants on autofire. The ship's AI (autopilot, or before a transfer) may have changed them. */
+        private final boolean[] auto;
 
-        RemotePilot(ShipAPI ship, int joiner, Map<Integer, Input> inputs, Map<Integer, ShipAPI> byId) {
+        RemotePilot(ShipAPI ship, int joiner, Map<Integer, Input> inputs, Map<Integer, ShipAPI> byId,
+                    Map<ShipAPI, boolean[]> autofire) {
             this.ship = ship;
             this.joiner = joiner;
             this.inputs = inputs;
             this.byId = byId;
+            boolean[] had = autofire.get(ship);
+            int n = ship.getWeaponGroupsCopy().size();
+            if (had == null || had.length != n) {
+                // First time they fly it: the loadout's own autofire settings, as when a player takes the helm.
+                had = new boolean[n];
+                List<com.fs.starfarer.api.loading.WeaponGroupSpec> specs = ship.getVariant() == null ? null
+                        : ship.getVariant().getWeaponGroups();
+                for (int i = 0; i < n; i++) {
+                    had[i] = specs != null && specs.size() == n ? specs.get(i).isAutofireOnByDefault()
+                            : ship.getWeaponGroupsCopy().get(i).isAutofiring();
+                }
+                autofire.put(ship, had);
+            }
+            this.auto = had;
         }
 
         public void advance(float amount) {
@@ -1062,10 +1085,29 @@ final class JointCombat {
                 ship.giveCommand(ShipCommand.SELECT_GROUP, null, group);
             }
             ShipCommand[] toggles = {ShipCommand.TOGGLE_SHIELD_OR_PHASE_CLOAK, ShipCommand.USE_SYSTEM,
-                    ShipCommand.VENT_FLUX, ShipCommand.PULL_BACK_FIGHTERS, ShipCommand.TOGGLE_AUTOFIRE};
+                    ShipCommand.VENT_FLUX, ShipCommand.PULL_BACK_FIGHTERS, null};
             for (int i = 0; i < TOGGLES; i++) {
-                if (seen[i] >= 0 && seen[i] != in.toggles[i]) ship.giveCommand(toggles[i], null, group);
+                if (seen[i] >= 0 && seen[i] != in.toggles[i]) {
+                    // Autofire is set on the group itself: the command only works for the game's own player ship.
+                    if (toggles[i] == null) {
+                        if (group < auto.length) auto[group] = !auto[group];
+                    } else {
+                        ship.giveCommand(toggles[i], null, group);
+                    }
+                }
                 seen[i] = in.toggles[i];
+            }
+            // The ship's AI may have left it holding fire (autopilot, or orders before a transfer): it's flown now.
+            if (ship.isHoldFire()) ship.setHoldFire(false);
+            boolean firing = (in.keys & K_FIRE) != 0;
+            for (int i = 0; i < groups.size() && i < auto.length; i++) {
+                // The selected group fires where they aim while they hold fire; otherwise each group as they set it.
+                boolean want = auto[i] && !(i == group && firing);
+                WeaponGroupAPI g = groups.get(i);
+                if (g.isAutofiring() != want) {
+                    if (want) g.toggleOn();
+                    else g.toggleOff();
+                }
             }
             ShipAPI target = in.target > 0 ? byId.get(in.target) : null;
             if (target != null && target.isAlive()) ship.setShipTarget(target);
@@ -1194,6 +1236,8 @@ final class JointCombat {
         /** Shots to show, from every update since the last frame: weapon index, angle, count. */
         final List<float[]> shotsDue = new ArrayList<float[]>();
         int sys = 255, cloak = 255;
+        /** Its weapon groups on autofire on the leader's game, one bit each (first 8). */
+        int autofire;
         long arrived;
         boolean hasState;
     }
@@ -1830,6 +1874,7 @@ final class JointCombat {
                     sh.shieldFacing = bb.getShort() / 10f;
                     sh.sys = bb.get() & 0xff;
                     sh.cloak = bb.get() & 0xff;
+                    sh.autofire = bb.get() & 0xff;
                     int nf = bb.get() & 0xff;
                     sh.fireIdx = new int[nf];
                     sh.fireAngle = new float[nf];
@@ -1931,6 +1976,18 @@ final class JointCombat {
             if ((sh.eng & E_RIGHT) != 0) ship.giveCommand(ShipCommand.TURN_RIGHT, null, 0);
             if ((sh.eng & E_SLEFT) != 0) ship.giveCommand(ShipCommand.STRAFE_LEFT, null, 0);
             if ((sh.eng & E_SRIGHT) != 0) ship.giveCommand(ShipCommand.STRAFE_RIGHT, null, 0);
+            if (ship == engine.getPlayerShip()) {
+                // Our HUD shows which groups are on autofire: as the leader's game has them (T is carried out there).
+                List<WeaponGroupAPI> groups = ship.getWeaponGroupsCopy();
+                for (int i = 0; i < groups.size() && i < 8; i++) {
+                    boolean on = (sh.autofire & (1 << i)) != 0;
+                    WeaponGroupAPI g = groups.get(i);
+                    if (g.isAutofiring() != on) {
+                        if (on) g.toggleOn();
+                        else g.toggleOff();
+                    }
+                }
+            }
             List<WeaponAPI> weapons = ship.getAllWeapons();
             boolean beams = false;
             boolean fresh = now - sh.arrived < 250_000_000L;
