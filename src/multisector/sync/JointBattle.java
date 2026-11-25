@@ -100,6 +100,11 @@ public final class JointBattle implements EveryFrameScript {
         Session s = Session.get();
         boolean on = s.getState() == Session.State.HOSTING
                 || (s.getState() == Session.State.CONNECTED && s.getMyId() >= 0);
+        try {
+            JointSpoils.frame(); // ships to recover are offered offline too
+        } catch (RuntimeException e) {
+            log.warn("[MultiSector] couldn't offer ships to recover", e);
+        }
         if (!on) {
             reset();
             return;
@@ -113,11 +118,6 @@ public final class JointBattle implements EveryFrameScript {
             log.warn("[MultiSector] joint battle (leader) failed this frame", e);
         }
         joinerFrame(s);
-        try {
-            JointSpoils.frame();
-        } catch (RuntimeException e) {
-            log.warn("[MultiSector] couldn't offer ships to recover", e);
-        }
     }
 
     // ================================================================ messages
@@ -325,10 +325,12 @@ public final class JointBattle implements EveryFrameScript {
             return;
         }
         if ("retreat".equals(k)) {
+            // They're leaving: out of the queue if they were waiting; their ships pull out if they're in.
+            if (queued.remove(m.from) != null) JointCombat.Leader.message(m.fromName + " stopped waiting to join");
             Joiner jn = joiners.get(m.from);
-            if (ours && jn != null) {
+            if (jn != null) {
                 jn.retreat = true;
-                JointCombat.Leader.message(m.fromName + " orders their ships to retreat");
+                JointCombat.Leader.message(m.fromName + " leaves the battle: their ships pull out");
             }
             return;
         }
@@ -556,6 +558,9 @@ public final class JointBattle implements EveryFrameScript {
     private static final Map<Integer, Fight> fights = new HashMap<Integer, Fight>();
 
     private static Phase phase = Phase.NONE;
+    /** We left a battle our ships may be in: its result is still ours, from that leader, when it comes. */
+    private static int resultFrom = -1;
+    private static long resultSince;
     private static int leader = -1;
     private static String leaderName = "";
     private static int joinBattle;
@@ -631,6 +636,11 @@ public final class JointBattle implements EveryFrameScript {
         if ("spoils".equals(k)) {
             JointSpoils.leftovers(m.fromName, j);
             refresh();
+            return;
+        }
+        if ("result".equals(k) && resultFrom == m.from && System.nanoTime() - resultSince < 30L * 60L * 1_000_000_000L) {
+            resultFrom = -1; // the battle we left: what happened to our ships comes home anyway
+            applyResult(j);
             return;
         }
         if (m.from != leader) return; // not ours
@@ -869,9 +879,19 @@ public final class JointBattle implements EveryFrameScript {
         forget();
     }
 
+    /** Another character took over this copy: offers kept in it were the previous one's. */
+    public static void dropOffers() {
+        JointSpoils.drop();
+    }
+
+    /** A save loaded: recovery offers still open in it come back. */
+    public static void restoreOffers() {
+        JointSpoils.forget(); // only here: a session ending keeps them (they're our ships)
+        JointSpoils.restore();
+    }
+
     /** A save is loading (or the session ended): nothing carries over. */
     public static void forget() {
-        JointSpoils.forget();
         joiners.clear();
         told.clear();
         queued.clear();
@@ -945,8 +965,7 @@ public final class JointBattle implements EveryFrameScript {
                 op.addOption("Leave", "out");
                 dialog.setOptionOnEscape("Leave", "out");
             } else if (phase == Phase.JOINING || phase == Phase.IN) {
-                op.addOption("Order your ships to retreat", "retreat");
-                if (quietOffered) op.addOption("Stop waiting (anything still to come is applied when it arrives)", "leave");
+                op.addOption("Leave the battle (your ships pull out)", "quit");
             } else {
                 if (phase == Phase.DONE && JointSpoils.hasAny()) {
                     op.addOption("Recover ships (" + JointSpoils.count() + ")", "recover");
@@ -991,9 +1010,21 @@ public final class JointBattle implements EveryFrameScript {
                 open = null;
                 dialog.dismiss();
                 return;
-            } else if ("retreat".equals(id)) {
+            } else if ("quit".equals(id) && (phase == Phase.JOINING || phase == Phase.IN)) {
+                // Out at once, whatever the leader's battle is doing: our ships pull out of it, and what happened
+                // to them so far still comes back when the battle ends.
                 s.sendBattleMessage(leader, msg("retreat", joinBattle).toString());
-                dialog.getTextPanel().addPara("You order your ships to pull out.");
+                JointCombat.Mirror v = JointCombat.view;
+                if (v != null) v.end();
+                resultFrom = leader;
+                resultSince = System.nanoTime();
+                phase = Phase.NONE;
+                log.info("[MultiSector] left " + leaderName + "'s battle");
+                Session.get().notice("You left " + leaderName + "'s battle. Any of your ships in it pull out; "
+                        + "what happened to them comes back when it ends.");
+                open = null;
+                dialog.dismiss();
+                return;
             } else if ("recover".equals(id)) {
                 JointSpoils.pick(dialog, new Runnable() {
                     public void run() {

@@ -44,6 +44,8 @@ public final class ProfileApplier {
     }
 
     private static void markApplied(String downloadId) {
+        // The copy's recovery offers were the host's character's, not ours.
+        multisector.sync.JointBattle.dropOffers();
         Global.getSector().getPersistentData().put(APPLIED_KEY,
                 downloadId == null || downloadId.isEmpty() ? "unknown" : downloadId);
     }

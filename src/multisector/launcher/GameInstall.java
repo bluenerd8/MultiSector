@@ -253,6 +253,45 @@ final class GameInstall {
         return out;
     }
 
+    /**
+     * Installed mods' versions: id -> version, from each mod_info.json. The
+     * version is either a string ("0.12.3") or {major, minor, patch}.
+     */
+    Map<String, String> modVersions() {
+        Map<String, String> out = new java.util.TreeMap<String, String>();
+        File[] dirs = mods.listFiles();
+        if (dirs == null) return out;
+        Pattern id = Pattern.compile("\"id\"\\s*:\\s*\"([^\"]+)\"");
+        for (File d : dirs) {
+            File info = new File(d, "mod_info.json");
+            if (!d.isDirectory() || !info.isFile()) continue;
+            try {
+                String text = new String(Files.readAllBytes(info.toPath()), StandardCharsets.UTF_8);
+                Matcher m = id.matcher(text);
+                if (m.find()) out.put(m.group(1), versionOf(text));
+            } catch (IOException ignored) {
+                // unreadable: as good as not installed
+            }
+        }
+        return out;
+    }
+
+    static String versionOf(String modInfo) {
+        Matcher s = Pattern.compile("\"version\"\\s*:\\s*\"([^\"]*)\"").matcher(modInfo);
+        if (s.find()) return s.group(1).trim();
+        Matcher o = Pattern.compile("\"version\"\\s*:\\s*\\{([^}]*)\\}", Pattern.DOTALL).matcher(modInfo);
+        if (!o.find()) return "?";
+        String body = o.group(1);
+        StringBuilder b = new StringBuilder();
+        for (String part : new String[]{"major", "minor", "patch"}) {
+            Matcher p = Pattern.compile("\"" + part + "\"\\s*:\\s*\"?([^\",}\\s]*)").matcher(body);
+            if (!p.find()) continue;
+            if (b.length() > 0) b.append('.');
+            b.append(p.group(1));
+        }
+        return b.length() == 0 ? "?" : b.toString();
+    }
+
     /** Where the player's own mod list is kept while the launcher has set the host's. */
     File enabledModsBackup() {
         return new File(mods, "enabled_mods.json.multisector-backup");

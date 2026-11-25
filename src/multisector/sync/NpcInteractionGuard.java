@@ -46,7 +46,13 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
 
     @Override
     public PluginPick<InteractionDialogPlugin> pickInteractionDialogPlugin(SectorEntityToken target) {
-        if (!(target instanceof CampaignFleetAPI)) return null;
+        if (!(target instanceof CampaignFleetAPI)) {
+            // Salvage is one player's at a time: ask the host first (ObjectLocks).
+            if (Session.get().isActive() && ObjectLocks.isSalvage(target) && !ObjectLocks.holds(target)) {
+                return pick(new ObjectLocks.Claim(target));
+            }
+            return null;
+        }
         CampaignFleetAPI fleet = (CampaignFleetAPI) target;
         MemoryAPI mem = fleet.getMemoryWithoutUpdate();
         Session s = Session.get();
@@ -122,6 +128,13 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
     public PluginPick<InteractionDialogPlugin> pickRespawnPlugin() {
         if (!Respawn.wanted()) return null;
         return new PluginPick<InteractionDialogPlugin>(new Respawn(), PickPriority.HIGHEST);
+    }
+
+    /** An NPC fleet of another player's world caught us: the same claim as flying into it, then the encounter. */
+    static InteractionDialogPlugin engagedBy(int owner, int handle, CampaignFleetAPI fleet) {
+        Ask a = new Ask(owner, handle, fleet);
+        a.engaged = true;
+        return a;
     }
 
     private static PluginPick<InteractionDialogPlugin> pick(InteractionDialogPlugin p) {
@@ -254,6 +267,9 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
         private int holderId = -1;
         private String holderName = "";
 
+        /** It came after us (PlayerAggro), rather than we after it. */
+        private boolean engaged;
+
         Ask(int owner, int handle, CampaignFleetAPI fleet) {
             this.owner = owner;
             this.handle = handle;
@@ -262,6 +278,7 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
 
         public void init(InteractionDialogAPI dialog) {
             this.dialog = dialog;
+            if (engaged) dialog.getTextPanel().addPara(fleet.getName() + " has caught up with your fleet!");
             dialog.getTextPanel().addPara("Your comms officer reaches " + Session.get().playerName(owner)
                     + "'s world about " + fleet.getName() + "...");
             FleetLocks.request(owner, handle);

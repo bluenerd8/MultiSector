@@ -79,6 +79,11 @@ public class MultiSectorModPlugin extends BaseModPlugin {
         Global.getSector().getListenerManager().addListener(new WorldState.HostileActs(), true);
         JointBattle.forget();
         Global.getSector().addTransientScript(new JointBattle());
+        multisector.sync.JointBattle.restoreOffers(); // ships still to recover, kept in the save
+        multisector.sync.Social.forget();
+        Global.getSector().addTransientScript(new multisector.sync.Social());
+        multisector.sync.ObjectLocks.forget();
+        Global.getSector().addTransientScript(new multisector.sync.ObjectLocks());
         SessionGuard.forget(); // a new world: nothing joined yet
         SessionGuard guardScript = new SessionGuard();
         Global.getSector().addTransientScript(guardScript);

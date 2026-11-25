@@ -51,12 +51,14 @@ import java.util.Set;
  *     player who fought in it, to recover as they would any enemy ship.</li>
  * </ul>
  *
- * Held in memory only: a save made before they're recovered or left doesn't
- * keep them.
+ * Kept in the save (sector persistent data) until recovered or left, so a
+ * save in between, or a crash after it, doesn't lose them.
  */
 final class JointSpoils {
 
     private static final Logger log = Global.getLogger(JointSpoils.class);
+    /** Where the offers wait in the save. */
+    private static final String SAVE_KEY = "multisector_recoveryOffers";
     /** The leader's battle dialog still open after this long: send what's left anyway. */
     private static final long LEADER_WAIT_NANOS = 15L * 60L * 1_000_000_000L;
 
@@ -110,6 +112,7 @@ final class JointSpoils {
             log.info("[MultiSector] " + count() + " of our ships from " + leaderName + "'s battle can be recovered ("
                     + story.size() + " with a story point)");
         }
+        persist();
     }
 
     /** Enemy ships the leader left, from their game. */
@@ -136,6 +139,7 @@ final class JointSpoils {
             }
         }
         if (added == 0) return;
+        persist();
         log.info("[MultiSector] " + leaderName + " left " + added + " enemy ships to recover"
                 + (skipped.isEmpty() ? "" : "; missing here: " + skipped));
         Session.get().notice(leaderName + " has taken their pick: " + added + " ship" + (added == 1 ? "" : "s")
@@ -207,6 +211,7 @@ final class JointSpoils {
         }
         me.getFleetData().setSyncNeeded();
         me.forceSync();
+        persist();
         if (dialog != null && dialog.getTextPanel() != null) dialog.getTextPanel().addPara("Recovered: " + join(names) + ".");
         log.info("[MultiSector] recovered " + names + " from " + from + "'s battle");
     }
@@ -234,11 +239,95 @@ final class JointSpoils {
         own.clear();
         captains.clear();
         offerLater = false;
+        persist();
+    }
+
+    /** What's on offer, into the save: rebuilt by {@link #restore()} when it loads. */
+    private static void persist() {
+        try {
+            Map<String, Object> data = Global.getSector().getPersistentData();
+            if (!hasAny()) {
+                data.remove(SAVE_KEY);
+                return;
+            }
+            JSONArray ships = new JSONArray();
+            for (int pass = 0; pass < 2; pass++) {
+                for (FleetMemberAPI m : pass == 0 ? normal : story) {
+                    JSONObject sj = ShipJson.ship(m);
+                    sj.put("easy", pass == 0).put("own", own.contains(m));
+                    PersonAPI c = captains.get(m);
+                    if (c != null && c.isAICore()) sj.put("aiCaptain", ShipJson.person(c, c.getStats()));
+                    else if (c != null) sj.put("officerId", c.getId());
+                    ships.put(sj);
+                }
+            }
+            data.put(SAVE_KEY, new JSONObject().put("from", from).put("ships", ships).toString());
+        } catch (Exception e) {
+            log.warn("[MultiSector] couldn't keep the recovery offer in the save", e);
+        }
+    }
+
+    /** A save loaded with an offer still open: back as it was, offered on the map. */
+    static void restore() {
+        try {
+            Object text = Global.getSector().getPersistentData().get(SAVE_KEY);
+            if (!(text instanceof String)) return;
+            CampaignFleetAPI me = Global.getSector().getPlayerFleet();
+            if (me == null) return;
+            JSONObject root = new JSONObject((String) text);
+            from = root.optString("from", "a joint battle");
+            JSONArray ships = root.optJSONArray("ships");
+            List<String> skipped = new ArrayList<String>();
+            for (int i = 0; ships != null && i < ships.length(); i++) {
+                JSONObject sj = ships.getJSONObject(i);
+                FleetMemberAPI m = ShipJson.buildShip(sj, skipped);
+                if (m == null) continue;
+                if (DModManager.getNumDMods(m.getVariant()) > 0) DModManager.setDHull(m.getVariant());
+                m.getStatus().setHullFraction(0.01f);
+                (sj.optBoolean("easy") ? normal : story).add(m);
+                if (sj.optBoolean("own")) own.add(m);
+                String officer = sj.optString("officerId", "");
+                if (!officer.isEmpty()) {
+                    for (com.fs.starfarer.api.characters.OfficerDataAPI o : me.getFleetData().getOfficersCopy()) {
+                        if (officer.equals(o.getPerson().getId())) captains.put(m, o.getPerson());
+                    }
+                }
+                JSONObject ai = sj.optJSONObject("aiCaptain");
+                if (ai != null && !ai.optString("aiCore", "").isEmpty()) {
+                    PersonAPI p = Global.getFactory().createPerson();
+                    ShipJson.applyPerson(p, p.getStats(), ai, null);
+                    p.setAICoreId(ai.optString("aiCore"));
+                    captains.put(m, p);
+                }
+            }
+            if (hasAny()) {
+                offerLater = true;
+                log.info("[MultiSector] " + count() + " ships from " + from + "'s battle still to recover (kept in the save)"
+                        + (skipped.isEmpty() ? "" : "; missing here: " + skipped));
+            }
+        } catch (Exception e) {
+            log.warn("[MultiSector] couldn't bring back the recovery offer from the save", e);
+        }
+    }
+
+    /** The offers were another character's (a fresh copy of the host's save): gone, from the save too. */
+    static void drop() {
+        normal.clear();
+        story.clear();
+        own.clear();
+        captains.clear();
+        offerLater = false;
+        try {
+            Global.getSector().getPersistentData().remove(SAVE_KEY);
+        } catch (RuntimeException ignored) {
+            // nothing kept
+        }
     }
 
     /** On the map with nothing open: the recovery we couldn't offer in the battle's dialog. */
     static void frame() {
         if (!offerLater || !hasAny()) return;
+        if (multisector.ui.CharacterChooser.isPending()) return; // our character first (a fresh copy)
         CampaignUIAPI ui = Global.getSector().getCampaignUI();
         if (ui == null || ui.isShowingDialog() || ui.isShowingMenu() || !ClockSync.isMapView()) return;
         offerLater = false;

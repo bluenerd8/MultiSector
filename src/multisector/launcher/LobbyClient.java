@@ -51,6 +51,8 @@ final class LobbyClient {
         /** The host's game is in the world and hosting: 1, not yet: 0, unknown (older launcher): -1. */
         int gameHosting = -1;
         List<String> mods = new ArrayList<String>();
+        /** The host's enabled mods' versions (id -> version); empty from an older launcher. */
+        java.util.Map<String, String> modVersions = new java.util.HashMap<String, String>();
     }
 
     interface Progress {
@@ -389,6 +391,13 @@ final class LobbyClient {
         info.zipHash = Protocol.getString(bb);
         info.hostVersion = bb.remaining() >= 2 ? Protocol.getString(bb) : "?";
         if (bb.remaining() >= 1) info.gameHosting = bb.get() != 0 ? 1 : 0;
+        if (bb.remaining() >= 4) {
+            int nv = bb.getInt();
+            for (int i = 0; i < nv && i < 1000 && bb.remaining() >= 4; i++) {
+                String id = Protocol.getString(bb);
+                info.modVersions.put(id, Protocol.getString(bb));
+            }
+        }
         if (!BuildInfo.VERSION.equals(info.hostVersion)) {
             throw new VersionMismatch("Different MultiSector builds: the host has " + info.hostVersion + ", you have "
                     + BuildInfo.VERSION + ". You both need the same build.", "?".equals(info.hostVersion) ? "" : info.hostVersion);

@@ -76,6 +76,19 @@ public final class Escort implements EveryFrameScript {
         return target == playerId;
     }
 
+    /** For the players window: escort that player. */
+    public static void startEscorting(int playerId) {
+        start(playerId);
+    }
+
+    public static boolean isEscortingPlayer(int playerId) {
+        return target == playerId;
+    }
+
+    public static void stopEscorting() {
+        stop("you stopped it");
+    }
+
     public static void forget() {
         target = -1;
         lastSet = null;
@@ -233,8 +246,12 @@ public final class Escort implements EveryFrameScript {
         return r != null && !r.state.isStopped();
     }
 
+    /** How fast the world runs now: the fleet keeps that pace in menus, fast-forward included. */
     private static float speedMult(Session s) {
-        if (s.getState() == Session.State.HOSTING) return 1f; // the shared clock's fast-forward is the host's own
+        if (s.getState() == Session.State.HOSTING) {
+            multisector.net.SharedClock c = s.getSharedClock();
+            return c.isFast() ? Math.max(1f, c.getFastMult()) : 1f;
+        }
         ClockState.Received r = s.getRemoteClock();
         return r != null && r.state.isFast() ? Math.max(1f, r.state.fastMult) : 1f;
     }

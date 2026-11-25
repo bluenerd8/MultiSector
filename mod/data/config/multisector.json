@@ -91,6 +91,11 @@
 	# The hotkey shows or hides it; more detail is in the Multiplayer window.
 	"showPlayersHud":true,
 	"hudHotkey":"F7",
+	# The players window: everyone, where they are, a course to them or an escort in one click,
+	# and recent pings. (Alt+click on the map pings a spot for everyone.)
+	"playersHotkey":"F6",
+	# The chat window: type, Enter sends to everyone. Lines show in the game's message list too.
+	"chatHotkey":"ENTER",
 	# topLeft, topRight, bottomLeft or bottomRight
 	"hudCorner":"topRight",
 	# Nudge it if it covers something: pixels right (X) and down (Y). Negative moves left/up.

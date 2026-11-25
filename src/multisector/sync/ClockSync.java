@@ -169,6 +169,7 @@ public class ClockSync implements EveryFrameScript {
             }
             shownFastBy = boosted ? by : -1;
 
+            if (!boosted) ClockAccess.settle(false); // what following the clock in a menu owes the rest of the sector
             long shared = clock.now(nanos);
             long behind = shared - local;
             if (boosted) {
@@ -184,8 +185,48 @@ public class ClockSync implements EveryFrameScript {
                 clock.anchor(local, nanos); // on the map, the host's game is the truth
             }
             lastLocalPaused = sector.isPaused();
+        } else {
+            // Our fast-forward goes on in a menu or dialog only while we still hold the key (or the game's own
+            // toggle has it on). Before, it stayed on for everyone until we were back on the map.
+            if (clock.isFast() && clock.getFastBy() == session.getMyId()) {
+                CampaignUIAPI ui = sector.getCampaignUI();
+                if (!((ui != null && ui.isFastForward()) || fastKeyHeld())) {
+                    clock.setFast(false, 1f, -1, nanos);
+                    wasHostFast = false;
+                }
+            }
+            // In a menu our game stands still but the world doesn't: our date follows it, a small step each frame.
+            if (inMenu() && clock.isRunning()) {
+                long shared = clock.now(nanos);
+                long behind = shared - local;
+                if (behind > 0 && behind < DAY) ClockAccess.follow(shared);
+            }
         }
         wasMapView = map;
+    }
+
+    private static int fastKey = -1;
+
+    /** The fast-forward key (the game's binding for it; Shift if it names something we can't read) is held. */
+    private static boolean fastKeyHeld() {
+        if (fastKey < 0) {
+            int k = 0;
+            try {
+                k = JointCombat.Mirror.keyOf(Global.getSettings().getControlStringForEnumName("FAST_FORWARD"));
+            } catch (RuntimeException ignored) {
+                // not a control this game has
+            }
+            fastKey = k > 0 ? k : Keyboard.KEY_LSHIFT;
+        }
+        return Keyboard.isKeyDown(fastKey) || (fastKey == Keyboard.KEY_LSHIFT && Keyboard.isKeyDown(Keyboard.KEY_RSHIFT));
+    }
+
+    /** In the cargo, refit, character, intel or map screen, not a dialog (docked, talking) and not a battle. */
+    static boolean inMenu() {
+        CampaignUIAPI ui = Global.getSector().getCampaignUI();
+        CampaignFleetAPI me = Global.getSector().getPlayerFleet();
+        return ui != null && ui.getCurrentCoreTab() != null && ui.getCurrentInteractionDialog() == null
+                && me != null && me.getBattle() == null;
     }
 
     // ================================================================ friends
@@ -200,34 +241,38 @@ public class ClockSync implements EveryFrameScript {
         }
 
         boolean map = isMapView();
-        if (!map) {
-            wasMapView = false;
+        boolean menu = !map && inMenu();
+        if (!map && !menu) {
+            wasMapView = false; // a dialog: the date catches up once it closes (Docking keeps us by the planet)
             return;
         }
         SectorAPI sector = Global.getSector();
-        boolean localPaused = sector.isPaused();
-        if (wasMapView && localPaused != lastLocalPaused) {
-            // The player pressed pause: ask the host to do it for everyone.
-            session.requestPause(localPaused);
-            pendingPause = localPaused;
-            pendingUntil = nanos + 3_000_000_000L;
-        }
-        if (pendingPause != null && (st.isStopped() == pendingPause || nanos - pendingUntil > 0)) pendingPause = null;
-        boolean wantPaused = pendingPause != null ? pendingPause : st.isStopped();
-        if (localPaused != wantPaused) sector.setPaused(wantPaused);
+        boolean following = false;
+        if (map) {
+            boolean localPaused = sector.isPaused();
+            if (wasMapView && localPaused != lastLocalPaused) {
+                // The player pressed pause: ask the host to do it for everyone.
+                session.requestPause(localPaused);
+                pendingPause = localPaused;
+                pendingUntil = nanos + 3_000_000_000L;
+            }
+            if (pendingPause != null && (st.isStopped() == pendingPause || nanos - pendingUntil > 0)) pendingPause = null;
+            boolean wantPaused = pendingPause != null ? pendingPause : st.isStopped();
+            if (localPaused != wantPaused) sector.setPaused(wantPaused);
 
-        capSpeedup(st.isFast() ? st.fastMult : 1f);
-        askToFastForward(session, sector, nanos);
-        CampaignUIAPI fui = sector.getCampaignUI();
-        boolean holdingFast = fui != null && fui.isFastForward();
-        if (holdingFast && !st.isFast() && !MultiSectorConfig.isFriendsCanFastForward()
-                && nanos - hostOnlyHintAt > 60_000_000_000L) {
-            hostOnlyHintAt = nanos;
-            session.notice("Only the host can fast-forward. When they do, hold fast-forward too to move at their speed.");
+            capSpeedup(st.isFast() ? st.fastMult : 1f);
+            askToFastForward(session, sector, nanos);
+            CampaignUIAPI fui = sector.getCampaignUI();
+            boolean holdingFast = fui != null && fui.isFastForward();
+            if (holdingFast && !st.isFast() && !MultiSectorConfig.isFriendsCanFastForward()
+                    && nanos - hostOnlyHintAt > 60_000_000_000L) {
+                hostOnlyHintAt = nanos;
+                session.notice("Only the host can fast-forward. When they do, hold fast-forward too to move at their speed.");
+            }
+            // Someone else is fast-forwarding and we aren't: our game's own fast-forward can't be switched on for us,
+            // so the date follows the host's in a small step every frame, with the planets here (see ClockAccess).
+            following = st.isFast() && st.fastBy != session.getMyId() && !sector.isPaused() && !holdingFast;
         }
-        // Someone else is fast-forwarding and we aren't: our game's own fast-forward can't be switched on for us,
-        // so the date follows the host's in a small step every frame, with the planets here (see ClockAccess).
-        boolean following = st.isFast() && st.fastBy != session.getMyId() && !sector.isPaused() && !holdingFast;
 
         int ping = session.getPingMs();
         long target = st.extrapolate(r.arrivedNanos, nanos, ping > 0 ? ping / 2f : 0f);
@@ -247,14 +292,20 @@ public class ClockSync implements EveryFrameScript {
             followedIn = here;
             ClockAccess.payUp(here); // somewhere new: its planets are where they'd be by now
         }
-        if (following && diff > 0 && diff < DAY) {
+        // In a menu our game stands still, but the world goes on (fast-forward too): the date follows it the same way.
+        boolean smooth = following || (menu && !st.isStopped());
+        if (smooth && diff > 0 && diff < DAY) {
             ClockAccess.follow(target);
         } else if (Math.abs(diff) > (st.isStopped() ? STOPPED_SNAP : CLIENT_DRIFT)) {
-            ClockAccess.set(target, following);
+            ClockAccess.set(target, smooth);
         }
-        if (!st.isFast()) ClockAccess.settle(false); // fast-forward is over: the rest of the sector catches up once
-        lastLocalPaused = sector.isPaused();
-        wasMapView = true;
+        if (map && !following) ClockAccess.settle(false); // back to normal on the map: the rest of the sector catches up once
+        if (map) {
+            lastLocalPaused = sector.isPaused();
+            wasMapView = true;
+        } else {
+            wasMapView = false; // a pause in a menu is the menu's, not the player's
+        }
     }
 
     /**

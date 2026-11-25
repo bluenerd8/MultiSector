@@ -125,7 +125,21 @@ public final class Launcher {
 
     private Launcher(GameInstall game) {
         this.game = game;
+        this.logShare = new LogShare(game, new LogShare.Listener() {
+            public void log(final String line) {
+                ui(new Runnable() {
+                    public void run() {
+                        Launcher.this.log(line);
+                    }
+                });
+            }
+        });
     }
+
+    /** Game logs to and from the host (LogShare): who we joined, and as whom. */
+    private final LogShare logShare;
+    private volatile String joinedAddress;
+    private volatile String joinedName;
 
     // ================================================================ layout
 
@@ -192,6 +206,18 @@ public final class Launcher {
             }
         });
         poll.start();
+        // Logs: ours to the host we joined, every few minutes and at once after a crash; theirs back.
+        logShare.setTarget(new LogShare.Target() {
+            public String hostAddress() {
+                return server == null ? joinedAddress : null; // the host keeps what friends send instead
+            }
+
+            public String myName() {
+                String n = joinedName;
+                return n == null || n.isEmpty() ? "friend" : n;
+            }
+        });
+        logShare.start();
         checkFirewall();
         restoreModsButton.setVisible(game.enabledModsBackup().isFile());
         carryOn();
@@ -353,11 +379,14 @@ public final class Launcher {
         String name = myName();
         if (name == null) return;
         int port = NetConfig.DEFAULT_PORT;
-        LobbyServer s = new LobbyServer(name, save, game.enabledMods(), port, new LobbyServer.Listener() {
+        final LobbyServer s = new LobbyServer(name, save, game.enabledMods(), port, new LobbyServer.Listener() {
             public void log(final String line) {
                 Launcher.this.log(line);
             }
         });
+        s.setModVersions(game.modVersions());
+        logShare.setHostName(name);
+        s.setLogShare(logShare);
         try {
             s.start();
             writeSession("host", null, port, name, save.characterName, GameInstall.readSeed(save.folder), null);
@@ -401,6 +430,8 @@ public final class Launcher {
                     ui(new Runnable() {
                         public void run() {
                             checkedInfo = info;
+                            joinedAddress = address;
+                            joinedName = name;
                             hostInfo.setText(describe(info, reach));
                             downloadButton.setEnabled(true);
                             checkButton.setEnabled(true);
@@ -512,6 +543,11 @@ public final class Launcher {
             }
         }
 
+        List<String> different = versionsDiffering(info);
+        if (!different.isEmpty()) {
+            sb.append("Other mod versions than the host's (things may not match up, or crash): ")
+                    .append(different).append(". Install the host's versions.\n");
+        }
         List<String> mine = game.enabledMods();
         List<String> missing = new ArrayList<String>(info.mods);
         missing.removeAll(mine);
@@ -536,6 +572,21 @@ public final class Launcher {
     }
 
     // ================================================================ mods
+
+    /** "Nexerelin: yours 0.12.2, host's 0.12.3" for each of the host's mods installed here in another version. */
+    private List<String> versionsDiffering(LobbyClient.Info info) {
+        List<String> out = new ArrayList<String>();
+        if (info.modVersions.isEmpty()) return out;
+        java.util.Map<String, String> mine = game.modVersions();
+        java.util.Map<String, String> names = game.installedMods();
+        for (String id : info.mods) {
+            String theirs = info.modVersions.get(id);
+            String ours = mine.get(id);
+            if (theirs == null || ours == null || theirs.equals(ours) || "?".equals(theirs)) continue;
+            out.add((names.containsKey(id) ? names.get(id) : id) + ": yours " + ours + ", host's " + theirs);
+        }
+        return out;
+    }
 
     private boolean modsMatch(LobbyClient.Info info) {
         return new java.util.HashSet<String>(game.enabledMods()).equals(new java.util.HashSet<String>(info.mods));

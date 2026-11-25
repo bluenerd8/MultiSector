@@ -755,6 +755,36 @@ From testing 0.1.2. Weapons now keep working through autopilot and transfers. Fo
   - cargo pods with no cargo hold at all (from an earlier session) failed every scan, and the game's own pods dialog failed on them. They're faded away, and pods are never made without a hold.
 - `PROTOCOL_VERSION` 23.
 
+## 25. Third 0.1 test round (0.1.4)
+
+From testing 0.1.3, most things work as intended. Found:
+
+- **Menus fell behind the host's fast-forward.** A player in a menu (cargo, refit, character, intel, map screen) has their game paused, and only their fleet kept moving (`Escort`). The date stood still until the menu closed, then jumped; NPC fleets they own moved at normal speed (`NpcSync.keepWorldMoving`); and the host's own fleet in a menu always moved at normal speed. Also, a host who opened a menu while fast-forwarding left the shared clock fast until back on the map, so everyone else raced ahead while the host's game stood still. Now:
+  - in a menu (not a dialog), everyone's date follows the shared clock in a small step each frame (`ClockAccess.follow`), host included: no catch-up jump when the menu closes. The rest of the sector's orbits are settled on the way back to the map;
+  - your fleet in a menu, and the NPC fleets you own there, move at the world's current speed (fast-forward included);
+  - off the map, the host's fast-forward stays on only while the fast-forward key (the game's binding, read directly) is still held, or the game's own toggle has it on. Pressing it in a menu doesn't start it.
+  - Dialogs (docked, talking) are as before: the date catches up when they close, and `Docking` keeps you by the planet.
+- **From the logs** (0.1.3, host side): no MultiSector warnings or errors. Leftover ships went to the joiner after both joint battles (6 and 2). Small things:
+  - a new debris field reported a "change" every second for about 15 s while its density eased in, which every game does by itself; only quarter steps and being scavenged count now;
+  - the leader's log said "controls stopped" both for autopilot and for a stalled connection; it now says which;
+  - a save made with an older Nexerelin (`NexAlign`) fails to load under Nexerelin 0.12.3. That's Nexerelin's, not MultiSector's.
+
+## 26. Players together, and the tools to fix things (0.1.5)
+
+The first part of the "core" list: seeing and finding each other, talking, and the safety and testing tools.
+
+- **Chat and pings** (`Social`): a new PLAYER_MSG channel, `CHANNEL_SOCIAL`, with `TO_ALL` (-1): the host relays a client's message to every other player and keeps a copy. Chat lines go to the game's message list in the sender's colour (in battles too: the combat plugins pump the channel), and the chat window (`ChatWindow`, Enter) keeps the last 60. Alt+click on the map sends a ping: drawn for 30 s on every game that's in that place, announced with its place to the rest.
+- **Seeing players** (`PlayersHud.markers`): every other player in your location gets a ring in their colour, name and distance, and an arrow at the screen's edge when off screen. The players window (`PlayersWindow`, F6) lists all of them with where they are (`Social.describe`: place and nearest planet or jump point), and lays in a course (`SectorAPI.layInCourseFor` on their puppet, which exists in every location), starts or stops an escort, or pings their spot. Stealth against players can come later as an option.
+- **Mods check:** on connecting, a friend asks the host (`modsreq`) for its enabled mods and versions, and is told which differ. The launcher's lobby info now ends with each enabled mod's version (`GameInstall.modVersions`, from `mod_info.json`: a string or {major, minor, patch}), and the join description names other versions before downloading.
+- **Salvage locks** (`ObjectLocks`, `ObjectLockTable`): opening a derelict, debris field, cargo pods or anything tagged salvageable goes through a short dialog that claims it from the host (`CHANNEL_OBJECTS`), then hands over to the game's own dialog (`RuleBasedInteractionDialogPluginImpl`). Another player's claim says who has it. The table lives on the host's network thread, so claims are answered while the host is in a battle or menu; a claim ends when the dialog closes, the holder leaves, or after 15 minutes; no answer in 3 s means go ahead as before.
+- **Recovery offers are kept in the save** (`JointSpoils.persist`/`restore`, sector persistent data), rebuilt on load with their d-mods, officers and AI cores, and offered on the map (offline too). A fresh copy of the host's save drops them when the friend's character is applied (they were the host's).
+- **Logs shared automatically** (`launcher.LogShare`): a friend's launcher looks at `starsector.log` every 15 s and sends the filtered new part (MultiSector lines, warnings, errors, crashes with their stack traces) to the host's launcher (`HELLO_FOR_LOG`, `LOBBY_LOG`, deflated) every 5 minutes, at once on a crash (Fatal, CombatMain errors, out of memory), and when the game closes. The host keeps it and answers with its own new part. Both keep the newest 60 files in `Starsector/multisector_logs`.
+- **Telling players apart:** besides their colour, each player has their own shape on the map (double ring, diamond, square, triangle, hexagon, star, by player id, the same on every game), drawn around their fleet, beside their edge-of-screen arrow, and on their pings ("Febl's ping"). The players window names each player's shape.
+- **Leaving a joint battle at any point:** the join dialog's only option while joining or in a battle was "Order your ships to retreat", which left a joiner stuck when the battle hung (waiting for it to start, or cut off mid-join) until a timeout. It's now "Leave the battle": the leader takes them out of the queue or pulls their ships out, the view closes, the dialog closes, and the battle's result for their ships is still applied when it comes (from that leader, within 30 minutes).
+- **Knocked-out weapons and engines show in the battle view:** each ship's update lists its disabled weapons and engines (EMP, damage; for good or for now), and the view disables and repairs them to match, so the joiner's HUD shows a missile rack that's out.
+- **Enemies chase every player, not just the owner** (`PlayerAggro`). Other players' fleets are kept out of the game's own fleet AI on the owner's game (ignored, non-hostile), so an NPC fleet never starts a battle with a stand-in; the side effect was that in any place only the player whose NPC fleets are shown was ever chased. Now the owner's game decides for its fleets about each other player there, once a second: hostile by that player's own standing (each game sends its hostile factions, sensor profile and transponder every 20 s, `rep`), willing to fight (not a trader, not non-aggressive, not fleeing, at least 0.6 of their fleet points unless aggressive), and in sensor range (`getBaseSensorRangeToDetect` with their real profile). A fleet already after a closer owner is left to the game. A chasing fleet's AI is off while it steers straight for them; it gives up beyond 1.5 times the range, after 45 s, or if they dock, open a menu or leave; it then leaves that player alone for 30 s. Catching them sends `caught` (lock channel): their game opens the usual claim-and-encounter dialog with its copy of that fleet ("has caught up with your fleet"), as if they'd flown into it. No fleet is saved mid-chase.
+- **Tests on our side** (scratchpad, not shipped): three separate sessions (host and two friends) check chat relay to and from the host, salvage claims (granted, refused while held, freed when the holder drops out), and the host's own claims; a launcher test checks the log exchange (a friend's crash at the host with its trace, the host's log back), the log filter, and mod version parsing.
+
 ## Still to do (roadmap)
 
 Kept here so they aren't lost between test rounds:
@@ -766,12 +796,11 @@ Kept here so they aren't lost between test rounds:
 - **Friends' characters in the host's save** (agreed design, not built): every player's character stored inside the host's save at each shared save, dormant unless hosting, so a rewind rewinds everyone and a friend can recover theirs from the host.
 - **Fast-forward from a friend** (`friendsCanFastForward`, off by default) moves the host's fleets and date, not the host's whole simulation; the host's own fast-forward key can't be pressed for them. A friend not holding fast-forward while the host does moves their own fleet at normal speed.
 - **The updater:** not yet confirmed by a test report (0.1.2 is installed here; it isn't known whether by the button or by hand).
-- **Recovery offers** after a joint battle aren't saved: a save before they're recovered or left loses them.
 - **Mod updates beyond MultiSector:** the launcher can match which mods are enabled, but can't install a mod the host has and the friend doesn't.
 
 ### Pitched for 0.1.3 (agreed to note, not built)
 
-Suggested first: 1, 2, 3, 4 and 7; then 8 (above, friends' characters in the host's save) and 5.
+Suggested first: 1, 2, 3, 4 and 7; then 8 (above, friends' characters in the host's save) and 5. Done in 0.1.5: 2 (automatic), 3, 4, 6 (the network part), 8 and 9. Next (0.1.6): friends' characters in the host's save, the desync check, installing mods from the host. Then the shared simulation: NPC faction activity, market ownership and colonies, NPC battles a friend joins.
 
 Protecting the campaign and catching bugs:
 

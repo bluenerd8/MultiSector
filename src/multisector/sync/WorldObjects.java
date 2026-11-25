@@ -253,7 +253,9 @@ public final class WorldObjects implements EveryFrameScript {
         String k = kind(e);
         if (DEBRIS.equals(k)) {
             DebrisFieldTerrainPlugin p = (DebrisFieldTerrainPlugin) ((CampaignTerrainAPI) e).getPlugin();
-            return Math.round(p.getParams().density * 100f) + "|" + p.isScavenged();
+            // A new field's density eases in over a few seconds on every game by itself: only a big change, or
+            // its being scavenged, is news.
+            return Math.round(p.getParams().density * 4f) + "|" + p.isScavenged();
         }
         if (OBJECTIVE.equals(k)) return e.getFaction().getId() + "|" + hacked(e);
         if (PODS.equals(k)) {

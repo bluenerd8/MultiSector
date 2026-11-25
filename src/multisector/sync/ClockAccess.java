@@ -110,7 +110,8 @@ final class ClockAccess {
             float due = owed - (had == null ? 0f : had);
             if (due > 0.0001f) moved += turnOrbits(loc, due);
         }
-        if (!quiet) {
+        float days = owed / Math.max(1f, Global.getSector().getClock().getSecondsPerDay());
+        if (!quiet && days >= 0.25f) {
             Global.getLogger(ClockAccess.class).info(String.format(java.util.Locale.ROOT,
                     "[MultiSector] settled %d orbits by %.2f days in %d ms", moved,
                     owed / Global.getSector().getClock().getSecondsPerDay(), (System.nanoTime() - t0) / 1_000_000));

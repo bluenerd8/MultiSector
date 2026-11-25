@@ -46,6 +46,8 @@ final class LobbyServer {
     private final String hostName;
     private final GameInstall.SaveInfo save;
     private final List<String> mods;
+    /** Our installed mods' versions, sent so a friend can tell a different build of the same mod. */
+    private volatile java.util.Map<String, String> modVersions = new java.util.HashMap<String, String>();
     private final int gamePort;
     private final Listener listener;
     private volatile ServerSocket server;
@@ -199,6 +201,11 @@ final class LobbyServer {
                         + ". Their launcher offers them your build (Get the host's build).");
             }
             byte purpose = hello.remaining() >= 1 ? hello.get() : Protocol.HELLO_FOR_CHECK;
+            if (purpose == Protocol.HELLO_FOR_LOG) {
+                LogShare share = logShare;
+                if (share != null) share.serve(c, name);
+                return;
+            }
             if (purpose == Protocol.HELLO_FOR_DOWNLOAD) freshSave(name);
 
             Snapshot snap = ensureBlob();
@@ -355,11 +362,23 @@ final class LobbyServer {
         return new Snapshot(blob, blobHash, rawBytes);
     }
 
+    private volatile LogShare logShare;
+
+    void setLogShare(LogShare share) {
+        logShare = share;
+    }
+
+    void setModVersions(java.util.Map<String, String> versions) {
+        modVersions = versions == null ? new java.util.HashMap<String, String>() : versions;
+    }
+
     private ByteBuffer info(Snapshot snap) {
+        java.util.Map<String, String> versions = modVersions;
         int size = Protocol.stringSize(hostName) + Protocol.stringSize(save.characterName)
                 + Protocol.stringSize(save.saveDate) + Protocol.stringSize(save.gameVersion) + 8 + 4 + 4
-                + 8 + Protocol.stringSize(snap.hash) + Protocol.stringSize(BuildInfo.VERSION) + 1;
+                + 8 + Protocol.stringSize(snap.hash) + Protocol.stringSize(BuildInfo.VERSION) + 1 + 4;
         for (String m : mods) size += Protocol.stringSize(m);
+        for (String m : mods) size += Protocol.stringSize(m) + Protocol.stringSize(String.valueOf(versions.get(m)));
         ByteBuffer bb = Protocol.begin(Protocol.LOBBY_INFO, size);
         Protocol.putString(bb, hostName);
         Protocol.putString(bb, save.characterName);
@@ -373,6 +392,11 @@ final class LobbyServer {
         Protocol.putString(bb, snap.hash);
         Protocol.putString(bb, BuildInfo.VERSION);
         bb.put((byte) (GameLink.isHosting(gamePort) ? 1 : 0)); // is our game in the world and hosting?
+        bb.putInt(mods.size()); // then each enabled mod's version (0.1.5)
+        for (String m : mods) {
+            Protocol.putString(bb, m);
+            Protocol.putString(bb, String.valueOf(versions.get(m)));
+        }
         bb.flip();
         return bb;
     }

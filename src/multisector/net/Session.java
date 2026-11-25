@@ -145,6 +145,10 @@ public final class Session {
     private final ConcurrentLinkedQueue<PlayerMessage> playerMessages = new ConcurrentLinkedQueue<PlayerMessage>();
     private final ConcurrentLinkedQueue<PlayerMessage> lockMessages = new ConcurrentLinkedQueue<PlayerMessage>();
     private final ConcurrentLinkedQueue<PlayerMessage> battleMessages = new ConcurrentLinkedQueue<PlayerMessage>();
+    private final ConcurrentLinkedQueue<PlayerMessage> socialMessages = new ConcurrentLinkedQueue<PlayerMessage>();
+    private final ConcurrentLinkedQueue<PlayerMessage> objectReplies = new ConcurrentLinkedQueue<PlayerMessage>();
+    /** Host: who is salvaging what. */
+    private final ObjectLockTable objectLocks = new ObjectLockTable();
     /** Objects in space that appeared, changed or went on another player's game, for the game thread. */
     private final ConcurrentLinkedQueue<String> worldEvents = new ConcurrentLinkedQueue<String>();
     /** Joint battle datagrams from other players (live battle state, pilot controls), for the combat plugins. */
@@ -155,6 +159,12 @@ public final class Session {
     public static final byte CHANNEL_TALK = 0;
     public static final byte CHANNEL_LOCK = 1;
     public static final byte CHANNEL_BATTLE = 2;
+    /** Chat, map pings and other things said to everyone (or one player). */
+    public static final byte CHANNEL_SOCIAL = 3;
+    /** Claims on objects in space while someone salvages them; answered by the host (ObjectLockTable). */
+    public static final byte CHANNEL_OBJECTS = 4;
+    /** A PLAYER_MSG to everyone in the session (the host relays a client's to the rest). */
+    public static final int TO_ALL = -1;
     /** A player's position this old counts as gone (they're loading, or left). */
     private static final long STALE_NANOS = 10_000_000_000L;
     /** Sent on a player's behalf when they leave, so whoever was talking to them knows. */
@@ -596,6 +606,107 @@ public final class Session {
         return battleMessages.poll();
     }
 
+    /** Says something to everyone else in the session (chat, a map ping). */
+    public void sendSocial(String json) {
+        if (state == State.HOSTING) {
+            outbox.add(playerMessage(TO_ALL, HOST_ID, CHANNEL_SOCIAL, json));
+        } else if (state == State.CONNECTED) {
+            outbox.add(playerMessage(TO_ALL, myId, CHANNEL_SOCIAL, json));
+        }
+    }
+
+    /** Says something to one other player (the host is player 0). */
+    public void sendSocialTo(int to, String json) {
+        send(to, CHANNEL_SOCIAL, json);
+    }
+
+    /** Next chat line, ping or the like from another player, or null. */
+    public PlayerMessage pollSocialMessage() {
+        return socialMessages.poll();
+    }
+
+    /** The host's player id. */
+    public static int hostId() {
+        return HOST_ID;
+    }
+
+    /**
+     * Asks to salvage an object nobody else is salvaging right now. The
+     * answer comes back through {@link #pollObjectReply()}: grant or deny
+     * (with who has it). On the host it's answered at once.
+     */
+    public void claimObject(String key) {
+        String json = objectJson("claim", key, null);
+        if (state == State.HOSTING) {
+            String by = objectLocks.claim(key, HOST_ID, localName, System.nanoTime());
+            objectReplies.add(new PlayerMessage(HOST_ID, localName, objectJson(by == null ? "grant" : "deny", key, by)));
+        } else if (state == State.CONNECTED) {
+            outbox.add(playerMessage(HOST_ID, myId, CHANNEL_OBJECTS, json));
+        }
+    }
+
+    /** We're done salvaging that object. */
+    public void releaseObject(String key) {
+        if (state == State.HOSTING) {
+            objectLocks.release(key, HOST_ID);
+        } else if (state == State.CONNECTED) {
+            outbox.add(playerMessage(HOST_ID, myId, CHANNEL_OBJECTS, objectJson("release", key, null)));
+        }
+    }
+
+    /** Next answer to a claim, or null. */
+    public PlayerMessage pollObjectReply() {
+        return objectReplies.poll();
+    }
+
+    private static String objectJson(String kind, String key, String by) {
+        StringBuilder b = new StringBuilder("{\"k\":\"").append(kind).append("\",\"key\":").append(quote(key));
+        if (by != null) b.append(",\"by\":").append(quote(by));
+        return b.append('}').toString();
+    }
+
+    private static String quote(String s) {
+        StringBuilder b = new StringBuilder("\"");
+        for (char c : s.toCharArray()) {
+            if (c == '"' || c == '\\') b.append('\\').append(c);
+            else if (c < 0x20) b.append(' ');
+            else b.append(c);
+        }
+        return b.append('"').toString();
+    }
+
+    /** The value of a string field in our own small JSON ("k", "key", "by"), or null. */
+    static String field(String json, String name) {
+        String tag = "\"" + name + "\":\"";
+        int i = json.indexOf(tag);
+        if (i < 0) return null;
+        StringBuilder b = new StringBuilder();
+        for (int j = i + tag.length(); j < json.length(); j++) {
+            char c = json.charAt(j);
+            if (c == '\\' && j + 1 < json.length()) {
+                b.append(json.charAt(++j));
+            } else if (c == '"') {
+                return b.toString();
+            } else {
+                b.append(c);
+            }
+        }
+        return null;
+    }
+
+    /** Host, network thread: a client's claim or release. */
+    private void objectMessage(Conn conn, String json) throws IOException {
+        String kind = field(json, "k");
+        String key = field(json, "key");
+        if (key == null) return;
+        if ("claim".equals(kind)) {
+            String by = objectLocks.claim(key, conn.id, conn.name, System.nanoTime());
+            conn.send(playerMessage(conn.id, HOST_ID, CHANNEL_OBJECTS, objectJson(by == null ? "grant" : "deny", key, by)));
+        } else if ("release".equals(kind)) {
+            objectLocks.release(key, conn.id);
+        }
+    }
+
     private void send(int to, byte channel, String json) {
         if (state == State.HOSTING) {
             directed.add(new Object[]{to, playerMessage(to, HOST_ID, channel, json)});
@@ -676,6 +787,10 @@ public final class Session {
     private void received(byte channel, PlayerMessage m) {
         if (channel == CHANNEL_LOCK) lockMessages.add(m);
         else if (channel == CHANNEL_BATTLE) battleMessages.add(m);
+        else if (channel == CHANNEL_SOCIAL) {
+            socialMessages.add(m);
+            while (socialMessages.size() > 300) socialMessages.poll(); // nobody reading: drop the oldest
+        } else if (channel == CHANNEL_OBJECTS) objectReplies.add(m);
         else playerMessages.add(m);
     }
 
@@ -939,7 +1054,20 @@ public final class Session {
                     msg.getInt(); // who they say they are: we know who they are
                     byte channel = msg.get();
                     String json = Protocol.getLongString(msg);
-                    if (to == HOST_ID) {
+                    if (channel == CHANNEL_OBJECTS) {
+                        objectMessage(conn, json); // the host keeps the claims, whoever it's addressed to
+                    } else if (to == TO_ALL) {
+                        // To everyone: ours, and on to every other player.
+                        received(channel, new PlayerMessage(conn.id, conn.name, json));
+                        for (Conn c : conns) {
+                            if (c == conn) continue;
+                            try {
+                                c.send(playerMessage(TO_ALL, conn.id, channel, json));
+                            } catch (IOException e) {
+                                closeQuietly(c.socket);
+                            }
+                        }
+                    } else if (to == HOST_ID) {
                         received(channel, new PlayerMessage(conn.id, conn.name, json));
                     } else {
                         Conn target = null;
@@ -1016,6 +1144,7 @@ public final class Session {
             closeQuietly(s);
             if (conn != null) {
                 remoteFleets.remove(conn.id);
+                objectLocks.releaseAll(conn.id); // what they were salvaging is free
                 udpAddresses.remove(conn.id);
                 comps.remove(conn.id);
                 fastHeard.remove(conn.id);
@@ -1666,6 +1795,9 @@ public final class Session {
         playerMessages.clear();
         lockMessages.clear();
         battleMessages.clear();
+        socialMessages.clear();
+        objectReplies.clear();
+        objectLocks.clear();
         combatPackets.clear();
         worldEvents.clear();
         marketEvents.clear();

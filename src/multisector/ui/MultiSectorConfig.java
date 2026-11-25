@@ -37,6 +37,10 @@ public final class MultiSectorConfig {
     private static boolean shareFactionRelations = true;
     private static int hudHotkey = Keyboard.KEY_F7;
     private static String hudHotkeyName = "F7";
+    private static int chatHotkey = Keyboard.KEY_RETURN;
+    private static String chatHotkeyName = "Enter";
+    private static int playersHotkey = Keyboard.KEY_F6;
+    private static String playersHotkeyName = "F6";
     private static String hudCorner = "topRight";
     private static float hudOffsetX = 0f;
     private static float hudOffsetY = 0f;
@@ -79,6 +83,12 @@ public final class MultiSectorConfig {
             shareRaids = json.optBoolean("shareRaids", true);
             shareSystemBounties = json.optBoolean("shareSystemBounties", true);
             shareFactionRelations = json.optBoolean("shareFactionRelations", true);
+            int[] ck = key(json.optString("chatHotkey", "ENTER"), Keyboard.KEY_RETURN);
+            chatHotkey = ck[0];
+            chatHotkeyName = chatHotkey == Keyboard.KEY_RETURN ? "Enter" : Keyboard.getKeyName(chatHotkey);
+            int[] pk = key(json.optString("playersHotkey", "F6"), Keyboard.KEY_F6);
+            playersHotkey = pk[0];
+            playersHotkeyName = Keyboard.getKeyName(playersHotkey);
             String hk = json.optString("hudHotkey", "F7").trim().toUpperCase();
             int hidx = Keyboard.getKeyIndex(hk);
             if (hidx != Keyboard.KEY_NONE) {
@@ -113,6 +123,22 @@ public final class MultiSectorConfig {
     public static boolean isMoveFleetsDuringHostDialogs() { return moveFleetsDuringHostDialogs; }
     /** Whether the players panel starts shown. */
     public static boolean isShowPlayersHud() { return showPlayersHud; }
+    public static int getChatHotkey() { return chatHotkey; }
+    public static String getChatHotkeyName() { return chatHotkeyName; }
+    public static int getPlayersHotkey() { return playersHotkey; }
+    public static String getPlayersHotkeyName() { return playersHotkeyName; }
+
+    /** A key by name ("F6", "ENTER"/"RETURN", "Y"); the fallback if it isn't one. */
+    private static int[] key(String name, int fallback) {
+        String n = name == null ? "" : name.trim().toUpperCase();
+        if (n.equals("ENTER")) n = "RETURN";
+        int k = n.isEmpty() ? 0 : Keyboard.getKeyIndex(n);
+        if (k <= 0) {
+            com.fs.starfarer.api.Global.getLogger(MultiSectorConfig.class).warn("[MultiSector] unknown key \"" + name + "\" in " + PATH + ", using " + Keyboard.getKeyName(fallback));
+            k = fallback;
+        }
+        return new int[]{k};
+    }
     /** Joining someone's battle opens a live view of it, where you pilot one of your ships. */
     public static boolean isJointBattleView() { return jointBattleView; }
     /** The leader's game deploys every combat-ready ship of a player who joined (not just what fits). */

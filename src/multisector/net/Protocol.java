@@ -82,6 +82,10 @@ public final class Protocol {
     public static final byte HELLO_FOR_DOWNLOAD = 1;
     /** An extra connection of a download that already started. */
     public static final byte HELLO_FOR_EXTRA = 2;
+    /** Swapping game logs (launcher.LogShare): one LOBBY_LOG each way. */
+    public static final byte HELLO_FOR_LOG = 3;
+    /** either way, after HELLO_FOR_LOG: reason, sender name, raw length(int), deflated length(int), deflated UTF-8 */
+    public static final byte LOBBY_LOG = 41;
     /**
      * host -> client: hostName, characterName, saveDate, gameVersion, saveBytes(long), gamePort(int),
      * modCount(int), modIds..., zipBytes(long), zipSha256

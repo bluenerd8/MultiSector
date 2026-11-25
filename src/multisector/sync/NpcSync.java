@@ -182,6 +182,8 @@ public class NpcSync implements EveryFrameScript {
             }
             int me = s.getMyId();
             FleetLocks.handleMessages(s, byHandle, s.playerName(me));
+            PlayerAggro.report(s); // our standing, so other players' fleets know whether to chase us
+            PlayerAggro.playerFrame(); // one of theirs caught us: the encounter opens here
             int owner = s.ownerOf(me);
             if (owner == me) {
                 releaseAll();
@@ -202,6 +204,7 @@ public class NpcSync implements EveryFrameScript {
         NpcSync s = current;
         if (s == null) return;
         s.releaseAll();
+        PlayerAggro.stopAll(); // no fleet saved mid-chase with its AI off
         s.stopWorldMoving(); // our own fleet must not be saved as "ignored by other fleets"
         FleetLocks.beforeSave();
     }
@@ -233,6 +236,7 @@ public class NpcSync implements EveryFrameScript {
     /** A save is loading: drop references into the old world without touching it. */
     public static void forget() {
         current = null;
+        PlayerAggro.forget();
         FleetLocks.forget();
         MarketSync.forget();
     }
@@ -243,6 +247,12 @@ public class NpcSync implements EveryFrameScript {
         long now = System.nanoTime();
         keepWorldMoving(s, now);
         FleetLocks.ownerFrame();
+        if (pubLoc != null && !pubLoc.isEmpty()) {
+            CampaignFleetAPI meNow = Global.getSector().getPlayerFleet();
+            if (meNow != null && meNow.getContainingLocation() != null) {
+                PlayerAggro.ownerFrame(s, meNow.getContainingLocation(), byHandle); // other players get chased too
+            }
+        }
         if (now - nextCapture < 0) return;
         nextCapture = now + CAPTURE_NANOS;
         CampaignFleetAPI me = Global.getSector().getPlayerFleet();
@@ -251,6 +261,7 @@ public class NpcSync implements EveryFrameScript {
         String locId = loc == null || !s.hasFollowers(s.getMyId()) ? "" : FleetSync.locationId(loc);
         if (!locId.equals(pubLoc)) {
             pubLoc = locId;
+            PlayerAggro.stopAll();
             handles.clear();
             byHandle.clear();
             sentHash.clear();
@@ -315,6 +326,7 @@ public class NpcSync implements EveryFrameScript {
     private void stopPublishing(Session s, boolean tell) {
         if (pubLoc == null) return;
         if (tell && !pubLoc.isEmpty()) s.publishReset("");
+        PlayerAggro.stopAll();
         pubLoc = null;
         handles.clear();
         byHandle.clear();
@@ -476,11 +488,13 @@ public class NpcSync implements EveryFrameScript {
         }
         SectorEntityToken talkingTo = dialogTarget();
         boolean hyper = loc.isHyperspace();
+        // At the world's speed: the host may be fast-forwarding while we're in here.
+        float step = dt * Math.max(1f, clockSpeed(s.getRemoteClock(), s));
         for (CampaignFleetAPI f : new ArrayList<CampaignFleetAPI>(loc.getFleets())) {
             if (!isNpc(f) || f == talkingTo || f.getBattle() != null || FleetLocks.isHeld(f)) continue;
             if (hyper && dist(f.getLocation(), me.getLocation()) > PUB_RADIUS) continue;
             try {
-                f.advance(dt);
+                for (float left = step; left > 0f; left -= MAX_STEP_SECONDS) f.advance(Math.min(left, MAX_STEP_SECONDS));
             } catch (RuntimeException e) {
                 if (++failures == MAX_FAILURES) {
                     log.warn("[MultiSector] stopped moving fleets during this dialog after repeated errors", e);

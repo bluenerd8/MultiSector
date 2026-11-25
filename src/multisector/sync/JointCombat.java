@@ -372,6 +372,7 @@ final class JointCombat {
             Session s = Session.get();
             try {
                 JointBattle.handleMessages(s); // campaign scripts are stopped during combat
+                Social.pump(s, engine); // chat shows in the battle too
                 readInputs(s);
                 if (!ready && leaderDeployed()) {
                     ready = true;
@@ -699,7 +700,20 @@ final class JointCombat {
                 // count 0: a beam, firing right now; otherwise how many shots since the last update
                 if (beam || c != null) firing.add(new int[]{i, Math.round(w.getCurrAngle() * 10f), beam ? 0 : Math.min(255, c[0])});
             }
-            ByteBuffer bb = ByteBuffer.allocate(45 + firing.size() * 4 + ammo.size() * 3);
+            // Weapons and engines knocked out (EMP, damage): index, and whether it's for good.
+            List<int[]> downW = new ArrayList<int[]>();
+            for (int i = 0; i < weapons.size() && i < 255 && downW.size() < 60; i++) {
+                WeaponAPI w = weapons.get(i);
+                if (w.isDisabled()) downW.add(new int[]{i, w.isPermanentlyDisabled() ? 1 : 0});
+            }
+            List<int[]> downE = new ArrayList<int[]>();
+            ShipEngineControllerAPI ecd = ship.getEngineController();
+            List<ShipEngineControllerAPI.ShipEngineAPI> engines = ecd == null ? null : ecd.getShipEngines();
+            for (int i = 0; engines != null && i < engines.size() && i < 255 && downE.size() < 60; i++) {
+                ShipEngineControllerAPI.ShipEngineAPI en = engines.get(i);
+                if (en.isDisabled()) downE.add(new int[]{i, en.isPermanentlyDisabled() ? 1 : 0});
+            }
+            ByteBuffer bb = ByteBuffer.allocate(47 + firing.size() * 4 + ammo.size() * 3 + downW.size() * 2 + downE.size() * 2);
             bb.putShort((short) id);
             bb.putFloat(ship.getLocation().x).putFloat(ship.getLocation().y);
             bb.putFloat(ship.getVelocity().x).putFloat(ship.getVelocity().y);
@@ -749,6 +763,10 @@ final class JointCombat {
                 bb.put((byte) a[0]);
                 bb.putShort((short) a[1]);
             }
+            bb.put((byte) downW.size());
+            for (int[] d : downW) bb.put((byte) d[0]).put((byte) d[1]);
+            bb.put((byte) downE.size());
+            for (int[] d : downE) bb.put((byte) d[0]).put((byte) d[1]);
             byte[] out = new byte[bb.position()];
             bb.flip();
             bb.get(out);
@@ -849,7 +867,8 @@ final class JointCombat {
                     ship.resetDefaultAI();
                     banner(autopilot ? jn.name + " puts " + m.getShipName() + " on autopilot"
                             : jn.name + "'s controls stopped coming: " + m.getShipName() + " is on its own AI");
-                    log.info("[MultiSector] " + jn.name + "'s controls stopped; " + m.getShipName() + " back on its AI");
+                    log.info("[MultiSector] " + jn.name + (autopilot ? " put " + m.getShipName() + " on autopilot"
+                            : "'s controls stopped coming; " + m.getShipName() + " back on its AI"));
                 }
             }
         }
@@ -1345,6 +1364,9 @@ final class JointCombat {
         int autofire;
         /** Ammo the leader's weapons have now, by weapon index, not yet put on ours. */
         final Map<Integer, Integer> ammoDue = new HashMap<Integer, Integer>();
+        /** Weapons and engines knocked out on the leader's ship: index -> for good (1) or for now (0). */
+        Map<Integer, Integer> downW = new HashMap<Integer, Integer>();
+        Map<Integer, Integer> downE = new HashMap<Integer, Integer>();
         long arrived;
         boolean hasState;
     }
@@ -1497,6 +1519,7 @@ final class JointCombat {
             s.gameAlive(); // our world is still open behind this view
             try {
                 JointBattle.handleMessages(s);
+                Social.pump(s, engine);
                 long now = System.nanoTime();
                 if (ending || now - lastPacket > 20_000_000_000L || !s.isActive()) {
                     if (view == this) view = null;
@@ -2058,6 +2081,20 @@ final class JointCombat {
                         int idx = bb.get() & 0xff;
                         sh.ammoDue.put(idx, (int) bb.getShort());
                     }
+                    Map<Integer, Integer> dw = new HashMap<Integer, Integer>();
+                    int nw = bb.get() & 0xff;
+                    for (int a = 0; a < nw; a++) {
+                        int idx = bb.get() & 0xff;
+                        dw.put(idx, bb.get() & 0xff);
+                    }
+                    Map<Integer, Integer> de = new HashMap<Integer, Integer>();
+                    int ne = bb.get() & 0xff;
+                    for (int a = 0; a < ne; a++) {
+                        int idx = bb.get() & 0xff;
+                        de.put(idx, bb.get() & 0xff);
+                    }
+                    sh.downW = dw;
+                    sh.downE = de;
                     sh.arrived = now;
                     sh.hasState = true;
                 }
@@ -2181,6 +2218,21 @@ final class JointCombat {
                 if (w.usesAmmo() && w.getAmmo() != a.getValue()) w.setAmmo(a.getValue());
             }
             sh.ammoDue.clear();
+            // Knocked-out weapons and engines, as on the leader's ship (nothing here takes damage by itself).
+            for (int i = 0; i < weapons.size(); i++) {
+                WeaponAPI w = weapons.get(i);
+                Integer down = sh.downW.get(i);
+                if (down != null && !w.isDisabled()) w.disable(down == 1);
+                else if (down == null && w.isDisabled()) w.repair();
+            }
+            ShipEngineControllerAPI ecv = ship.getEngineController();
+            List<ShipEngineControllerAPI.ShipEngineAPI> engines = ecv == null ? null : ecv.getShipEngines();
+            for (int i = 0; engines != null && i < engines.size(); i++) {
+                ShipEngineControllerAPI.ShipEngineAPI en = engines.get(i);
+                Integer down = sh.downE.get(i);
+                if (down != null && !en.isDisabled()) en.disable(down == 1);
+                else if (down == null && en.isDisabled()) en.repair();
+            }
             boolean beams = false;
             boolean fresh = now - sh.arrived < 250_000_000L;
             for (int i = 0; i < sh.fireIdx.length; i++) {

@@ -81,6 +81,8 @@ public final class FleetLocks {
                         if (battle != null) r.battleJson = battle.toString();
                         replies.put(h, r);
                     }
+                } else if ("caught".equals(k)) {
+                    PlayerAggro.caught(m.from, j); // their fleet caught up with us
                 } else if ("left".equals(k)) {
                     playerLeft(m.from);
                 }
