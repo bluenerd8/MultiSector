@@ -64,6 +64,18 @@ public final class PlayersWindow extends BaseCustomDialogDelegate implements Dia
         if (!s.isActive()) {
             t.addPara("Not in a multiplayer session.", gray, 8f);
         }
+        // Your own mark: what the others see you as.
+        int myColor = multisector.sync.Marks.colorIndex(s.getMyId());
+        int myShape = multisector.sync.Marks.shapeIndex(s.getMyId());
+        t.addPara("Your mark: a %s in %s. Everyone sees you, your pings and your ships in battles with it.", 8f,
+                multisector.sync.Marks.COLORS[myColor], multisector.sync.Marks.SHAPE_NAMES[myShape],
+                multisector.sync.Marks.COLOR_NAMES[myColor]);
+        Color mine = multisector.sync.Marks.COLORS[myColor];
+        t.addButton("Colour: " + multisector.sync.Marks.COLOR_NAMES[myColor] + "  (next)", "color:"
+                + ((myColor + 1) % multisector.sync.Marks.COLORS.length), mine, mine.darker().darker().darker(),
+                BTN_W + 90f, BTN_H, 6f);
+        t.addButton("Shape: " + multisector.sync.Marks.SHAPE_NAMES[myShape] + "  (next)", "shape:"
+                + ((myShape + 1) % multisector.sync.Marks.SHAPE_NAMES.length), BTN_W + 90f, BTN_H, 4f);
         Map<Integer, FleetState.Received> fleets = s.getRemoteFleets();
         Map<Integer, PlayerInfo> infos = new java.util.HashMap<Integer, PlayerInfo>();
         for (PlayerInfo pi : PlayerInfo.all(false)) infos.put(pi.id, pi);
@@ -114,7 +126,16 @@ public final class PlayersWindow extends BaseCustomDialogDelegate implements Dia
             return;
         }
         try {
-            if (b.startsWith("go:")) {
+            if (b.startsWith("color:") || b.startsWith("shape:")) {
+                Session s = Session.get();
+                int color = multisector.sync.Marks.colorIndex(s.getMyId());
+                int shape = multisector.sync.Marks.shapeIndex(s.getMyId());
+                if (b.startsWith("color:")) color = Integer.parseInt(b.substring(6));
+                else shape = Integer.parseInt(b.substring(6));
+                multisector.sync.Marks.choose(color, shape);
+                info = "Your mark is now a " + multisector.sync.Marks.SHAPE_NAMES[shape] + " in "
+                        + multisector.sync.Marks.COLOR_NAMES[color] + ".";
+            } else if (b.startsWith("go:")) {
                 int pid = Integer.parseInt(b.substring(3));
                 CampaignFleetAPI f = PuppetManager.fleetOf(pid);
                 if (f != null) {

@@ -161,11 +161,11 @@ public class PlayersHud implements CampaignUIRenderingListener {
      */
     /** "diamond": the player's mark, by name, for the players window. */
     static String shapeName(int player) {
-        return new String[]{"double ring", "diamond", "square", "triangle", "hexagon", "star"}[Math.abs(player) % 6];
+        return multisector.sync.Marks.shapeName(player);
     }
 
     static void shape(float x, float y, float r, Color c, float alpha, int player) {
-        int kind = Math.abs(player) % 6;
+        int kind = multisector.sync.Marks.shapeIndex(player);
         if (kind == 0) {
             ring(x, y, r, c, alpha);
             return;

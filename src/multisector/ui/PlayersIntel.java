@@ -42,22 +42,30 @@ public final class PlayersIntel implements EveryFrameScript {
 
     /** Icons are loaded once at startup, so the map can show them. */
     public static void loadIcons() {
-        for (int i = 0; i < 6; i++) {
-            try {
-                Global.getSettings().loadTexture(playerIcon(i));
-                Global.getSettings().loadTexture(pingIcon(i));
-            } catch (Exception e) {
-                Global.getLogger(PlayersIntel.class).warn("[MultiSector] couldn't load a map icon", e);
+        for (int shape = 0; shape < multisector.sync.Marks.SHAPE_NAMES.length; shape++) {
+            for (int color = 0; color < multisector.sync.Marks.COLORS.length; color++) {
+                try {
+                    Global.getSettings().loadTexture(icon("player", shape, color));
+                    Global.getSettings().loadTexture(icon("ping", shape, color));
+                } catch (Exception e) {
+                    Global.getLogger(PlayersIntel.class).warn("[MultiSector] couldn't load a map icon", e);
+                    return;
+                }
             }
         }
     }
 
+    static String icon(String kind, int shape, int color) {
+        return "graphics/multisector/" + kind + "_" + shape + "_" + color + ".png";
+    }
+
+    /** Their icon in their chosen colour and shape. */
     static String playerIcon(int player) {
-        return "graphics/multisector/player_" + (Math.abs(player) % 6) + ".png";
+        return icon("player", multisector.sync.Marks.shapeIndex(player), multisector.sync.Marks.colorIndex(player));
     }
 
     static String pingIcon(int player) {
-        return "graphics/multisector/ping_" + (Math.abs(player) % 6) + ".png";
+        return icon("ping", multisector.sync.Marks.shapeIndex(player), multisector.sync.Marks.colorIndex(player));
     }
 
     public boolean isDone() {

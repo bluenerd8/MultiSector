@@ -795,6 +795,10 @@ From testing 0.1.5 (three players). Log sharing worked: the host's launcher had 
 - **Pings limited:** one every 2 seconds per player, at most 3 showing per player (the oldest goes); every game holds the sender to it.
 - **Players and pings on the sector map** (`PlayersIntel`): each other player is an intel entry on their fleet, and each ping one on its spot, with an icon in their colour and shape (`graphics/multisector/player_N.png`, `ping_N.png`, loaded at startup), important so they show on the map, under the "Players" tag. They come off before every save and go back next frame.
 
+## 28. Your own mark (0.1.7)
+
+- **Choose your colour and shape** (`Marks`): the players window (F6) has "Colour: ... (next)" and "Shape: ... (next)": ten colours (cyan, pink, orange, violet, yellow, mint, red, white, green, blue) and six shapes. The choice is kept on your PC (`GamePrefs`: markColor, markShape) and sent to everyone (`mark` on the social channel) when it changes and every 30 s, so a player who joins later gets it too. Until someone chooses, their player number picks one, as before. Everything that marks a player uses it: map rings and shapes, edge arrows, pings, chat names, battle rings (`JointCombat.colorOf`), and the sector map icons (`graphics/multisector/player_<shape>_<colour>.png` and `ping_...`, 120 icons, loaded at startup). Two players can pick the same mark; nothing stops it.
+
 ## Still to do (roadmap)
 
 Kept here so they aren't lost between test rounds:

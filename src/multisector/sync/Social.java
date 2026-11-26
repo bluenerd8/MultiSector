@@ -103,12 +103,16 @@ public final class Social implements EveryFrameScript {
         if (st != lastState) {
             lastState = st;
             modsAsked = false;
-            if (st == Session.State.IDLE) pings.clear();
+            if (st == Session.State.IDLE) {
+                pings.clear();
+                Marks.forget();
+            }
         }
         if (st == Session.State.CONNECTED && !modsAsked && s.getMyId() >= 0) {
             modsAsked = true;
             s.sendSocialTo(Session.hostId(), "{\"k\":\"modsreq\"}");
         }
+        Marks.send(s); // our colour and shape, to everyone
         pump(s, null);
         synchronized (pings) {
             long now = System.nanoTime();
@@ -133,6 +137,8 @@ public final class Social implements EveryFrameScript {
                     Ping p = new Ping(m.from, m.fromName, j.optString("loc"), (float) j.optDouble("x"), (float) j.optDouble("y"));
                     pings.add(p);
                     announcePing(p, engine);
+                } else if ("mark".equals(k)) {
+                    Marks.received(m.from, j); // the colour and shape they chose
                 } else if ("rep".equals(k)) {
                     PlayerAggro.standing(m.from, j); // who they're at war with, how visible they are
                 } else if ("modsreq".equals(k) && s.getState() == Session.State.HOSTING) {

@@ -29,6 +29,7 @@ Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), ai
 - A **players panel** in the top-right of the campaign map lists everyone else: where they are, what they're doing (travelling, at a market, in the refit screen, fighting a fleet), and ping. **F7** hides or shows it.
 - The **Multiplayer window (F8)** shows more for each player: distance from you, fleet size and flagship, level and credits.
 - On the map, every other player in your system is **ringed in their colour and marked with their own shape** (double ring, diamond, square, triangle, hexagon or star; their pings carry it too) with their name and distance, and an **arrow at the screen's edge** points at anyone off screen.
+- **Choose your own mark** in the players window (F6): ten colours and six shapes. Everyone sees you, your pings and your ships in battles with it.
 - The **players window (F6)** lists everyone wherever they are ("Corvus, near Jangala"), with **Go to** (lays in a course, through jump points too), **Escort**, and **Ping their spot**.
 - **On the sector map** (and in the intel screen under "Players"), every other player shows on their fleet with their colour and shape, and pings show on their spot.
 - **Map pings:** Alt+click on the map marks a spot for everyone for 30 seconds (one every 2 seconds, 3 at a time per player). Players elsewhere are told where, and F6 has a course there.

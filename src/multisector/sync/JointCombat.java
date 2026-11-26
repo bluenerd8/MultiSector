@@ -139,7 +139,7 @@ final class JointCombat {
             new java.awt.Color(150, 110, 255), new java.awt.Color(255, 240, 80), new java.awt.Color(80, 255, 170)};
 
     static java.awt.Color colorOf(int player) {
-        return PLAYER_COLORS[Math.abs(player) % PLAYER_COLORS.length];
+        return Marks.color(player); // their chosen colour (Marks), the same on every game
     }
 
     /** The player a ship belongs to (tagged), or -1. */
