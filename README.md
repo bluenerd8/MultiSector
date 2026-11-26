@@ -31,7 +31,7 @@ Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), ai
 - On the map, every other player in your system is **ringed in their colour and marked with their own shape** (double ring, diamond, square, triangle, hexagon or star; their pings carry it too) with their name and distance, and an **arrow at the screen's edge** points at anyone off screen.
 - **Choose your own mark** in the players window (F6): ten colours and six shapes. Everyone sees you, your pings and your ships in battles with it.
 - The **players window (F6)** lists everyone wherever they are ("Corvus, near Jangala"), with **Go to** (lays in a course, through jump points too), **Escort**, and **Ping their spot**.
-- **On the sector map** (and in the intel screen under "Players"), every other player shows on their fleet with their colour and shape, and pings show on their spot.
+- **On the sector, system and hyperspace maps** (and in the intel screen under "Players"), every other player shows on their fleet with their name, colour and shape, and pings show on their spot.
 - **Map pings:** Alt+click on the map marks a spot for everyone for 30 seconds (one every 2 seconds, 3 at a time per player). Players elsewhere are told where, and F6 has a course there.
 - **Enemies go after every player**, not only the one whose world the system's fleets are from: a hostile fleet that sees you comes after you, and catching you opens the encounter on your game.
 - **Chat:** press **Enter** on the map, type, Enter sends to everyone. Lines show in the game's message list, in battles too.
@@ -48,6 +48,7 @@ Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), ai
 ## Fighting together
 
 - Nobody is pulled into a battle. To help a friend who's fighting, fly to the fight and click the enemy fleet (or your friend's fleet). You can join once the fighting has begun; until then the dialog tells you to wait.
+- With three or more players, clicking **anyone** fighting in a battle (not only the one who started it) offers to join it.
 - Battles between NPC fleets (a patrol fighting pirates, say) can be joined too, even in a world you follow: click one of the fleets and pick a side.
 - Your ships arrive as reinforcements at your friend's side of the battlefield, and they get a message in combat. A live view of the battle opens on your game: you **fly one of your own ships** (your flagship unless you pick another), and the rest of your combat-ready ships fight under the battle AI. Your friend can't pilot, recover or keep your ships.
 - Controls in the view are your own game's, with your own key bindings: moving, strafing, the strafe key that turns your ship to the mouse, decelerating, autopilot, autofire for each weapon group (Ctrl+1-7 by default), hold fire, selecting a group, firing, shields, system, venting, fighters and targeting.

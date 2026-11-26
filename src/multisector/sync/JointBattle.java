@@ -255,7 +255,10 @@ public final class JointBattle implements EveryFrameScript {
         nextFight = now + FIGHT_NANOS;
         String text;
         try {
-            text = msg("fight").put("live", live).put("ready", live && ready).put("enemy", enemyName()).toString();
+            JSONArray with = new JSONArray();
+            for (Joiner jn : joiners.values()) with.put(jn.id);
+            text = msg("fight").put("live", live).put("ready", live && ready).put("enemy", enemyName())
+                    .put("with", with).toString();
         } catch (Exception e) {
             return;
         }
@@ -569,6 +572,8 @@ public final class JointBattle implements EveryFrameScript {
         String enemy = "a hostile fleet";
         int b;
         long heard;
+        /** Players fighting in it with them. */
+        Set<Integer> with = new HashSet<Integer>();
     }
 
     /** Battles other players are in right now, by player. */
@@ -628,8 +633,22 @@ public final class JointBattle implements EveryFrameScript {
         jd.init(dialog);
     }
 
-    /** Clicking a player who's in a battle: the join dialog instead of a hail. Null if they aren't. */
-    static InteractionDialogPlugin joinDialogFor(int leaderId) {
+    /**
+     * Clicking a player who's in a battle, leading it or fighting in it with
+     * someone: the join dialog for that battle (its leader's) instead of a
+     * hail. Null if they aren't in one.
+     */
+    static InteractionDialogPlugin joinDialogFor(int clicked) {
+        int leaderId = clicked;
+        if (fightOf(clicked) == null) {
+            for (Map.Entry<Integer, Fight> e : fights.entrySet()) {
+                Fight lf = fightOf(e.getKey());
+                if (lf != null && lf.live && lf.with.contains(clicked) && e.getKey() != Session.get().getMyId()) {
+                    leaderId = e.getKey();
+                    break;
+                }
+            }
+        }
         Fight f = fightOf(leaderId);
         if (f == null || !prepare(leaderId, Session.get().playerName(leaderId), f.enemy)) return null;
         return new JoinDialog();
@@ -644,6 +663,9 @@ public final class JointBattle implements EveryFrameScript {
             f.ready = j.optBoolean("ready", f.live);
             f.enemy = j.optString("enemy", f.enemy);
             f.b = b;
+            f.with.clear();
+            JSONArray with = j.optJSONArray("with");
+            for (int i = 0; with != null && i < with.length(); i++) f.with.add(with.optInt(i));
             f.heard = System.nanoTime();
             if (m.from == leader && (phase == Phase.ASKED || phase == Phase.JOINING)) joinBattle = b;
             return;

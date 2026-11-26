@@ -424,27 +424,56 @@ final class JointSpoils {
         if (engine == null || joiners.isEmpty()) return;
         CombatFleetManagerAPI fm = engine.getFleetManager(1);
         if (fm == null) return;
-        int n = 0;
+        // The game's lists of the enemy's disabled and destroyed ships, and any enemy wreck still on the field
+        // (in case those lists come back empty, as they did with a fleet copied from another player's world).
+        List<FleetMemberAPI> disabled = new java.util.ArrayList<FleetMemberAPI>(fm.getDisabledCopy());
+        List<FleetMemberAPI> destroyed = new java.util.ArrayList<FleetMemberAPI>(fm.getDestroyedCopy());
+        Set<String> listed = new HashSet<String>();
+        for (FleetMemberAPI m : disabled) listed.add(m.getId());
+        for (FleetMemberAPI m : destroyed) listed.add(m.getId());
+        int wrecks = 0;
+        for (com.fs.starfarer.api.combat.ShipAPI ship : engine.getShips()) {
+            FleetMemberAPI m = ship.getFleetMember();
+            if (m == null || ship.getOriginalOwner() != 1 || ship.isFighter() || ship.getParentStation() != null) continue;
+            if ((ship.isHulk() || !ship.isAlive()) && listed.add(m.getId())) {
+                disabled.add(m);
+                wrecks++;
+            }
+        }
+        int n = 0, unboardable = 0, noRecovery = 0, errors = 0;
+        String firstError = null;
         for (int pass = 0; pass < 2; pass++) {
-            List<FleetMemberAPI> list = pass == 0 ? fm.getDisabledCopy() : fm.getDestroyedCopy();
+            List<FleetMemberAPI> list = pass == 0 ? disabled : destroyed;
             for (FleetMemberAPI m : list) {
                 try {
-                    if (m.isFighterWing() || enemyLost.containsKey(m.getId()) || Misc.isUnboardable(m)) continue;
+                    if (m.isFighterWing() || enemyLost.containsKey(m.getId())) continue;
+                    if (Misc.isUnboardable(m)) {
+                        unboardable++;
+                        continue;
+                    }
                     CampaignFleetAPI src = m.getFleetData() == null ? null : m.getFleetData().getFleet();
-                    if (src != null && src.getMemoryWithoutUpdate().getBoolean(MemFlags.MEMORY_KEY_NO_SHIP_RECOVERY)) continue;
+                    if (src != null && src.getMemoryWithoutUpdate().getBoolean(MemFlags.MEMORY_KEY_NO_SHIP_RECOVERY)) {
+                        noRecovery++;
+                        continue;
+                    }
                     JSONObject sj = ShipJson.ship(m);
                     sj.put("destroyed", pass == 1);
                     enemyLost.put(m.getId(), sj);
                     n++;
                 } catch (Exception e) {
-                    // that one stays out
+                    errors++;
+                    if (firstError == null) firstError = e.toString();
                 }
             }
         }
+        log.info("[MultiSector] enemy losses with joiners in the battle: " + fm.getDisabledCopy().size() + " disabled, "
+                + fm.getDestroyedCopy().size() + " destroyed, " + wrecks + " more wrecks on the field; kept " + n
+                + (unboardable > 0 ? ", unboardable " + unboardable : "") + (noRecovery > 0 ? ", no recovery " + noRecovery : "")
+                + (errors > 0 ? ", errors " + errors + " (" + firstError + ")" : ""));
         spoilsFor.addAll(joiners);
         leaderPending = true;
         leaderSince = System.nanoTime();
-        if (n > 0) log.info("[MultiSector] " + n + " enemy ships went down with joiners in the battle; what we leave goes to them");
+
     }
 
     /**

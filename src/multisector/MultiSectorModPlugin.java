@@ -85,6 +85,8 @@ public class MultiSectorModPlugin extends BaseModPlugin {
         Global.getSector().addTransientScript(new multisector.sync.Social());
         multisector.ui.PlayersIntel.forget();
         Global.getSector().addTransientScript(new multisector.ui.PlayersIntel());
+        multisector.sync.MapMarks.forget();
+        Global.getSector().addTransientScript(new multisector.sync.MapMarks());
         multisector.sync.ObjectLocks.forget();
         Global.getSector().addTransientScript(new multisector.sync.ObjectLocks());
         SessionGuard.forget(); // a new world: nothing joined yet
@@ -116,6 +118,7 @@ public class MultiSectorModPlugin extends BaseModPlugin {
     public void beforeGameSave() {
         PuppetManager.removeAll();
         multisector.ui.PlayersIntel.removeAll(); // players and pings on the sector map
+        multisector.sync.MapMarks.removeAll(); // and on the system and hyperspace maps
         NpcSync.releaseForSave();
         try {
             SessionGuard.beforeSave(); // host: friends save too; friends: our character is exported with it

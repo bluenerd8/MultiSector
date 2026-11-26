@@ -799,6 +799,14 @@ From testing 0.1.5 (three players). Log sharing worked: the host's launcher had 
 
 - **Choose your colour and shape** (`Marks`): the players window (F6) has "Colour: ... (next)" and "Shape: ... (next)": ten colours (cyan, pink, orange, violet, yellow, mint, red, white, green, blue) and six shapes. The choice is kept on your PC (`GamePrefs`: markColor, markShape) and sent to everyone (`mark` on the social channel) when it changes and every 30 s, so a player who joins later gets it too. Until someone chooses, their player number picks one, as before. Everything that marks a player uses it: map rings and shapes, edge arrows, pings, chat names, battle rings (`JointCombat.colorOf`), and the sector map icons (`graphics/multisector/player_<shape>_<colour>.png` and `ping_...`, 120 icons, loaded at startup). Two players can pick the same mark; nothing stops it.
 
+## 29. Fifth 0.1 test round (0.1.8)
+
+From testing 0.1.7 with three players.
+
+- **Players on the system and hyperspace maps** (`MapMarks`): those maps show only your own fleet (the intel icons show on the sector map). Each other player now has a marker entity that follows their fleet: our own types in `data/config/custom_entities.json` (`multisector_mark_<shape>_<colour>`, `multisector_pingmark_...`: shown on the map with icon and name, not in space), with their name, so the map shows them in their mark wherever you look. Pings get one too for their 30 s. The map tints entity icons with the faction's colour, so the markers are independent's (grey 150) and their icons (`map_player_*`, `map_ping_*`) are brightened to come out in the player's colour. They come off before every save.
+- **Clicking anyone in a battle joins that battle:** the leader's "fight" broadcast now lists who is fighting with them, and clicking any of those players' fleets opens the join dialog for the leader's battle (before, only the leader's fleet did).
+- **Recovery after joint battles stopped offering enemy ships** when the enemy was a fleet copied from another player's world: the leader found no enemy losses (the logs had no "went down" line for either battle). The leader now also counts enemy wrecks still on the field, and logs what it found and what it skipped (unboardable, no recovery, errors), so the next test says exactly why.
+
 ## Still to do (roadmap)
 
 Kept here so they aren't lost between test rounds:
