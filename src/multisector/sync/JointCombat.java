@@ -1461,6 +1461,30 @@ final class JointCombat {
             ending = true;
         }
 
+        private long closingSince, lastEndCall;
+
+        /**
+         * Out of the view, every frame until the game has ended it: at normal
+         * speed and unpaused. (Following the leader, the view may be crawling
+         * at 2% speed or paused under the deployment panel, and the game ends
+         * a battle in game time: half a second took 25 real seconds, or never.)
+         */
+        private void close(long now) {
+            if (closingSince == 0) {
+                closingSince = now;
+                if (view == this) view = null;
+                viewOpening = 0;
+                log.info("[MultiSector] closing the battle view");
+            }
+            engine.getTimeMult().unmodify(TIME_ID);
+            if (engine.isPaused()) engine.setPaused(false);
+            engine.setDoNotEndCombat(false);
+            if (now - lastEndCall > 1_000_000_000L) {
+                lastEndCall = now;
+                engine.endCombat(now - closingSince > 3_000_000_000L ? 0f : 0.2f);
+            }
+        }
+
         /** The joiner's key for system, vent, fighters, target and strafe, as the game has them bound. */
         private void readBindings() {
             StringBuilder b = new StringBuilder();
@@ -1522,11 +1546,7 @@ final class JointCombat {
                 Social.pump(s, engine);
                 long now = System.nanoTime();
                 if (ending || now - lastPacket > 20_000_000_000L || !s.isActive()) {
-                    if (view == this) view = null;
-                    viewOpening = 0;
-                    engine.setDoNotEndCombat(false);
-                    engine.endCombat(0.5f);
-                    engine = null;
+                    close(now);
                     return;
                 }
                 JSONObject spec;
@@ -2264,6 +2284,11 @@ final class JointCombat {
             sh.shotsDue.clear();
             // Nothing fires here on its own (autofire): only what the leader's ships fired.
             if (!beams) ship.setHoldFireOneFrame(true);
+            // And no weapon fires by itself here, beams or not (an autofire group of ours would, the moment the
+            // leader's ship fired a beam): only what the leader's ships fire shows.
+            Set<Integer> beaming = new HashSet<Integer>();
+            if (fresh) for (int i = 0; i < sh.fireIdx.length; i++) if (sh.fireBeam[i]) beaming.add(sh.fireIdx[i]);
+            for (int i = 0; i < weapons.size(); i++) if (!beaming.contains(i)) weapons.get(i).setForceNoFireOneFrame(true);
         }
 
         /** A ship we take the helm of starts with its loadout's autofire groups, as when a player takes one. */

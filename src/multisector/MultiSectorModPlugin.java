@@ -50,6 +50,7 @@ public class MultiSectorModPlugin extends BaseModPlugin {
                 + " (built " + BuildInfo.BUILT_AT + ")");
         SandboxProbe.runAll();
         MultiSectorConfig.load();
+        multisector.ui.PlayersIntel.loadIcons();
         multisector.net.Session.get().setHoldWhileBusy(MultiSectorConfig.isHoldWhileEveryoneBusy());
         logAddresses();
     }
@@ -82,6 +83,8 @@ public class MultiSectorModPlugin extends BaseModPlugin {
         multisector.sync.JointBattle.restoreOffers(); // ships still to recover, kept in the save
         multisector.sync.Social.forget();
         Global.getSector().addTransientScript(new multisector.sync.Social());
+        multisector.ui.PlayersIntel.forget();
+        Global.getSector().addTransientScript(new multisector.ui.PlayersIntel());
         multisector.sync.ObjectLocks.forget();
         Global.getSector().addTransientScript(new multisector.sync.ObjectLocks());
         SessionGuard.forget(); // a new world: nothing joined yet
@@ -112,6 +115,7 @@ public class MultiSectorModPlugin extends BaseModPlugin {
     @Override
     public void beforeGameSave() {
         PuppetManager.removeAll();
+        multisector.ui.PlayersIntel.removeAll(); // players and pings on the sector map
         NpcSync.releaseForSave();
         try {
             SessionGuard.beforeSave(); // host: friends save too; friends: our character is exported with it

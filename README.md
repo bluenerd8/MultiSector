@@ -30,7 +30,8 @@ Experimental multiplayer mod for [Starsector](https://fractalsoftworks.com/), ai
 - The **Multiplayer window (F8)** shows more for each player: distance from you, fleet size and flagship, level and credits.
 - On the map, every other player in your system is **ringed in their colour and marked with their own shape** (double ring, diamond, square, triangle, hexagon or star; their pings carry it too) with their name and distance, and an **arrow at the screen's edge** points at anyone off screen.
 - The **players window (F6)** lists everyone wherever they are ("Corvus, near Jangala"), with **Go to** (lays in a course, through jump points too), **Escort**, and **Ping their spot**.
-- **Map pings:** Alt+click on the map marks a spot for everyone for 30 seconds. Players elsewhere are told where, and F6 has a course there.
+- **On the sector map** (and in the intel screen under "Players"), every other player shows on their fleet with their colour and shape, and pings show on their spot.
+- **Map pings:** Alt+click on the map marks a spot for everyone for 30 seconds (one every 2 seconds, 3 at a time per player). Players elsewhere are told where, and F6 has a course there.
 - **Enemies go after every player**, not only the one whose world the system's fleets are from: a hostile fleet that sees you comes after you, and catching you opens the encounter on your game.
 - **Chat:** press **Enter** on the map, type, Enter sends to everyone. Lines show in the game's message list, in battles too.
 - Move or turn off the panel with `showPlayersHud`, `hudHotkey`, `hudCorner`, `hudOffsetX` and `hudOffsetY` in `data/config/multisector.json`; `playersHotkey` and `chatHotkey` change the other two keys.

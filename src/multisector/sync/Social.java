@@ -129,6 +129,7 @@ public final class Social implements EveryFrameScript {
                     add(new Line(m.from, m.fromName, text));
                     show(m.from, m.fromName, text, engine);
                 } else if ("ping".equals(k)) {
+                    if (!allowPing(m.from)) continue; // too fast (their game holds them to it too)
                     Ping p = new Ping(m.from, m.fromName, j.optString("loc"), (float) j.optDouble("x"), (float) j.optDouble("y"));
                     pings.add(p);
                     announcePing(p, engine);
@@ -207,9 +208,37 @@ public final class Social implements EveryFrameScript {
     // ================================================================ pings
 
     /** Marks a spot for everyone (Alt+click on the map). */
+    /** At most one ping this often per player, and this many showing at once (the oldest goes). */
+    private static final long PING_GAP_NANOS = 2_000_000_000L;
+    private static final int PINGS_EACH = 3;
+    private static final Map<Integer, Long> lastPing = new java.util.HashMap<Integer, Long>();
+
+    /** Too soon after their last ping? Then it's dropped. Otherwise room is made for it. */
+    private static boolean allowPing(int player) {
+        long now = System.nanoTime();
+        Long last = lastPing.get(player);
+        if (last != null && now - last < PING_GAP_NANOS) return false;
+        lastPing.put(player, now);
+        synchronized (pings) {
+            int n = 0;
+            for (Ping p : pings) if (p.player == player) n++;
+            for (Iterator<Ping> it = pings.iterator(); it.hasNext() && n >= PINGS_EACH; ) {
+                if (it.next().player == player) {
+                    it.remove();
+                    n--;
+                }
+            }
+        }
+        return true;
+    }
+
     public static void ping(LocationAPI loc, float x, float y) {
         Session s = Session.get();
         if (!s.isActive() || loc == null) return;
+        if (!allowPing(s.getMyId())) {
+            add(new Line(-2, "", "Pinging too fast: one every 2 seconds, 3 at a time."));
+            return;
+        }
         String id = FleetSync.locationId(loc);
         try {
             s.sendSocial(new JSONObject().put("k", "ping").put("loc", id).put("x", x).put("y", y).toString());

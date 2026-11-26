@@ -344,12 +344,20 @@ public final class JointBattle implements EveryFrameScript {
             s.sendBattleMessage(m.from, msg("notyet").toString());
             return;
         }
-        if (joiners.containsKey(m.from)) return;
-        if (!lead.isReady()) {
-            if (queued.put(m.from, new Object[]{m, j}) == null) {
-                s.sendBattleMessage(m.from, msg("wait").toString());
-                JointCombat.Leader.message(m.fromName + " is waiting to join: deploy your ships and theirs follow");
+        Joiner already = joiners.get(m.from);
+        if (already != null) {
+            // Asked again (a lost answer, or they left and came back): they get an answer either way.
+            if (already.retreat) {
+                s.sendBattleMessage(m.from, msg("failed").put("why", "left").toString());
+            } else {
+                s.sendBattleMessage(m.from, msg("joined").toString());
             }
+            return;
+        }
+        if (!lead.isReady()) {
+            boolean first = queued.put(m.from, new Object[]{m, j}) == null;
+            s.sendBattleMessage(m.from, msg("wait").toString()); // again if they asked again
+            if (first) JointCombat.Leader.message(m.fromName + " is waiting to join: deploy your ships and theirs follow");
             return;
         }
         admit(s, lead, m, j);
@@ -446,6 +454,15 @@ public final class JointBattle implements EveryFrameScript {
 
     /** The engagement is over: each joiner gets what happened to their ships. */
     static void finishJoiners(Session s) {
+        // Anyone still waiting to come in: this engagement is over, they won't.
+        for (Integer waiting : new ArrayList<Integer>(queued.keySet())) {
+            try {
+                s.sendBattleMessage(waiting, msg("nobattle").toString());
+            } catch (RuntimeException ignored) {
+                // gone
+            }
+        }
+        queued.clear();
         for (Joiner jn : joiners.values()) {
             try {
                 JSONArray lost = new JSONArray();
@@ -558,6 +575,8 @@ public final class JointBattle implements EveryFrameScript {
     private static final Map<Integer, Fight> fights = new HashMap<Integer, Fight>();
 
     private static Phase phase = Phase.NONE;
+    /** A join request with no word back for this long goes back to the join screen. */
+    private static final long JOIN_ANSWER_NANOS = 15_000_000_000L;
     /** We left a battle our ships may be in: its result is still ours, from that leader, when it comes. */
     private static int resultFrom = -1;
     private static long resultSince;
@@ -661,6 +680,7 @@ public final class JointBattle implements EveryFrameScript {
         } else if (("nobattle".equals(k) || "failed".equals(k)) && (phase == Phase.JOINING || phase == Phase.ASKED)) {
             phase = Phase.DONE;
             say2("nobattle".equals(k) ? leaderName + " isn't in a battle (any more). Your fleet is as it was."
+                    : "left".equals(j.optString("why")) ? "You left " + leaderName + "'s battle; it goes on without you."
                     : "Your fleet couldn't be brought into " + leaderName + "'s battle. Your fleet is as it was.");
         } else if ("status".equals(k) && (phase == Phase.IN || phase == Phase.JOINING)) {
             phase = Phase.IN;
@@ -914,6 +934,8 @@ public final class JointBattle implements EveryFrameScript {
     private static final class JoinDialog implements InteractionDialogPlugin {
         InteractionDialogAPI dialog;
         private boolean quietOffered;
+        /** When we asked to join (nanoTime), or 0. */
+        private long joinSentAt;
         /** What we last showed about the leader's battle: 0 over/unknown, 1 not fighting yet, 2 fighting. */
         private int shownState = -1;
 
@@ -929,7 +951,7 @@ public final class JointBattle implements EveryFrameScript {
                     + "ships lost are lost, and damage stays."
                     + (MultiSectorConfig.isJointBattleView()
                     ? " You fly one ship yourself in a live view of the battle; the rest fight under the battle AI."
-                    : " They fight under the battle AI, and you can order them to retreat at any time."));
+                    : " They fight under the battle AI, and you can leave the battle at any time."));
             Session.get().sendBattleMessage(leader, msg("seen", joinBattle).toString());
             shownState = fightState();
             dialog.getTextPanel().addPara(describe(shownState, -1));
@@ -997,6 +1019,7 @@ public final class JointBattle implements EveryFrameScript {
                             .put("pilot", MultiSectorConfig.isJointBattleView() && pilotId != null ? pilotId : "")
                             .toString());
                     phase = Phase.JOINING;
+                    joinSentAt = System.nanoTime();
                     dialog.getTextPanel().addPara("Your fleet moves in to support " + leaderName + "...");
                 } catch (Exception e) {
                     dialog.getTextPanel().addPara("Couldn't send your fleet's details.");
@@ -1068,6 +1091,16 @@ public final class JointBattle implements EveryFrameScript {
         }
 
         public void advance(float amount) {
+            // Asked to join, and no word at all: back to the start, to ask again (or leave).
+            if (phase == Phase.JOINING && joinSentAt != 0 && System.nanoTime() - joinSentAt > JOIN_ANSWER_NANOS
+                    && System.nanoTime() - lastHeard > JOIN_ANSWER_NANOS) {
+                joinSentAt = 0;
+                phase = Phase.ASKED;
+                log.info("[MultiSector] no answer to our join from " + leaderName + "; back to the join screen");
+                dialog.getTextPanel().addPara("No answer from " + leaderName + "'s battle. You can try joining again, or leave.");
+                shownState = fightState();
+                menu();
+            }
             if (phase == Phase.ASKED) {
                 int st = fightState();
                 if (st != shownState) {
