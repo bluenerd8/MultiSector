@@ -92,6 +92,7 @@ public final class ObjectLocks implements EveryFrameScript {
         if (t == null || t.getId() == null || t.getContainingLocation() == null) return false;
         if (t instanceof CampaignTerrainAPI) return ((CampaignTerrainAPI) t).getPlugin() instanceof DebrisFieldTerrainPlugin;
         if (!(t instanceof CustomCampaignEntityAPI)) return false;
+        if (Wreckage.is(t)) return true;
         if (Entities.CARGO_PODS.equals(((CustomCampaignEntityAPI) t).getCustomEntityType())) return true;
         return t.hasTag(Tags.SALVAGEABLE);
     }
@@ -154,7 +155,8 @@ public final class ObjectLocks implements EveryFrameScript {
                 // Ours either way: a late yes is let go of when this dialog closes, like any other.
                 heldKey = key;
                 held = target;
-                RuleBasedInteractionDialogPluginImpl real = new RuleBasedInteractionDialogPluginImpl();
+                InteractionDialogPlugin real = Wreckage.is(target) ? new Wreckage.Dialog()
+                        : new RuleBasedInteractionDialogPluginImpl();
                 dialog.setPlugin(real);
                 real.init(dialog);
             } else {

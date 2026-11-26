@@ -144,6 +144,11 @@ public final class JointBattle implements EveryFrameScript {
         }
     }
 
+    /** The number of the battle we lead (or last led). */
+    static int battleNumber() {
+        return battleId;
+    }
+
     static JSONObject msg(String kind, int battle) {
         try {
             return new JSONObject().put("k", kind).put("b", battle);
@@ -485,8 +490,10 @@ public final class JointBattle implements EveryFrameScript {
                     ships.put(new JSONObject().put("id", owner).put("hull", hc[0]).put("cr", hc[1]));
                     back++;
                 }
-                s.sendBattleMessage(jn.id, msg("result").put("lost", lost).put("destroyed", destroyed)
-                        .put("ships", ships).toString());
+                JSONObject result = msg("result").put("lost", lost).put("destroyed", destroyed).put("ships", ships);
+                JSONObject wreck = JointSpoils.wreckSpot(); // where their lost ships wait
+                if (wreck != null) result.put("wreck", wreck);
+                s.sendBattleMessage(jn.id, result.toString());
                 log.info("[MultiSector] " + jn.name + "'s part in the battle: " + lost.length() + " ships lost, "
                         + back + " came back");
             } catch (Exception e) {
@@ -884,7 +891,7 @@ public final class JointBattle implements EveryFrameScript {
         say2(lostNames.isEmpty()
                 ? "The battle is over. All your ships came back."
                 : "The battle is over. Lost: " + join(lostNames) + ".");
-        JointSpoils.ownLost(leaderName, wrecks, destroyed);
+        JointSpoils.ownLost(leaderName, wrecks, destroyed, j.optJSONObject("wreck"));
         String recover = JointSpoils.summary();
         if (recover != null) say2(recover);
         if (open == null) JointSpoils.offerOnMap();
@@ -1011,7 +1018,7 @@ public final class JointBattle implements EveryFrameScript {
             } else if (phase == Phase.JOINING || phase == Phase.IN) {
                 op.addOption("Leave the battle (your ships pull out)", "quit");
             } else {
-                if (phase == Phase.DONE && JointSpoils.hasAny()) {
+                if (phase == Phase.DONE && JointSpoils.hasAny() && !JointSpoils.anchored()) {
                     op.addOption("Recover ships (" + JointSpoils.count() + ")", "recover");
                     op.addOption("Leave (ships not recovered are lost)", "leave");
                 } else {
@@ -1080,7 +1087,7 @@ public final class JointBattle implements EveryFrameScript {
             } else if ("leave".equals(id)) {
                 if (phase == Phase.DONE) {
                     phase = Phase.NONE;
-                    JointSpoils.leave();
+                    if (!JointSpoils.anchored()) JointSpoils.leave(); // in the wreckage, they keep
                 }
                 open = null;
                 dialog.dismiss();

@@ -47,6 +47,10 @@ public class NpcInteractionGuard extends BaseCampaignPlugin {
     @Override
     public PluginPick<InteractionDialogPlugin> pickInteractionDialogPlugin(SectorEntityToken target) {
         if (!(target instanceof CampaignFleetAPI)) {
+            // A joint battle's wreckage: ours to open (offline too), after the claim when playing.
+            if (Wreckage.is(target) && (!Session.get().isActive() || ObjectLocks.holds(target))) {
+                return pick(new Wreckage.Dialog());
+            }
             // Salvage is one player's at a time: ask the host first (ObjectLocks).
             if (Session.get().isActive() && ObjectLocks.isSalvage(target) && !ObjectLocks.holds(target)) {
                 return pick(new ObjectLocks.Claim(target));

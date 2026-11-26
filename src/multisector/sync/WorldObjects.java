@@ -77,6 +77,8 @@ public final class WorldObjects implements EveryFrameScript {
     private static final String PODS = "pods";
     private static final String OBJECTIVE = "objective";
     private static final String STABLE = "stable";
+    /** A joint battle's leftover enemy ships, for anyone to recover ({@link Wreckage}). */
+    private static final String WRECKAGE = "wreckage";
     /** Salvageable things from the save: we only pass on that they're gone. */
     private static final String OTHER = "other";
 
@@ -238,6 +240,7 @@ public final class WorldObjects implements EveryFrameScript {
         }
         if (e.hasTag(Tags.FADING_OUT_AND_EXPIRING)) return null; // on its way out; its removal follows
         String type = e.getCustomEntityType();
+        if (Wreckage.TYPE.equals(type)) return WRECKAGE;
         if (Entities.WRECK.equals(type) && e.getCustomPlugin() instanceof DerelictShipEntityPlugin) return WRECK;
         if (Entities.CARGO_PODS.equals(type)) return PODS;
         if (e.hasTag(Tags.OBJECTIVE)) return OBJECTIVE;
@@ -258,6 +261,7 @@ public final class WorldObjects implements EveryFrameScript {
             return Math.round(p.getParams().density * 4f) + "|" + p.isScavenged();
         }
         if (OBJECTIVE.equals(k)) return e.getFaction().getId() + "|" + hacked(e);
+        if (WRECKAGE.equals(k)) return Wreckage.state(e);
         if (PODS.equals(k)) {
             try {
                 return String.valueOf(MarketSync.stacks(e.getCargo()).toString().hashCode());
@@ -298,6 +302,7 @@ public final class WorldObjects implements EveryFrameScript {
             if (DEBRIS.equals(k)) describeDebris((CampaignTerrainAPI) e, j);
             else if (WRECK.equals(k)) describeWreck(e, j);
             else if (PODS.equals(k)) describePods(e, j);
+            else if (WRECKAGE.equals(k)) Wreckage.describe(e, j);
             else if (OBJECTIVE.equals(k)) j.put("hacked", hacked(e));
             return j;
         } catch (Exception ex) {
@@ -428,6 +433,8 @@ public final class WorldObjects implements EveryFrameScript {
             e = createDebris(loc, id, j);
         } else if (WRECK.equals(kind)) {
             e = createWreck(loc, id, j);
+        } else if (WRECKAGE.equals(kind)) {
+            e = Wreckage.create(loc, id, j);
         } else if (PODS.equals(kind)) {
             CustomCampaignEntityAPI pods = loc.addCustomEntity(id, null, Entities.CARGO_PODS, Factions.NEUTRAL);
             if (pods.getCargo() == null) {
@@ -563,6 +570,8 @@ public final class WorldObjects implements EveryFrameScript {
             }
             CustomCampaignEntityPlugin p = e.getCustomPlugin();
             if (p instanceof CampaignObjective && j.has("hacked")) ((CampaignObjective) p).setHacked(j.optBoolean("hacked"));
+        } else if (WRECKAGE.equals(kind) && Wreckage.is(e)) {
+            Wreckage.update(e, j);
         } else if (PODS.equals(kind)) {
             CargoAPI c = e.getCargo();
             if (c == null) {

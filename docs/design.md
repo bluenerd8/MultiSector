@@ -807,6 +807,15 @@ From testing 0.1.7 with three players.
 - **Clicking anyone in a battle joins that battle:** the leader's "fight" broadcast now lists who is fighting with them, and clicking any of those players' fleets opens the join dialog for the leader's battle (before, only the leader's fleet did).
 - **Recovery after joint battles stopped offering enemy ships** when the enemy was a fleet copied from another player's world: the leader found no enemy losses (the logs had no "went down" line for either battle). The leader now also counts enemy wrecks still on the field, and logs what it found and what it skipped (unboardable, no recovery, errors), so the next test says exactly why.
 
+## 30. Battle wreckage (0.1.10)
+
+The enemy ships a joint battle's leader leaves are no longer sent to each joiner as a private offer (each joiner could recover every one of them). Once the leader's battle dialog closes, the leader's game puts one object at the battle's site, the battle's wreckage (`Wreckage`, our entity type `multisector_battle_wreckage` in `custom_entities.json`, drawn by the game's derelict-ship plugin as the biggest ship in it), holding those ships as `ShipJson` in its memory. Joiners are told it's there.
+
+- It's shared like the other objects in space (`WorldObjects`, kind "wreckage"): every game gets it, and when its list of ships changes or it goes, everyone's copy follows.
+- Opening it claims it first (`ObjectLocks`), so it's one player at a time, like salvage. Its own dialog readies the ships for recovery each time (the usual chances, d-mods and story-point recoveries, as before) and shows the game's recovery screen. What's recovered comes out of the list; once it's empty it fades away.
+- Nobody comes for it: it drifts away after 30 days, as a derelict does. It's in the save like any object in space.
+- **Joiners aren't prompted at all.** Their own lost ships wait in the same wreckage, on their game only (`JointSpoils`, kept in the save as before): its id and place are fixed when the fighting ends (`JointSpoils.wreckSpot`) and sent with each joiner's result, so the joiner's game puts the wreckage there at once (empty of enemy ships until the leader's arrive) and puts it back if it goes while their ships are in it (say another player emptied it of enemy ships). Its dialog shows both on one recovery screen; their own come back with their officers. Left 30 days, they're lost (AI cores back to the cargo). The result dialog no longer has "Recover ships", and nothing pops up on the map. Offers kept in a save from before this still pop up as before.
+
 ## Still to do (roadmap)
 
 Kept here so they aren't lost between test rounds:

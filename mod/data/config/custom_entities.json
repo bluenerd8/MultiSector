@@ -1,5 +1,5 @@
 # MultiSector: markers for other players and their pings on the system and hyperspace maps
-# (sync.MapMarks). Shown on the map only; never saved.
+# (sync.MapMarks; shown on the map only, never saved), and a joint battle's wreckage (sync.Wreckage).
 {
 	"multisector_mark_0_0":{
 		"defaultName":"Player",
@@ -2160,5 +2160,25 @@
 		"detectionRange":0,
 		"tags":[],
 		"layers":[FLEETS],
+	},
+	"multisector_battle_wreckage":{
+		"defaultName":"Battle Wreckage",
+		"defaultRadius":30,
+		"nameInText":"battle wreckage",
+		"shortName":"wreckage",
+		"aOrAn":"a",
+		"isOrAre":"is",
+		"showInCampaign":true,
+		"scaleIconSizeBasedOnDefaultRadius":false,
+		"showIconOnMap":true,
+		"showNameOnMap":true,
+		"scaleIconWithZoom":true,
+		"iconWidth":24,
+		"iconHeight":24,
+		"icon":"graphics/icons/derelict.png",
+		"interactionImage":"graphics/illustrations/space_wreckage.jpg",
+		"layers":[TERRAIN_7A],
+		"tags":["has_interaction_dialog", "neutrino_low"],
+		"pluginClass":"com.fs.starfarer.api.impl.campaign.DerelictShipEntityPlugin",
 	},
 }

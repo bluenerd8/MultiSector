@@ -6,6 +6,8 @@ import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.FleetMemberPickerListener;
 import com.fs.starfarer.api.campaign.InteractionDialogAPI;
 import com.fs.starfarer.api.campaign.InteractionDialogPlugin;
+import com.fs.starfarer.api.campaign.LocationAPI;
+import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.listeners.ListenerUtil;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.characters.PersonAPI;
@@ -40,15 +42,18 @@ import java.util.Set;
  * What a joint battle leaves for the players who joined it.
  *
  * <ul>
- * <li><b>Their own lost ships</b>, theirs alone: offered for recovery on
- *     their game as the game itself offers yours after a battle (the same
- *     chances, d-mods and story-point recoveries), right after the result.
- *     Officers go back on the ships recovered; an AI core on one that isn't
+ * <li><b>Their own lost ships</b>, theirs alone: they wait in the battle's
+ *     wreckage ({@link Wreckage}) at the battle's site, to recover there when
+ *     they want (the game's usual chances, d-mods and story-point
+ *     recoveries), with nothing popping up after the battle. Nobody else
+ *     sees them in it. Officers go back on the ships recovered; left there
+ *     for {@link Wreckage#DAYS} days, they're lost, and an AI core on one
  *     goes back into the cargo.</li>
  * <li><b>Enemy ships the leader left</b>: the leader takes their spoils
  *     first, as always. Once the leader's battle dialog closes, the enemy
- *     ships lost in the battle that aren't in the leader's fleet go to each
- *     player who fought in it, to recover as they would any enemy ship.</li>
+ *     ships lost in the battle that aren't in the leader's fleet stay at the
+ *     battle's site in one object, the battle's wreckage ({@link Wreckage}),
+ *     for anyone to fly to and recover, as cargo pods hold cargo.</li>
  * </ul>
  *
  * Kept in the save (sector persistent data) until recovered or left, so a
@@ -71,8 +76,14 @@ final class JointSpoils {
     /** Each of our lost ships' captain (an officer still in our fleet, or an AI core), to put back. */
     private static final Map<FleetMemberAPI, PersonAPI> captains = new IdentityHashMap<FleetMemberAPI, PersonAPI>();
     private static String from = "";
-    /** Ships arrived while no dialog of ours was open: offer them when the map is free. */
+    /** Ships arrived while no dialog of ours was open: offer them when the map is free (only offers from before the wreckage). */
     private static boolean offerLater;
+    /** The battle's wreckage our ships wait in: its id, place, and when the battle was. Null: offered in a dialog instead. */
+    private static String anchorId;
+    private static String anchorLoc;
+    private static float anchorX, anchorY;
+    private static long anchorSince;
+    private static long nextAnchorCheck;
 
     private JointSpoils() {
     }
@@ -89,10 +100,21 @@ final class JointSpoils {
      * Our ships lost in someone's battle (already out of our fleet): which
      * of them we can recover, prepared as the game prepares yours.
      */
-    static void ownLost(String leaderName, List<FleetMemberAPI> lost, Set<String> destroyed) {
+    static void ownLost(String leaderName, List<FleetMemberAPI> lost, Set<String> destroyed, JSONObject wreck) {
         CampaignFleetAPI me = Global.getSector().getPlayerFleet();
         if (me == null || lost.isEmpty()) return;
         from = leaderName;
+        // Where they'll wait: the leader's wreckage for this battle, or one of our own right here.
+        LocationAPI here = me.getContainingLocation();
+        anchorId = wreck != null && !wreck.optString("id", "").isEmpty() ? wreck.optString("id")
+                : "multisector_wreckage_own_" + Session.get().getMyId() + "_" + System.currentTimeMillis();
+        String loc = wreck == null ? "" : wreck.optString("loc", "");
+        boolean there = !loc.isEmpty() && FleetSync.findLocation(loc) != null;
+        anchorLoc = there ? loc : here == null ? "" : FleetSync.locationId(here);
+        anchorX = there ? (float) wreck.optDouble("x") : me.getLocation().x;
+        anchorY = there ? (float) wreck.optDouble("y") : me.getLocation().y;
+        anchorSince = Global.getSector().getClock().getTimestamp();
+        nextAnchorCheck = 0;
         for (FleetMemberAPI m : lost) {
             try {
                 if (Misc.isUnboardable(m)) continue;
@@ -115,40 +137,17 @@ final class JointSpoils {
         persist();
     }
 
-    /** Enemy ships the leader left, from their game. */
+    /** The leader has taken their pick and left the rest in the battle's wreckage. */
     static void leftovers(String leaderName, JSONObject j) {
-        CampaignFleetAPI me = Global.getSector().getPlayerFleet();
-        JSONArray ships = j.optJSONArray("ships");
-        if (me == null || ships == null || ships.length() == 0) return;
-        from = leaderName;
-        int added = 0;
-        List<String> skipped = new ArrayList<String>();
-        for (int i = 0; i < ships.length(); i++) {
-            try {
-                JSONObject sj = ships.getJSONObject(i);
-                FleetMemberAPI m = ShipJson.buildShip(sj, skipped);
-                if (m == null || Misc.isUnboardable(m)) continue;
-                boolean wrecked = sj.optBoolean("destroyed");
-                m.getStatus().setHullFraction(0.01f);
-                boolean easy = Misc.isShipRecoverable(m, me, false, false, wrecked ? 0.5f : 1f);
-                prepare(m, false, wrecked, me);
-                (easy ? normal : story).add(m);
-                added++;
-            } catch (Exception e) {
-                log.warn("[MultiSector] couldn't rebuild a ship " + leaderName + " left", e);
-            }
-        }
-        if (added == 0) return;
-        persist();
-        log.info("[MultiSector] " + leaderName + " left " + added + " enemy ships to recover"
-                + (skipped.isEmpty() ? "" : "; missing here: " + skipped));
-        Session.get().notice(leaderName + " has taken their pick: " + added + " ship" + (added == 1 ? "" : "s")
-                + " from the battle can be recovered.");
-        offerLater = true;
+        int n = j.optInt("count");
+        if (n <= 0) return;
+        log.info("[MultiSector] " + leaderName + " left " + n + " enemy ships in the battle's wreckage");
+        Session.get().notice(leaderName + " has taken their pick: " + n + " ship" + (n == 1 ? "" : "s")
+                + " left in the Battle Wreckage where the battle was. Fly to it to recover them.");
     }
 
     /** As the game readies a ship for its recovery screen: d-mods, and what survives of weapons and wings. */
-    private static void prepare(FleetMemberAPI m, boolean ours, boolean wrecked, CampaignFleetAPI me) {
+    static void prepare(FleetMemberAPI m, boolean ours, boolean wrecked, CampaignFleetAPI me) {
         ShipVariantAPI v = m.getVariant().clone();
         v.setSource(VariantSource.REFIT);
         m.setVariant(v, false, true);
@@ -187,6 +186,29 @@ final class JointSpoils {
                         after.run();
                     }
                 });
+    }
+
+    /** Our own ships waiting in this wreckage. */
+    static boolean waitingIn(SectorEntityToken wreckage) {
+        return hasAny() && anchorId != null && wreckage != null && anchorId.equals(wreckage.getId());
+    }
+
+    static List<FleetMemberAPI> normalList() {
+        return normal;
+    }
+
+    static List<FleetMemberAPI> storyList() {
+        return story;
+    }
+
+    static boolean offered(FleetMemberAPI m) {
+        return normal.contains(m) || story.contains(m);
+    }
+
+    /** Our ships waiting in a wreckage: recovered from its dialog. */
+    static void recoverFromWreckage(List<FleetMemberAPI> members, InteractionDialogAPI dialog) {
+        recover(members, dialog);
+        if (!hasAny()) leave();
     }
 
     private static void recover(List<FleetMemberAPI> members, InteractionDialogAPI dialog) {
@@ -239,6 +261,7 @@ final class JointSpoils {
         own.clear();
         captains.clear();
         offerLater = false;
+        anchorId = null;
         persist();
     }
 
@@ -261,7 +284,12 @@ final class JointSpoils {
                     ships.put(sj);
                 }
             }
-            data.put(SAVE_KEY, new JSONObject().put("from", from).put("ships", ships).toString());
+            JSONObject root = new JSONObject().put("from", from).put("ships", ships);
+            if (anchorId != null) {
+                root.put("anchor", new JSONObject().put("id", anchorId).put("loc", anchorLoc).put("x", anchorX)
+                        .put("y", anchorY).put("since", anchorSince));
+            }
+            data.put(SAVE_KEY, root.toString());
         } catch (Exception e) {
             log.warn("[MultiSector] couldn't keep the recovery offer in the save", e);
         }
@@ -276,6 +304,15 @@ final class JointSpoils {
             if (me == null) return;
             JSONObject root = new JSONObject((String) text);
             from = root.optString("from", "a joint battle");
+            JSONObject anchor = root.optJSONObject("anchor");
+            if (anchor != null) {
+                anchorId = anchor.optString("id");
+                anchorLoc = anchor.optString("loc");
+                anchorX = (float) anchor.optDouble("x");
+                anchorY = (float) anchor.optDouble("y");
+                anchorSince = anchor.optLong("since");
+                nextAnchorCheck = 0;
+            }
             JSONArray ships = root.optJSONArray("ships");
             List<String> skipped = new ArrayList<String>();
             for (int i = 0; ships != null && i < ships.length(); i++) {
@@ -301,7 +338,7 @@ final class JointSpoils {
                 }
             }
             if (hasAny()) {
-                offerLater = true;
+                offerLater = anchorId == null;
                 log.info("[MultiSector] " + count() + " ships from " + from + "'s battle still to recover (kept in the save)"
                         + (skipped.isEmpty() ? "" : "; missing here: " + skipped));
             }
@@ -317,6 +354,7 @@ final class JointSpoils {
         own.clear();
         captains.clear();
         offerLater = false;
+        anchorId = null;
         try {
             Global.getSector().getPersistentData().remove(SAVE_KEY);
         } catch (RuntimeException ignored) {
@@ -324,8 +362,17 @@ final class JointSpoils {
         }
     }
 
-    /** On the map with nothing open: the recovery we couldn't offer in the battle's dialog. */
+    /**
+     * Our ships waiting in a wreckage: it stays there for them (put back if
+     * it went, as when another player emptied it of the enemy ships), and
+     * they're lost once it's been there too long. Offers from before the
+     * wreckage: on the map with nothing open, in a dialog.
+     */
     static void frame() {
+        if (anchorId != null && hasAny()) {
+            anchorFrame();
+            return;
+        }
         if (!offerLater || !hasAny()) return;
         if (multisector.ui.CharacterChooser.isPending()) return; // our character first (a fresh copy)
         CampaignUIAPI ui = Global.getSector().getCampaignUI();
@@ -334,18 +381,43 @@ final class JointSpoils {
         ui.showInteractionDialog(new Dialog(), Global.getSector().getPlayerFleet());
     }
 
-    /** The battle's dialog closed before we got to our ships: offer them on the map instead. */
+    private static void anchorFrame() {
+        long now = System.nanoTime();
+        if (now - nextAnchorCheck < 0) return;
+        nextAnchorCheck = now + 2_000_000_000L;
+        if (multisector.ui.CharacterChooser.isPending()) return; // our character first (a fresh copy)
+        if (Global.getSector().getClock().getElapsedDaysSince(anchorSince) > Wreckage.DAYS) {
+            log.info("[MultiSector] our ships in the wreckage of " + from + "'s battle drifted away unrecovered");
+            Session.get().notice("Your ships left in the wreckage of " + from + "'s battle have drifted away.");
+            leave();
+            return;
+        }
+        LocationAPI loc = FleetSync.findLocation(anchorLoc);
+        if (loc == null || Wreckage.find(loc, anchorId) != null) return;
+        FleetMemberAPI shown = !normal.isEmpty() ? normal.get(0) : story.get(0);
+        Wreckage.forOwnShips(loc, anchorId, from, anchorX, anchorY, shown, anchorSince);
+    }
+
+    /** The battle's dialog closed before we got to our ships: offer them on the map instead (offers from before the wreckage). */
     static void offerOnMap() {
-        if (hasAny()) offerLater = true;
+        if (hasAny() && anchorId == null) offerLater = true;
+    }
+
+    /** Our ships wait in the wreckage, not in a dialog. */
+    static boolean anchored() {
+        return anchorId != null;
     }
 
     /** Line for the battle's result, if there's anything to recover. */
     static String summary() {
         if (!hasAny()) return null;
         int mine = own.size();
-        return mine > 0 ? "You can recover " + (mine == 1 ? "it" : "some of them") + ": the game's usual chances,"
-                + " and some only with a story point."
-                : null;
+        if (mine == 0) return null;
+        return anchorId != null ? (mine == 1 ? "It can" : "Some of them can") + " be recovered: "
+                + (mine == 1 ? "it waits" : "they wait") + " in the Battle Wreckage where the battle was, for you"
+                + " alone. Open it whenever you like (within " + (int) Wreckage.DAYS + " days)."
+                : "You can recover " + (mine == 1 ? "it" : "some of them") + ": the game's usual chances,"
+                + " and some only with a story point.";
     }
 
     /** A save is loading: nothing carries over. */
@@ -355,6 +427,7 @@ final class JointSpoils {
         own.clear();
         captains.clear();
         offerLater = false;
+        anchorId = null;
         enemyLost.clear();
         spoilsFor.clear();
         leaderPending = false;
@@ -418,6 +491,29 @@ final class JointSpoils {
     private static final Set<Integer> spoilsFor = new HashSet<Integer>();
     private static boolean leaderPending;
     private static long leaderSince;
+    /** Our battle's wreckage: id and place, fixed when the fighting ends (joiners are told, in their result). */
+    private static String wreckId;
+    private static String wreckLoc;
+    private static float wreckX, wreckY;
+    private static final long RUN = System.currentTimeMillis();
+
+    /** Our battle's wreckage, for the joiners' results: where their lost ships wait, and ours will go. */
+    static JSONObject wreckSpot() {
+        CampaignFleetAPI me = Global.getSector().getPlayerFleet();
+        String id = "multisector_wreckage_" + Session.get().getMyId() + "_" + JointBattle.battleNumber() + "_" + RUN;
+        if (!id.equals(wreckId) && me != null && me.getContainingLocation() != null) {
+            wreckId = id;
+            wreckLoc = FleetSync.locationId(me.getContainingLocation());
+            wreckX = me.getLocation().x;
+            wreckY = me.getLocation().y;
+        }
+        try {
+            return wreckId == null ? null : new JSONObject().put("id", wreckId).put("loc", wreckLoc).put("x", wreckX)
+                    .put("y", wreckY);
+        } catch (Exception e) {
+            return null;
+        }
+    }
 
     /** Our combat with joiners is over: note the enemy's losses before our recovery screen changes them. */
     static void noteEnemyLosses(CombatEngineAPI engine, Set<Integer> joiners) {
@@ -471,6 +567,7 @@ final class JointSpoils {
                 + (unboardable > 0 ? ", unboardable " + unboardable : "") + (noRecovery > 0 ? ", no recovery " + noRecovery : "")
                 + (errors > 0 ? ", errors " + errors + " (" + firstError + ")" : ""));
         spoilsFor.addAll(joiners);
+        wreckSpot();
         leaderPending = true;
         leaderSince = System.nanoTime();
 
@@ -478,7 +575,8 @@ final class JointSpoils {
 
     /**
      * Our battle dialog is closed: we've taken our pick. The enemy ships
-     * that aren't in our fleet now go to everyone who fought with us.
+     * that aren't in our fleet stay where the battle was, in its wreckage,
+     * and everyone who fought with us is told.
      */
     static void leaderFrame(Session s) {
         if (!leaderPending) return;
@@ -494,14 +592,17 @@ final class JointSpoils {
         int taken = enemyLost.size() - left.length();
         enemyLost.clear();
         try {
-            if (left.length() > 0) {
-                String text = JointBattle.msg("spoils", 0).put("ships", left).toString();
+            if (left.length() > 0 && wreckId != null
+                    && Wreckage.leave(wreckId, wreckLoc, wreckX, wreckY, s.playerName(s.getMyId()), left) != null) {
+                String text = JointBattle.msg("spoils", 0).put("count", left.length()).toString();
                 for (Integer id : spoilsFor) if (s.isPlayerHere(id)) s.sendBattleMessage(id, text);
-                log.info("[MultiSector] took " + taken + " enemy ships; " + left.length() + " left for " + spoilsFor.size()
-                        + " joiner(s)");
+                log.info("[MultiSector] took " + taken + " enemy ships; " + left.length() + " left in the wreckage for "
+                        + spoilsFor.size() + " joiner(s)");
+                s.notice(left.length() + " ship" + (left.length() == 1 ? "" : "s")
+                        + " you didn't take stay in the Battle Wreckage here, for the others to recover.");
             }
         } catch (Exception e) {
-            log.warn("[MultiSector] couldn't send the ships we left", e);
+            log.warn("[MultiSector] couldn't leave the ships we didn't take", e);
         }
         spoilsFor.clear();
     }
