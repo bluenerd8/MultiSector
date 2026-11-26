@@ -219,7 +219,11 @@ public final class JointBattle implements EveryFrameScript {
     }
 
     private static void leaderFrame(Session s) {
-        if (!joiners.isEmpty()) finishJoiners(s); // combat ended without our combat plugin seeing it end
+        if (!joiners.isEmpty()) {
+            // Combat ended without our combat plugin seeing it end: what it noted of the enemy's losses is what's left.
+            JointSpoils.combatEndedUnseen();
+            finishJoiners(s);
+        }
         JointCombat.Leader.active = null;
         for (Object[] q : queued.values()) {
             Session.PlayerMessage m = (Session.PlayerMessage) q[0];

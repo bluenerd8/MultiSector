@@ -270,6 +270,7 @@ final class JointCombat {
             this.engine = engine;
             active = this;
             JointBattle.combatStarted();
+            JointSpoils.leaderCombatStarted();
             log.info("[MultiSector] combat started: other players can join it now");
         }
 
@@ -402,6 +403,9 @@ final class JointCombat {
                 boolean over = engine.isCombatOver();
                 if (now - nextStatus >= 0 || (over && !ended)) {
                     nextStatus = now + STATUS_NANOS;
+                    java.util.Set<Integer> in = new HashSet<Integer>();
+                    for (JointBattle.Joiner jn : JointBattle.joiners()) in.add(jn.id);
+                    JointSpoils.watchEnemyLosses(engine, in); // in case the combat ends where we don't see it
                     for (JointBattle.Joiner jn : JointBattle.joiners()) {
                         s.sendBattleMessage(jn.id, JointBattle.msg("status").put("ships", JointBattle.status(engine, jn)).toString());
                     }
@@ -2458,7 +2462,10 @@ final class JointCombat {
     /** Shots land on view ships, but only the leader's game decides what they did. */
     private static void immune(MutableShipStatsAPI stats, boolean on) {
         if (on) {
-            stats.getHullDamageTakenMult().modifyMult(IMMUNE, 0f);
+            // Not quite zero: a ship whose hull can't be damaged at all counts as untargetable, and the game then
+            // hides its hull, flux and CR when you hover over it (an enemy's, anyway). The leader's stream sets the
+            // hull every update, so this much never shows.
+            stats.getHullDamageTakenMult().modifyMult(IMMUNE, 0.000001f);
             stats.getArmorDamageTakenMult().modifyMult(IMMUNE, 0f);
             stats.getShieldDamageTakenMult().modifyMult(IMMUNE, 0f);
             stats.getEmpDamageTakenMult().modifyMult(IMMUNE, 0f);

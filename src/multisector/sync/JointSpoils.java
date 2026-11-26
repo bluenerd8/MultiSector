@@ -515,9 +515,44 @@ final class JointSpoils {
         }
     }
 
+    /** Our combat started: losses from an earlier one are no business of this one. */
+    static void leaderCombatStarted() {
+        if (leaderPending) return; // another round of the same encounter (a pursuit): it all goes in together
+        enemyLost.clear();
+        spoilsFor.clear();
+    }
+
+    /**
+     * Now and then in our combat while players are in it: the enemy's
+     * losses so far. A combat can end without our plugin seeing it end
+     * (ended from the menu, say), so what's noted here is what's left then.
+     */
+    static void watchEnemyLosses(CombatEngineAPI engine, Set<Integer> joiners) {
+        if (engine == null || joiners.isEmpty()) return;
+        spoilsFor.addAll(joiners);
+        collect(engine, false);
+    }
+
+    /** Combat ended without our plugin seeing it: what we noted in it is what's left. */
+    static void combatEndedUnseen() {
+        if (spoilsFor.isEmpty() || leaderPending) return;
+        log.info("[MultiSector] our combat ended unseen; " + enemyLost.size() + " enemy losses noted in it");
+        wreckSpot();
+        leaderPending = true;
+        leaderSince = System.nanoTime();
+    }
+
     /** Our combat with joiners is over: note the enemy's losses before our recovery screen changes them. */
     static void noteEnemyLosses(CombatEngineAPI engine, Set<Integer> joiners) {
         if (engine == null || joiners.isEmpty()) return;
+        collect(engine, true);
+        spoilsFor.addAll(joiners);
+        wreckSpot();
+        leaderPending = true;
+        leaderSince = System.nanoTime();
+    }
+
+    private static void collect(CombatEngineAPI engine, boolean last) {
         CombatFleetManagerAPI fm = engine.getFleetManager(1);
         if (fm == null) return;
         // The game's lists of the enemy's disabled and destroyed ships, and any enemy wreck still on the field
@@ -562,15 +597,12 @@ final class JointSpoils {
                 }
             }
         }
-        log.info("[MultiSector] enemy losses with joiners in the battle: " + fm.getDisabledCopy().size() + " disabled, "
-                + fm.getDestroyedCopy().size() + " destroyed, " + wrecks + " more wrecks on the field; kept " + n
+        if (!last && n == 0 && errors == 0) return;
+        log.info("[MultiSector] enemy losses with joiners in the battle" + (last ? " (at the end)" : "") + ": "
+                + fm.getDisabledCopy().size() + " disabled, " + fm.getDestroyedCopy().size() + " destroyed, " + wrecks
+                + " more wrecks on the field; " + n + " new, " + enemyLost.size() + " in all"
                 + (unboardable > 0 ? ", unboardable " + unboardable : "") + (noRecovery > 0 ? ", no recovery " + noRecovery : "")
                 + (errors > 0 ? ", errors " + errors + " (" + firstError + ")" : ""));
-        spoilsFor.addAll(joiners);
-        wreckSpot();
-        leaderPending = true;
-        leaderSince = System.nanoTime();
-
     }
 
     /**

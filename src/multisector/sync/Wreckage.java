@@ -31,8 +31,9 @@ import java.util.Map;
 
 /**
  * What a joint battle's leader leaves behind: one object at the battle's
- * site ("Battle Wreckage", our own entity type) holding every enemy ship
- * the leader didn't take, for anyone to recover, as cargo pods hold cargo.
+ * site ("Battle Wreckage", our own entity type, drawn as our own salvage
+ * pod by {@link WreckagePod}) holding every enemy ship the leader didn't
+ * take, for anyone to recover, as cargo pods hold cargo.
  *
  * <p>It's shared like other objects in space ({@link WorldObjects}): every
  * game gets it, one player at a time opens it ({@link ObjectLocks}), and
@@ -75,7 +76,7 @@ final class Wreckage {
         if (e != null) {
             e.getMemoryWithoutUpdate().set(SHIPS, ships.toString());
         } else {
-            e = spawn(loc, id, from, ships, DAYS, null);
+            e = spawn(loc, id, from, ships, DAYS);
             if (e == null) return null;
             e.getLocation().set(x, y);
         }
@@ -87,7 +88,7 @@ final class Wreckage {
     static SectorEntityToken forOwnShips(LocationAPI loc, String id, String from, float x, float y, FleetMemberAPI shown,
                                          long since) {
         float days = Math.max(1f, DAYS - Global.getSector().getClock().getElapsedDaysSince(since));
-        SectorEntityToken e = spawn(loc, id, from, new JSONArray(), days, shown);
+        SectorEntityToken e = spawn(loc, id, from, new JSONArray(), days);
         if (e != null) {
             e.getLocation().set(x, y);
             log.info("[MultiSector] the wreckage of " + from + "'s battle is where our lost ships wait (" + id + ")");
@@ -100,29 +101,13 @@ final class Wreckage {
         return null;
     }
 
-    /** Makes one: shown as the biggest of its ships, drifting. Null if none of them can be built here. */
-    private static SectorEntityToken spawn(LocationAPI loc, String id, String from, JSONArray ships, float days,
-                                           FleetMemberAPI shown) {
-        for (int i = 0; i < ships.length(); i++) {
-            try {
-                FleetMemberAPI m = ShipJson.buildShip(ships.getJSONObject(i), new ArrayList<String>());
-                if (m != null && (shown == null || m.getHullSpec().getHullSize().ordinal()
-                        > shown.getHullSpec().getHullSize().ordinal())) {
-                    shown = m;
-                }
-            } catch (Exception ex) {
-                // that one can't be shown
-            }
-        }
-        if (shown == null) return null;
-        PerShipData psd = new PerShipData(shown.getVariant(), ShipCondition.WRECKED, shown.getShipName(), Factions.NEUTRAL, 0f);
-        DerelictShipData data = new DerelictShipData(psd, false);
-        data.durationDays = days;
-        CustomCampaignEntityAPI e = loc.addCustomEntity(id, "Battle Wreckage (" + from + ")", TYPE, Factions.NEUTRAL, data);
-        e.getDropValue().clear(); // the ships are what's in it
-        e.getDropRandom().clear();
+    /** Makes one: our salvage pod, lasting this many days. */
+    private static SectorEntityToken spawn(LocationAPI loc, String id, String from, JSONArray ships, float days) {
+        CustomCampaignEntityAPI e = loc.addCustomEntity(id, "Battle Wreckage (" + from + ")", TYPE, Factions.NEUTRAL,
+                Float.valueOf(days));
         e.setDiscoverable(false);
         e.setSensorProfile(1f);
+        e.getDetectedRangeMod().modifyFlat("gen", 2000f); // seen from a good way off, like a big derelict
         MemoryAPI mem = e.getMemoryWithoutUpdate();
         mem.set(SHIPS, ships.toString());
         mem.set(FROM, from);
@@ -152,7 +137,9 @@ final class Wreckage {
 
     static void describe(SectorEntityToken e, JSONObject j) throws Exception {
         j.put("ships", ships(e)).put("from", from(e));
-        if (e.getCustomPlugin() instanceof DerelictShipEntityPlugin) {
+        if (e.getCustomPlugin() instanceof WreckagePod) {
+            j.put("days", ((WreckagePod) e.getCustomPlugin()).daysLeft());
+        } else if (e.getCustomPlugin() instanceof DerelictShipEntityPlugin) { // from 0.1.10
             j.put("days", ((DerelictShipEntityPlugin) e.getCustomPlugin()).getData().durationDays);
         }
     }
@@ -160,7 +147,7 @@ final class Wreckage {
     static SectorEntityToken create(LocationAPI loc, String id, JSONObject j) {
         JSONArray ships = j.optJSONArray("ships");
         if (ships == null || ships.length() == 0) return null;
-        return spawn(loc, id, j.optString("from", "a joint battle"), ships, (float) j.optDouble("days", DAYS), null);
+        return spawn(loc, id, j.optString("from", "a joint battle"), ships, (float) j.optDouble("days", DAYS));
     }
 
     static void update(SectorEntityToken e, JSONObject j) {

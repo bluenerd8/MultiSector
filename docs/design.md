@@ -816,6 +816,12 @@ The enemy ships a joint battle's leader leaves are no longer sent to each joiner
 - Nobody comes for it: it drifts away after 30 days, as a derelict does. It's in the save like any object in space.
 - **Joiners aren't prompted at all.** Their own lost ships wait in the same wreckage, on their game only (`JointSpoils`, kept in the save as before): its id and place are fixed when the fighting ends (`JointSpoils.wreckSpot`) and sent with each joiner's result, so the joiner's game puts the wreckage there at once (empty of enemy ships until the leader's arrive) and puts it back if it goes while their ships are in it (say another player emptied it of enemy ships). Its dialog shows both on one recovery screen; their own come back with their officers. Left 30 days, they're lost (AI cores back to the cargo). The result dialog no longer has "Recover ships", and nothing pops up on the map. Offers kept in a save from before this still pop up as before.
 
+## 31. Wreckage fixes (0.1.12)
+
+- **The leader's leftover enemy ships never reached the wreckage** in the 0.1.10 test: the leader's combat ended in a way our combat plugin didn't see (the battle ended from the menu, say), so the enemy's losses were never noted (no "enemy losses" line in the leader's log; `finishJoiners` ran from the campaign side). The leader now notes the enemy's losses every status tick while players are in the battle (`JointSpoils.watchEnemyLosses`), and an unseen end uses what was noted (`combatEndedUnseen`). They're cleared when a new combat starts, unless the last encounter's are still waiting for the leader's dialog to close (a pursuit is another round of the same encounter).
+- **The wreckage is our own salvage pod** (`WreckagePod`, the entity's plugin): an armoured hexagon with an amber hazard band and a glowing teal core, slowly turning, with an amber glow pulsing around it, and its own amber map icon. Seen from 2000 away. Pods left by 0.1.10 keep the derelict look until they drift away.
+- **Joiners couldn't see an enemy's hull, flux and CR when hovering over it.** The battle view makes its ships take no damage (the leader's game decides it), but the game counts a ship whose hull can't be damaged as untargetable, and hides those for untargetable enemies. Hull damage taken in the view is now 0.000001 of normal rather than 0: targetable again, and the leader's stream resets the hull every update, so it never shows.
+
 ## Still to do (roadmap)
 
 Kept here so they aren't lost between test rounds:

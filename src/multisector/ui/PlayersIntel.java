@@ -42,6 +42,13 @@ public final class PlayersIntel implements EveryFrameScript {
 
     /** Icons are loaded once at startup, so the map can show them. */
     public static void loadIcons() {
+        for (String pod : new String[]{"salvage_pod", "salvage_pod_glow", "salvage_pod_icon"}) {
+            try {
+                Global.getSettings().loadTexture("graphics/multisector/" + pod + ".png"); // the battle's wreckage
+            } catch (Exception e) {
+                Global.getLogger(PlayersIntel.class).warn("[MultiSector] couldn't load the salvage pod's look", e);
+            }
+        }
         for (int shape = 0; shape < multisector.sync.Marks.SHAPE_NAMES.length; shape++) {
             for (int color = 0; color < multisector.sync.Marks.COLORS.length; color++) {
                 try {

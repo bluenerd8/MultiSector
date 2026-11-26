@@ -2175,10 +2175,11 @@
 		"scaleIconWithZoom":true,
 		"iconWidth":24,
 		"iconHeight":24,
-		"icon":"graphics/icons/derelict.png",
+		"icon":"graphics/multisector/salvage_pod_icon.png",
+		"iconColor":[255,175,50,255],
 		"interactionImage":"graphics/illustrations/space_wreckage.jpg",
 		"layers":[TERRAIN_7A],
 		"tags":["has_interaction_dialog", "neutrino_low"],
-		"pluginClass":"com.fs.starfarer.api.impl.campaign.DerelictShipEntityPlugin",
+		"pluginClass":"multisector.sync.WreckagePod",
 	},
 }
