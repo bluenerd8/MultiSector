@@ -73,6 +73,10 @@ public class MultiSectorModPlugin extends BaseModPlugin {
         Global.getSector().addTransientScript(new PlayerTalk());
         WorldObjects.forget();
         Global.getSector().addTransientScript(new WorldObjects());
+        multisector.sync.ColonySync.forget();
+        multisector.sync.ColonySync colonies = new multisector.sync.ColonySync();
+        Global.getSector().addTransientScript(colonies); // colonies belong to who founded them
+        Global.getSector().getListenerManager().addListener(colonies, true);
         Escort.forget();
         Global.getSector().addTransientScript(new Escort());
         WorldState.forget();

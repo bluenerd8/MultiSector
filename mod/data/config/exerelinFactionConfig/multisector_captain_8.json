@@ -1,0 +1,18 @@
+# MultiSector: a player's colonies on the other games. Nexerelin's own moves against it
+# (invasions, raids) count only on the host's game; it makes none of its own and keeps no
+# diplomacy: MultiSector sets its relations from its player's.
+{
+    "playableFaction":false,
+    "corvusCompatible":true,
+    "canInvade":false,
+    "disableDiplomacy":true,
+    "noSyncRelations":true,
+    "noRandomizeRelations":true,
+    "allowAgentActions":false,
+    "allowPrisonerActions":false,
+    "colonyExpeditionChance":0,
+    "marketSpawnWeight":0,
+    "raidsFromBases":false,
+    "dropPrisoners":false,
+    "showIntelEvenIfDead":false,
+}

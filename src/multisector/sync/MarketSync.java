@@ -342,8 +342,8 @@ public final class MarketSync {
     static void friendFrame(Session s) {
         SectorEntityToken t = Docking.current();
         MarketAPI m = t == null ? null : t.getMarket();
-        if (m == null || m.isPlanetConditionMarketOnly() || m.getSubmarketsCopy().isEmpty()) {
-            open = null;
+        if (m == null || m.isPlanetConditionMarketOnly() || m.getSubmarketsCopy().isEmpty() || m.isPlayerOwned()) {
+            open = null; // our own colony: our game runs it, not the host's copy
             return;
         }
         long now = System.nanoTime();

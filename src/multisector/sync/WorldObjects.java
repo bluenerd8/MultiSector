@@ -376,6 +376,10 @@ public final class WorldObjects implements EveryFrameScript {
     // ================================================================ applying
 
     private static void applySafely(JSONObject j) {
+        if (ColonySync.handles(j)) {
+            ColonySync.apply(j); // another player's colony, as they run it
+            return;
+        }
         if (WorldState.handles(j)) {
             WorldState.apply(j); // world-wide facts: raids, discoveries, relations, bounties
             return;

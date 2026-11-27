@@ -5,6 +5,7 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CustomCampaignEntityAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
+import com.fs.starfarer.api.campaign.StarSystemAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
 import multisector.net.Session;
 import org.apache.log4j.Logger;
@@ -24,6 +25,10 @@ import java.util.Set;
  * marker that follows each player's fleet, with their icon (their colour
  * and shape) and name, and one on each ping for its 30 seconds.
  *
+ * A player inside a star system also gets one on the hyperspace map, next
+ * to that system's star, so you can see from hyperspace which system each
+ * player is in. Markers are seen at any distance, whatever your sensors.
+ *
  * The markers are entities of our own types ({@code data/config/custom_entities.json}:
  * multisector_mark_S_C and multisector_pingmark_S_C), shown on the map only,
  * not in space (the campaign view draws its own rings). They come off before
@@ -39,6 +44,9 @@ public final class MapMarks implements EveryFrameScript {
     }
 
     private static final Map<Integer, Mark> players = new HashMap<Integer, Mark>();
+    /** Players inside a star system: their marker beside it in hyperspace. */
+    private static final Map<Integer, Mark> systems = new HashMap<Integer, Mark>();
+    private static final String SEEN_ID = "multisector_mark";
     private static final Map<Social.Ping, Mark> pings = new IdentityHashMap<Social.Ping, Mark>();
     private static boolean failed;
 
@@ -68,6 +76,8 @@ public final class MapMarks implements EveryFrameScript {
             return;
         }
         Set<Integer> seen = new HashSet<Integer>();
+        Set<Integer> inSystem = new HashSet<Integer>();
+        LocationAPI hyper = Global.getSector().getHyperspace();
         for (Session.Player p : s.getPlayers()) {
             if (p.id == s.getMyId()) continue;
             CampaignFleetAPI f = PuppetManager.fleetOf(p.id);
@@ -76,11 +86,30 @@ public final class MapMarks implements EveryFrameScript {
             String type = "multisector_mark_" + Marks.shapeIndex(p.id) + "_" + Marks.colorIndex(p.id);
             Mark m = players.get(p.id);
             if (m == null) players.put(p.id, m = new Mark());
-            place(m, type, f.getContainingLocation(), "multisector_mark_" + p.id, p.name, f.getLocation().x, f.getLocation().y);
+            LocationAPI loc = f.getContainingLocation();
+            place(m, type, loc, "multisector_mark_" + p.id, p.name, f.getLocation().x, f.getLocation().y);
+            // In a star system: their mark beside its star on the hyperspace map too.
+            if (loc instanceof StarSystemAPI && hyper != null && loc != hyper) {
+                StarSystemAPI sys = (StarSystemAPI) loc;
+                inSystem.add(p.id);
+                Mark sm = systems.get(p.id);
+                if (sm == null) systems.put(p.id, sm = new Mark());
+                // Around the star, each player at their own angle, so two in one system don't cover each other.
+                double a = Math.toRadians(45 + 72 * (p.id % 5));
+                float r = 450f;
+                place(sm, type, hyper, "multisector_sysmark_" + p.id, p.name + " (in " + sys.getBaseName() + ")",
+                        sys.getLocation().x + (float) Math.cos(a) * r, sys.getLocation().y + (float) Math.sin(a) * r);
+            }
         }
         for (Iterator<Map.Entry<Integer, Mark>> it = players.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<Integer, Mark> e = it.next();
             if (seen.contains(e.getKey())) continue;
+            remove(e.getValue());
+            it.remove();
+        }
+        for (Iterator<Map.Entry<Integer, Mark>> it = systems.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<Integer, Mark> e = it.next();
+            if (inSystem.contains(e.getKey())) continue;
             remove(e.getValue());
             it.remove();
         }
@@ -112,8 +141,12 @@ public final class MapMarks implements EveryFrameScript {
             m.entity = loc.addCustomEntity(id, name, type, Factions.INDEPENDENT);
             m.type = type;
             m.entity.setDiscoverable(null);
-            m.entity.setSensorProfile(1_000_000f); // seen from anywhere: it's only a marker
         }
+        if (!name.equals(m.entity.getName())) m.entity.setName(name);
+        // Seen from anywhere, whatever our sensors: it's only a marker. The profile alone doesn't do it (the
+        // game works it out again); the detected range is what it reads, as for the players' fleets.
+        m.entity.setSensorProfile(1_000_000f);
+        m.entity.getDetectedRangeMod().modifyFlat(SEEN_ID, 1_000_000f);
         m.entity.setLocation(x, y);
     }
 
@@ -128,17 +161,20 @@ public final class MapMarks implements EveryFrameScript {
     public static void removeAll() {
         try {
             for (Mark m : new ArrayList<Mark>(players.values())) remove(m);
+            for (Mark m : new ArrayList<Mark>(systems.values())) remove(m);
             for (Mark m : new ArrayList<Mark>(pings.values())) remove(m);
         } catch (RuntimeException ignored) {
             // the sector is going away
         }
         players.clear();
+        systems.clear();
         pings.clear();
     }
 
     /** A save is loading: the markers belonged to the old sector. */
     public static void forget() {
         players.clear();
+        systems.clear();
         pings.clear();
         failed = false;
     }

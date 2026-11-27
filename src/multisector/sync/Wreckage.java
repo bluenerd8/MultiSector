@@ -59,7 +59,7 @@ final class Wreckage {
     private static final String SHIPS = "$multisector_wreckShips";
     private static final String FROM = "$multisector_wreckFrom";
     /** How long it lasts if nobody empties it. */
-    static final float DAYS = 30f;
+    static final float DAYS = 520f;
 
     private Wreckage() {
     }
