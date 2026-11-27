@@ -651,7 +651,7 @@ From testing 0.0.39: autopilot behaves. Transfer command turned the joiner into 
 | Relations between NPC factions | Host, every 5 s on change, every 60 s regardless | Pairs involving the player faction are skipped: reputation stays per player |
 | System bounties (`SystemBountyIntel`, not commerce-mode) | Host, every 10 s on change | Missing ones are posted, extras of the friend's own game ended (usually before they're shown), elapsed time and duration matched. Payments stay per player. |
 
-Not shared yet: NPC factions' own raids, expeditions and invasions; pirate and Pathers bases; market ownership; player colonies.
+Not shared yet: NPC factions' own raids, expeditions and invasions (except on player colonies, sections 33 and 34); pirate and Pathers bases; market ownership.
 
 ### Markets
 
@@ -844,14 +844,48 @@ Before, colonies belonged to nobody in particular. Every friend's world is a cop
 - **Abandoning** sends `{"e":"colonygone"}`, and the other games remove it as the game does (`DecivTracker.removeColony`).
 - **Markets:** a friend's own colony no longer takes the host's stock when they dock there (`MarketSync` skips player-owned markets). At another player's colony, visitors trade against the host's copy, as at any market.
 
-Known limits: the faction's main colour is its slot's (the game can't change it at runtime), not the owner's; the colony's admin, hazard pay, immigration incentives and growth progress aren't carried; buildings under construction start over on other games; patrols around a colony and raids by NPCs happen separately on each game (only a change of owner is shared); a player who changes their name loses their colonies' ownership; more than ten players share factions.
+Known limits (0.1.16): the faction's main colour is its slot's (the game can't change it at runtime), not the owner's; a player who changes their name loses their colonies' ownership; more than ten players share factions. The rest of 0.1.16's limits are lifted in 0.1.17 (section 34).
+
+## 34. All of a colony kept in the host's save, and the host's NPC factions count (0.1.17)
+
+The test group's point: a friend's world is a fresh copy of the host's save every session, so whatever the host's copy of a colony doesn't hold is lost to its owner next time. 0.1.16 dropped the administrator, hazard pay, growth and construction progress, and the friend's faction name and flag (the downloaded save's player faction wears the host's). And what NPC factions did to a colony on the host's game didn't reach its owner.
+
+**Everything carried, and kept by the host.** The owner's report (`{"e":"colony"}`) now also has:
+- **Construction:** under construction or upgrading, and progress in whole days.
+- **The colony's condition:** disruption days per industry, and unrest (`RecentUnrest`).
+- **Settings:** the build queue, hazard pay (incentives on and credits) and use-stockpiles.
+- **Growth:** the population composition and weight.
+- **The planet:** its planetary conditions (a terraforming mod changes them). Event and building conditions are left to each game.
+- **The administrator:** the whole person (`ShipJson.person`), or "self" with the owner's name and portrait.
+
+Storage now goes only when it changes, or with the once-a-minute resend, because ticking numbers would otherwise resend it constantly.
+
+Every game keeps the report in the colony's memory (`$multisector_ownerState`) and holds the copy to it:
+- **Size:** held at the owner's.
+- **Disruption and unrest:** set to the owner's.
+- **Construction:** progress put back every frame, so it never finishes on its own.
+- **Administrator:** the owner's real one, in their faction.
+
+When the owner's game takes the colony back from the host's copy next session, it puts all of that back: administrator (into the roster, placed at that colony), hazard pay, stockpiles, growth, queue and construction progress.
+
+**The friend's faction and admins come back too.** The look a friend sends now says whether they named their faction (`named`), and lists the admins they've hired but not placed. Once per load, a friend's game applies its own look as the host kept it. It puts its own name and flag on the player faction, or clears the host's. It also replaces the roster, which in a downloaded save is the host's, with its own admins.
+
+**The host's game is where NPC factions' moves count:**
+- **Invasions, only the host's.** Every game except the host's marks player colonies (its own and other players' copies) `$nex_uninvadable`, the memory flag Nexerelin's `canBeInvaded` checks. The marks are taken off whenever the game is offline. So Nexerelin can invade a player's colony only on the host's game, and that takeover still goes everywhere (`colonytaken`).
+- **Raids and bombardments on the host's game reach the owner.** The host compares its copy with the owner's last report every 2 s. More disruption (by over a day), more unrest, or a smaller size is an NPC faction's doing there. The host sends it (`{"e":"colonyhit"}`, with a sequence number), and the owner's game applies it: the same unrest, the same days added to each industry's disruption, and `reduceMarketSize` per size lost.
+- **No double-counting.** The host counts the hit as pending on top of the owner's numbers until the owner's report lists that sequence number (`hits`).
+- **Ruined on the host's game, ruined everywhere.** A copy that leaves the host's economy without being abandoned or taken sends `colonydeciv`, and the owner's game decivilizes it.
+- **The owner's own game still counts.** Raids its NPC factions make on its own colonies, and the colony events only a player's own colonies get (crises, Pather cells), are part of the colony and reach the host like the rest of it.
+- **While the owner is away,** a hit on the host's copy stays on it: the held numbers move to match it, so it's there when they download the save. Size, construction and stability stay frozen meanwhile; the colony doesn't run itself on the host's game.
+
+Known limits: the faction's main colour is its slot's; NPC raids from the owner's own game also count, so a colony can be raided from both games; patrols around a colony are each game's own NPC fleets (fleet sync shares them where players are together); a player who changes their name loses their colonies; more than ten players share factions.
 
 ## Still to do (roadmap)
 
 Kept here so they aren't lost between test rounds:
 
 - **NPC factions' own activity** is still rolled separately on every game: their raids, expeditions, invasions, pirate and Pathers bases, inspections, and commodity events. Fixing it means switching those managers off on friends' games and copying the host's results, one kind at a time.
-- **Market ownership** (Nexerelin invasions, and any mod that moves markets) isn't shared. A safe ownership change needs Nexerelin's own transfer code. **Player colonies:** first step done in 0.1.16 (section 33: owners, each player's colonies as their own faction on the other games, visiting and trading, the host deciding takeovers, the owner's colony kept in the host's world). Still to do: the owner's admin and colony settings (hazard pay, incentives) carried over, growth progress, what NPC factions do to a player's colony shared, and trading at another player's colony against the owner's own stock rather than the host's copy.
+- **Market ownership** (Nexerelin invasions, and any mod that moves markets) isn't shared. A safe ownership change needs Nexerelin's own transfer code. **Player colonies:** first step done in 0.1.16 (section 33: owners, each player's colonies as their own faction on the other games, visiting and trading, the host deciding takeovers, the owner's colony kept in the host's world). 0.1.17 (section 34) carries everything else about a colony (admin, hazard pay, growth, construction, queue, disruption, unrest, conditions, the friend's faction name and flag and hired admins), makes the host's game the only place a player colony can be invaded, and sends raids and bombardments there to the owner. Still to do: trading at another player's colony against the owner's own stock rather than the host's copy; NPC raids from the owner's own game counting alongside the host's (needs the NPC activity item above).
 - **NPC battles a friend joins** keep fighting on the owner's game meanwhile, so both games can wear down the same fleets. Pausing the owner's copy of the battle needs a way to hold its autoresolve.
 - **Joint battle view:** no objectives (so no capture orders), the joiner's ship answers one ping late, and muzzle flashes, armour damage marks and the systems the view can't switch on (teleports, drones, EMP, targeted systems, and all of mods' own system scripts) aren't shown. Showing mods' systems safely would need the leader to stream each system's effect, not just its state.
 - **Friends' characters in the host's save** (agreed design, not built): every player's character stored inside the host's save at each shared save, dormant unless hosting, so a rewind rewinds everyone and a friend can recover theirs from the host.
