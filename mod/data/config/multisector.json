@@ -86,6 +86,15 @@
 	# Relations between NPC factions (wars and peace, including Nexerelin's diplomacy)
 	# follow the host's world. Your own reputation with each faction stays yours.
 	"shareFactionRelations":true,
+	# Nexerelin's world is the host's: on a friend's game, while connected, Nexerelin's own
+	# invasions, raids, diplomacy, alliances, agents, colony expeditions and strategic AI stand
+	# down, and markets change hands, are founded and fall as they do on the host's game.
+	# Its news (invasions, raids, wars, rebellions...) shows in everyone's intel.
+	"nexerelinFromHost":true,
+	# Host: while a player is offline, NPC factions leave their colonies alone (no invasions,
+	# no raids). Off: their colonies can be attacked while they're away, and it's there when
+	# they come back.
+	"protectOfflineColonies":true,
 
 	# The players panel on the campaign map: who's where and doing what.
 	# The hotkey shows or hides it; more detail is in the Multiplayer window.

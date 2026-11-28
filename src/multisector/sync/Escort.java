@@ -7,6 +7,7 @@ import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.JumpPointAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
+import com.fs.starfarer.api.impl.campaign.ids.Abilities;
 import com.fs.starfarer.api.util.Misc;
 import multisector.net.ClockState;
 import multisector.net.FleetState;
@@ -45,6 +46,10 @@ public final class Escort implements EveryFrameScript {
     private static String lastLocation;
     private static float lastX, lastY;
     private static boolean seenThere;
+    /** Our own jump: where from, and until when we give their fleet to show up where we land. */
+    private static LocationAPI jumpedFrom;
+    private static long graceUntil;
+    private static final long GRACE_NANOS = 8_000_000_000L;
     private long lastMenuNanos;
     private static boolean keepMoving = true;
 
@@ -53,6 +58,8 @@ public final class Escort implements EveryFrameScript {
         target = playerId;
         lastSet = null;
         seenThere = false;
+        jumpedFrom = null;
+        graceUntil = 0;
         try {
             CampaignUIAPI ui = Global.getSector().getCampaignUI();
             if (ui != null) ui.clearLaidInCourse(); // a plotted course would steer us away again every frame
@@ -138,6 +145,24 @@ public final class Escort implements EveryFrameScript {
         }
         CampaignFleetAPI me = Global.getSector().getPlayerFleet();
         if (me == null || me.getBattle() != null) return;
+        long now = System.nanoTime();
+        // Mid-jump: nothing to decide until we're through. (Before, the frames of our own jump found us still in the
+        // old system with them gone from it, and the escort ended right there.)
+        if (me.isInHyperspaceTransition()) {
+            graceUntil = now + GRACE_NANOS;
+            return;
+        }
+        if (jumpedFrom != null) {
+            if (me.getContainingLocation() == jumpedFrom && now - graceUntil < 0) return; // the jump hasn't begun yet
+            jumpedFrom = null;
+            // Through: they came this way, so where we land is where we last "saw" them, and their fleet gets a
+            // moment to show up here.
+            seenThere = true;
+            lastX = me.getLocation().x;
+            lastY = me.getLocation().y;
+            lastSet = null;
+            graceUntil = now + GRACE_NANOS;
+        }
         // Did the player send us somewhere else since our last order? Then they've taken over.
         if (lastSet != null && me.getMoveDestination() != null
                 && Misc.getDistance(me.getMoveDestination(), lastSet) > 50f) {
@@ -162,6 +187,7 @@ public final class Escort implements EveryFrameScript {
             return;
         }
         if (r == null || r.state == null) return;
+        if (now - graceUntil < 0) return; // just through a jump: their fleet may not be here yet
         // They're somewhere else: through the jump point nearest where we last saw them, if one leads there.
         LocationAPI here = me.getContainingLocation();
         if (!seenThere || here == null) {
@@ -187,19 +213,53 @@ public final class Escort implements EveryFrameScript {
             }
         }
         if (jp == null) {
-            stop("lost them: they didn't leave through a jump point");
+            transverse(s, me, r, menu);
             return;
         }
         if (Misc.getDistance(me.getLocation(), jp.getLocation()) < jp.getRadius() + me.getRadius() + 150f) {
             if (menu) return; // jumps wait for the map: we're at the jump point, ready
             log.info("[MultiSector] following " + s.playerName(target) + " through " + jp.getName());
-            lastSet = null;
-            seenThere = false;
-            Global.getSector().doHyperspaceTransition(me, jp, dest);
+            jump(me, jp, dest, now);
             return;
         }
         me.setMoveDestination(jp.getLocation().x, jp.getLocation().y);
         lastSet = new Vector2f(jp.getLocation());
+    }
+
+    private static void jump(CampaignFleetAPI me, SectorEntityToken from, JumpPointAPI.JumpDestination dest, long now) {
+        lastSet = null;
+        seenThere = false;
+        jumpedFrom = me.getContainingLocation();
+        graceUntil = now + GRACE_NANOS;
+        Global.getSector().doHyperspaceTransition(me, from, dest);
+    }
+
+    /**
+     * No jump point leads where they went: they used Transverse Jump (into or out of hyperspace anywhere). We do
+     * the same if we can, as the ability does: fuel for a light year's travel into hyperspace, free into a system.
+     */
+    private static void transverse(Session s, CampaignFleetAPI me, FleetState.Received r, boolean menu) {
+        LocationAPI there = FleetSync.findLocation(r.state.location);
+        LocationAPI here = me.getContainingLocation();
+        if (there == null || here == null || there.isHyperspace() == here.isHyperspace()) {
+            stop("lost them: they didn't leave through a jump point");
+            return;
+        }
+        if (!me.hasAbility(Abilities.TRANSVERSE_JUMP)) {
+            stop("they used Transverse Jump, which you don't have");
+            return;
+        }
+        float fuel = there.isHyperspace() ? me.getLogistics().getFuelCostPerLightYear() : 0f;
+        if (fuel > me.getCargo().getFuel()) {
+            stop("not enough fuel to follow their Transverse Jump");
+            return;
+        }
+        if (menu) return; // jumps wait for the map
+        if (fuel > 0f) me.getCargo().removeFuel(fuel);
+        SectorEntityToken spot = there.createToken(r.state.x, r.state.y);
+        log.info("[MultiSector] following " + s.playerName(target) + " by Transverse Jump into " + r.state.location
+                + " (" + Math.round(fuel) + " fuel)");
+        jump(me, me, new JumpPointAPI.JumpDestination(spot, null), System.nanoTime());
     }
 
     // ================================================================ menus

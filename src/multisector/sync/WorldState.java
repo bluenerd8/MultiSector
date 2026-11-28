@@ -95,6 +95,7 @@ public final class WorldState implements EveryFrameScript {
         relationsSent = "";
         bountiesSent = "";
         loggedRelations = false;
+        BountyClaims.forget();
     }
 
     public boolean isDone() {
@@ -125,6 +126,7 @@ public final class WorldState implements EveryFrameScript {
             if (now - nextScan > 0) {
                 nextScan = now + SCAN_NANOS;
                 if (MultiSectorConfig.isShareSurveys()) scanPlaces(s);
+                BountyClaims.scan(s);
             }
             if (s.getState() == Session.State.HOSTING) {
                 if (MultiSectorConfig.isShareFactionRelations() && now - nextRelations > 0) {
@@ -157,6 +159,8 @@ public final class WorldState implements EveryFrameScript {
                 if (MultiSectorConfig.isShareFactionRelations()) applyRelations(j);
             } else if ("bounties".equals(w)) {
                 if (MultiSectorConfig.isShareSystemBounties()) applyBounties(j);
+            } else if ("claimed".equals(w)) {
+                BountyClaims.apply(j);
             }
         } catch (Exception e) {
             log.warn("[MultiSector] couldn't apply a world change (" + w + "): " + e);

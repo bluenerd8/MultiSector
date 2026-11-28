@@ -148,10 +148,14 @@ final class JointSpoils {
 
     /** As the game readies a ship for its recovery screen: d-mods, and what survives of weapons and wings. */
     static void prepare(FleetMemberAPI m, boolean ours, boolean wrecked, CampaignFleetAPI me) {
+        prepare(m, ours, wrecked, me, new Random(1000000L * m.getId().hashCode() + Global.getSector().getPlayerBattleSeed()));
+    }
+
+    /** The same, with the dice given: a wreckage's ships roll the same every time it's opened. */
+    static void prepare(FleetMemberAPI m, boolean ours, boolean wrecked, CampaignFleetAPI me, Random r) {
         ShipVariantAPI v = m.getVariant().clone();
         v.setSource(VariantSource.REFIT);
         m.setVariant(v, false, true);
-        Random r = new Random(1000000L * m.getId().hashCode() + Global.getSector().getPlayerBattleSeed());
         float avoid = m.getStats().getDynamic().getMod(Stats.DMOD_AVOID_PROB_MOD).computeEffective(0f);
         float acquire = m.getStats().getDynamic().getMod(Stats.DMOD_ACQUIRE_PROB_MOD).computeEffective(1f);
         if (r.nextFloat() >= avoid && r.nextFloat() < acquire) {
@@ -589,6 +593,7 @@ final class JointSpoils {
                     }
                     JSONObject sj = ShipJson.ship(m);
                     sj.put("destroyed", pass == 1);
+                    sj.put("id", m.getId()); // the wreckage's dice for it: the same each time it's opened
                     enemyLost.put(m.getId(), sj);
                     n++;
                 } catch (Exception e) {

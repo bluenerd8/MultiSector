@@ -384,6 +384,10 @@ public final class WorldObjects implements EveryFrameScript {
             WorldState.apply(j); // world-wide facts: raids, discoveries, relations, bounties
             return;
         }
+        if (NexSync.handles(j)) {
+            NexSync.apply(j); // the host's Nexerelin: who owns which market, and its news
+            return;
+        }
         try {
             SectorEntityToken talking = NpcSync.dialogTarget();
             if (talking != null && j.optString("id").equals(talking.getId())) {

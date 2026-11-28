@@ -33,6 +33,8 @@ import com.fs.starfarer.api.impl.campaign.population.CoreImmigrationPluginImpl;
 import com.fs.starfarer.api.impl.campaign.submarkets.StoragePlugin;
 import multisector.character.ShipJson;
 import multisector.net.Session;
+import multisector.nex.Nex;
+import multisector.ui.MultiSectorConfig;
 import org.apache.log4j.Logger;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -221,6 +223,11 @@ public final class ColonySync implements EveryFrameScript, PlayerColonizationLis
     private static boolean online(Session s, String name) {
         for (Session.Player p : s.getPlayers()) if (name.equals(p.name)) return true;
         return false;
+    }
+
+    /** Host, protecting offline players: this owner isn't here, so NPC factions leave their colonies and faction alone. */
+    private static boolean away(Session s, String owner) {
+        return isHost(s) && MultiSectorConfig.isProtectOfflineColonies() && !owner.equals(me(s)) && !online(s, owner);
     }
 
     private static String ownerOf(MarketAPI m) {
@@ -416,6 +423,8 @@ public final class ColonySync implements EveryFrameScript, PlayerColonizationLis
                 f.setDisplayNameOverride(name);
                 f.setDisplayNameWithArticleOverride(name);
             }
+            // Away (host protecting offline players): at war with nobody, so no NPC faction targets them meanwhile.
+            boolean away = away(Session.get(), owner);
             if (look != null) {
                 String logo = look.optString("logo", "");
                 String crest = look.optString("crest", "");
@@ -427,7 +436,12 @@ public final class ColonySync implements EveryFrameScript, PlayerColonizationLis
                     String other = (String) ri.next();
                     if (Global.getSector().getFaction(other) == null || owner.equals(me)) continue;
                     float r = (float) rel.optDouble(other, 0);
+                    if (away) r = Math.max(r, 0f);
                     if (Math.abs(f.getRelationship(other) - r) > 0.005f) f.setRelationship(other, r);
+                }
+            } else if (away) {
+                for (FactionAPI g : Global.getSector().getAllFactions()) {
+                    if (g != f && f.getRelationship(g.getId()) < 0f) f.setRelationship(g.getId(), 0f);
                 }
             }
             // Players are always friends: with us, and with each other's factions.
@@ -463,8 +477,9 @@ public final class ColonySync implements EveryFrameScript, PlayerColonizationLis
                 log.info("[MultiSector] colony " + m.getName() + " is " + owner + "'s");
             }
             if (hosting) assign(s, owner); // every owner (the host too) has a faction for the other games
-            // Only the host's Nexerelin may invade a player's colony: everywhere else it wouldn't count.
-            protect(m, !hosting);
+            // Only the host's Nexerelin may invade a player's colony: everywhere else it wouldn't count. On the host's
+            // game too while its owner is away, if the host protects offline players' colonies.
+            protect(m, !hosting || away(s, owner));
             String fid = m.getFactionId();
             boolean taken = !Factions.PLAYER.equals(fid) && !isPlayersFaction(fid) && !m.isPlayerOwned();
             if (taken && hosting) {
@@ -906,6 +921,7 @@ public final class ColonySync implements EveryFrameScript, PlayerColonizationLis
         j.put("owner", owner).put("name", m.getName()).put("size", m.getSize()).put("freePort", m.isFreePort());
         j.put("stability", Math.round(m.getStabilityValue()));
         j.put("unrest", RecentUnrest.getPenalty(m));
+        if (m.getMemoryWithoutUpdate().getBoolean(NexSync.CAPTURED)) j.put("captured", true);
         JSONArray inds = new JSONArray();
         for (Industry ind : m.getIndustries()) {
             JSONObject o = new JSONObject().put("id", ind.getId());
@@ -1056,9 +1072,17 @@ public final class ColonySync implements EveryFrameScript, PlayerColonizationLis
             if (fresh) {
                 found(m, planet, j, faction);
             } else if (!isColony(m)) {
-                log.info("[MultiSector] " + owner + "'s colony at " + planet.getName() + " is an NPC faction's market here;"
-                        + " leaving it");
-                return;
+                FactionAPI to = Global.getSector().getFaction(faction);
+                if (!j.optBoolean("captured") || to == null) {
+                    log.info("[MultiSector] " + owner + "'s colony at " + planet.getName() + " is an NPC faction's market"
+                            + " here; leaving it");
+                    return;
+                }
+                // They took it themselves (their own invasion): it's their colony now, on every game.
+                String was = m.getFaction().getDisplayNameWithArticle();
+                Nex.transfer(m, to, true);
+                log.info("[MultiSector] " + owner + " took " + m.getName() + " from " + was + "; their colony now");
+                s.notice(owner + " took " + m.getName() + " from " + was + ": it's their colony now.");
             }
             m.getMemoryWithoutUpdate().set(OWNER, owner);
             if (isHost(s)) acked(m, j.optJSONArray("hits"));

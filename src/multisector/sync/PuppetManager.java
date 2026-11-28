@@ -282,6 +282,9 @@ public final class PuppetManager {
         f.setTransponderOn(true);
         f.getStats().getDetectedRangeMod().modifyFlat(VISIBLE_ID, 1_000_000f, "MultiSector: another player");
         f.getStats().getSensorProfileMod().modifyFlat(VISIBLE_ID, 1_000_000f, "MultiSector: another player");
+        // And past the game's cap on every sensor range (5000, or 2000 in hyperspace), which the detected range
+        // alone doesn't lift.
+        f.setExtendedDetectedAtRange(1_000_000f);
         loc.addEntity(f);
         f.setLocation(s.x, s.y);
         p.nextCheck = System.nanoTime() + CHECK_NANOS;

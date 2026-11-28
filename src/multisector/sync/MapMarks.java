@@ -147,6 +147,9 @@ public final class MapMarks implements EveryFrameScript {
         // game works it out again); the detected range is what it reads, as for the players' fleets.
         m.entity.setSensorProfile(1_000_000f);
         m.entity.getDetectedRangeMod().modifyFlat(SEEN_ID, 1_000_000f);
+        // The game also caps every sensor range at 5000 (2000 in hyperspace) unless the entity extends that cap:
+        // without this, marks vanished past those distances whatever their detected range.
+        m.entity.setExtendedDetectedAtRange(1_000_000f);
         m.entity.setLocation(x, y);
     }
 

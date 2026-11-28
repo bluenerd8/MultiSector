@@ -880,11 +880,48 @@ When the owner's game takes the colony back from the host's copy next session, i
 
 Known limits: the faction's main colour is its slot's; NPC raids from the owner's own game also count, so a colony can be raided from both games; patrols around a colony are each game's own NPC fleets (fleet sync shares them where players are together); a player who changes their name loses their colonies; more than ten players share factions.
 
+## 35. Nexerelin's world from the host (phase 1), and test-round fixes (0.1.18)
+
+### Nexerelin: phase 1 (`NexSync`, `multisector.nex`)
+
+The rule: Nexerelin runs the shared world on the host's game only. Every client follows it and keeps only what's personal.
+
+- **Friends stand down** (`nexerelinFromHost`, default on). While connected, a friend's game switches off Nexerelin's planners through its runtime settings (`NexConfig`, read by its managers each time they plan): invasions and raids, NPC sat bombs, diplomacy, alliances and alliance offers, NPC agents, colony expeditions, the strategic AI, NPC colony growth and victory. The values are put back when the friend goes offline. Left on, as personal: vengeance fleets, your own colonies' crises, punitive expeditions against you, your followers' own moves.
+- **Market owners are the host's.** The host sends every NPC market's owner and size (`{"e":"nexowners"}`), on change (checked every 10 s) and once a minute. The key is location and primary entity. Players' colonies (`ColonySync`'s) and hidden markets (bases) are left out.
+  - **A market that changed hands:** a friend hands it over with Nexerelin's own `SectorManager.transferMarket` (or plainly without Nexerelin). Never while docked there.
+  - **A market the friend lacks** on a planet (a colony expedition's): the friend asks (`nexask`), the host answers (`nexmarket`: name, faction, size, free port, industries), and the friend founds it the way the game does.
+  - **A planet market missing from two host lists in a row:** decivilized on the friend's game.
+- **Your own captures.** A market a friend took themselves (player faction locally, an NPC's on the host) is flagged `$multisector_captured`, and their colony report carries `captured`. Every game then transfers it to that player's faction and it's their colony (section 33).
+- **News** (host → everyone, `{"e":"nexintel"}`, every 5 s on change, all of it once a minute): Nexerelin's invasions, counter- and respawn invasions, raids, Remnant raids, base strikes, sat bombs, rebellions, diplomacy, alliances, colony expeditions and respawn bases.
+  - Each one carries its title, icon, faction, map location and, if it's aimed at a player's colony, the owner.
+  - A friend shows it as intel of our own (`NexSync.Mirror`, tag "Host's world") and ends it when the host's does. It's skipped if the friend's own copy of that intel (from the save) is already there.
+  - The owner of a targeted colony gets it marked important, and a warning.
+- **Offline protection** (`protectOfflineColonies`, host, default on). While a player is offline, the host's game marks their colonies `$nex_uninvadable`. It also lifts their faction's relations to at least neutral with everyone, so no NPC faction targets them. It all comes back when they reconnect.
+- **Building:** `dev.ps1` compiles against `ExerelinCore.jar` from the game's mods folder. Only `NexBridge` uses Nexerelin's classes, and it's loaded only when Nexerelin is enabled.
+
+Not yet: whether the switches stop everything already under way. An operation that was in progress when the friend downloaded the save keeps going on their game, and its result is put right by the host's market owners.
+
+### Fixes from the test round
+
+- **Marks lost at a distance.** The game caps every sensor range at 5000 units (2000 in hyperspace). The detected-range bonus doesn't lift that cap; `setExtendedDetectedAtRange` does. Map marks and players' fleets now set it.
+- **Systems marked on the sector map.** Each player's intel entry is placed on the star of the system they're in, not on their fleet, so the sector map always shows where everyone is.
+- **Escort through jumps.** During our own jump, the next frames still saw us in the old system with them gone, and escorting stopped. Now it waits out the transition, and after landing gives their fleet 8 s to show up. If they left by Transverse Jump (no jump point leads there), we follow the same way when we have the ability, paying the same fuel (a light year's worth into hyperspace, free into a system).
+- **Person bounties claimed for everyone** (`BountyClaims`). A bounty that came with the host's save is the same person and fleet on every game. When a game's bounty ends as the player's (paid or not), it sends `{"e":"world","w":"claimed"}`. The others remove their copy of the target fleet, so their bounty ends as taken by someone else, and say who claimed it. Bounties posted on one game only are that player's.
+- **Battle Wreckage stays the same.** Each ship's recovery roll and d-mods were tied to a fresh id and the last battle, so they changed every visit. Now each ship has fixed dice: a seed from the wreckage and the ship's original id, stored from 0.1.18 on. The chance is still the game's (base, the ship's own, your fleet's recovery bonuses from salvage skills), so better salvaging still recovers more.
+
 ## Still to do (roadmap)
 
 Kept here so they aren't lost between test rounds:
 
-- **NPC factions' own activity** is still rolled separately on every game: their raids, expeditions, invasions, pirate and Pathers bases, inspections, and commodity events. Fixing it means switching those managers off on friends' games and copying the host's results, one kind at a time.
+- **NPC factions' own activity:** Nexerelin's part is the host's from 0.1.18 (phase 1, section 35). Still each game's own: the vanilla game's raids and expeditions, pirate and Pathers bases, inspections, and commodity events.
+- **Nexerelin phase 2:**
+  - invasion and raid fleets shown on every game wherever they are, and fightable by anyone (the fleet-hold protocol), so a colony can be defended away from the host;
+  - NPC markets' state from the host (disruption, unrest, buildings);
+  - what a friend does going up to the host: their agents' effects on markets.
+- **Nexerelin phase 3:**
+  - Nexerelin diplomacy for players' factions run on the host, each change sent to the owner (a setting);
+  - alliances with players;
+  - friends sending marines to Nexerelin's ground battles.
 - **Market ownership** (Nexerelin invasions, and any mod that moves markets) isn't shared. A safe ownership change needs Nexerelin's own transfer code. **Player colonies:** first step done in 0.1.16 (section 33: owners, each player's colonies as their own faction on the other games, visiting and trading, the host deciding takeovers, the owner's colony kept in the host's world). 0.1.17 (section 34) carries everything else about a colony (admin, hazard pay, growth, construction, queue, disruption, unrest, conditions, the friend's faction name and flag and hired admins), makes the host's game the only place a player colony can be invaded, and sends raids and bombardments there to the owner. Still to do: trading at another player's colony against the owner's own stock rather than the host's copy; NPC raids from the owner's own game counting alongside the host's (needs the NPC activity item above).
 - **NPC battles a friend joins** keep fighting on the owner's game meanwhile, so both games can wear down the same fleets. Pausing the owner's copy of the battle needs a way to hold its autoresolve.
 - **Joint battle view:** no objectives (so no capture orders), the joiner's ship answers one ping late, and muzzle flashes, armour damage marks and the systems the view can't switch on (teleports, drones, EMP, targeted systems, and all of mods' own system scripts) aren't shown. Showing mods' systems safely would need the leader to stream each system's effect, not just its state.

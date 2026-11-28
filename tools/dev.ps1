@@ -91,6 +91,11 @@ function Invoke-Build([switch]$Bump) {
     ) | ForEach-Object { Join-Path $core $_ }
     $missing = $libs | Where-Object { -not (Test-Path $_) }
     if ($missing) { throw "Missing game jars: $($missing -join ', ')" }
+    # Nexerelin, compiled against (multisector.nex.NexBridge) but optional in the game: only used when it's enabled.
+    $nex = Get-ChildItem (Join-Path $GameDir "mods") -Recurse -Filter "ExerelinCore.jar" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $nex) { throw "Nexerelin (ExerelinCore.jar) isn't in $GameDir\mods: it's needed to compile multisector.nex" }
+    $libs += $nex.FullName
 
     $classes = Join-Path $root "build\classes"
     if (Test-Path $classes) { Remove-Item -Recurse -Force $classes }

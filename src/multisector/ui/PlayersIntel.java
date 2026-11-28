@@ -222,6 +222,12 @@ public final class PlayersIntel implements EveryFrameScript {
         @Override
         public SectorEntityToken getMapLocation(SectorMapAPI map) {
             CampaignFleetAPI f = PuppetManager.fleetOf(player);
+            if (f == null) return null;
+            // In a star system: its star, so the sector map marks the system they're in whatever our sensors see.
+            if (f.getContainingLocation() instanceof com.fs.starfarer.api.campaign.StarSystemAPI) {
+                com.fs.starfarer.api.campaign.StarSystemAPI sys = (com.fs.starfarer.api.campaign.StarSystemAPI) f.getContainingLocation();
+                if (sys.getCenter() != null) return sys.getCenter();
+            }
             return f;
         }
 

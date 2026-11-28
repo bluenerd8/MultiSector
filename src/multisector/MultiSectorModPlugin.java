@@ -81,6 +81,8 @@ public class MultiSectorModPlugin extends BaseModPlugin {
         Global.getSector().addTransientScript(new Escort());
         WorldState.forget();
         Global.getSector().addTransientScript(new WorldState());
+        multisector.sync.NexSync.forget();
+        Global.getSector().addTransientScript(new multisector.sync.NexSync());
         Global.getSector().getListenerManager().addListener(new WorldState.HostileActs(), true);
         JointBattle.forget();
         Global.getSector().addTransientScript(new JointBattle());

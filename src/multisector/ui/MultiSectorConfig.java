@@ -34,6 +34,8 @@ public final class MultiSectorConfig {
     private static boolean joinNpcBattles = true;
     private static boolean shareRaids = true;
     private static boolean shareSystemBounties = true;
+    private static boolean nexerelinFromHost = true;
+    private static boolean protectOfflineColonies = true;
     private static boolean shareFactionRelations = true;
     private static int hudHotkey = Keyboard.KEY_F7;
     private static String hudHotkeyName = "F7";
@@ -82,6 +84,8 @@ public final class MultiSectorConfig {
             joinNpcBattles = json.optBoolean("joinNpcBattles", true);
             shareRaids = json.optBoolean("shareRaids", true);
             shareSystemBounties = json.optBoolean("shareSystemBounties", true);
+            nexerelinFromHost = json.optBoolean("nexerelinFromHost", true);
+            protectOfflineColonies = json.optBoolean("protectOfflineColonies", true);
             shareFactionRelations = json.optBoolean("shareFactionRelations", true);
             int[] ck = key(json.optString("chatHotkey", "ENTER"), Keyboard.KEY_RETURN);
             chatHotkey = ck[0];
@@ -165,6 +169,10 @@ public final class MultiSectorConfig {
     public static boolean isShareSystemBounties() { return shareSystemBounties; }
     /** Relations between NPC factions (wars, peace, Nexerelin diplomacy) follow the host's world. */
     public static boolean isShareFactionRelations() { return shareFactionRelations; }
+    /** Friend: Nexerelin's world decisions (invasions, diplomacy, expeditions...) are the host's while connected. */
+    public static boolean isNexerelinFromHost() { return nexerelinFromHost; }
+    /** Host: NPC factions leave a player's colonies and faction alone while that player is offline. */
+    public static boolean isProtectOfflineColonies() { return protectOfflineColonies; }
     /** Your fleet keeps flying its course while the cargo, refit, character or map screen is open. */
     public static boolean isKeepMovingInMenus() { return keepMovingInMenus; }
     /** Owner: a friend can join a battle between NPC fleets in our world (it's held for them while they do). */

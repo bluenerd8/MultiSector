@@ -16,6 +16,8 @@ import com.fs.starfarer.api.impl.campaign.DerelictShipEntityPlugin;
 import com.fs.starfarer.api.impl.campaign.DerelictShipEntityPlugin.DerelictShipData;
 import com.fs.starfarer.api.impl.campaign.FleetEncounterContext;
 import com.fs.starfarer.api.impl.campaign.ids.Factions;
+import com.fs.starfarer.api.impl.campaign.ids.Stats;
+import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.impl.campaign.rulecmd.salvage.special.ShipRecoverySpecial.PerShipData;
 import com.fs.starfarer.api.impl.campaign.rulecmd.salvage.special.ShipRecoverySpecial.ShipCondition;
 import com.fs.starfarer.api.util.Misc;
@@ -28,6 +30,7 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 
 /**
  * What a joint battle's leader leaves behind: one object at the battle's
@@ -216,8 +219,13 @@ final class Wreckage {
                     if (m == null || Misc.isUnboardable(m)) continue;
                     boolean wrecked = sj.optBoolean("destroyed");
                     m.getStatus().setHullFraction(0.01f);
-                    boolean easy = Misc.isShipRecoverable(m, me, false, false, wrecked ? 0.5f : 1f);
-                    JointSpoils.prepare(m, false, wrecked, me);
+                    // Fixed dice per ship in this wreckage: what can be recovered, and with which d-mods, is the same
+                    // every visit. Only your fleet's recovery bonuses (salvaging skills) change the chance.
+                    String key = sj.optString("id", "") + "|" + sj.optString("hull", "") + "|" + sj.optString("shipName", "")
+                            + "|" + (sj.has("id") ? 0 : i);
+                    long seed = 31L * target.getId().hashCode() + key.hashCode();
+                    boolean easy = recoverable(m, me, wrecked ? 0.5f : 1f, new Random(seed));
+                    JointSpoils.prepare(m, false, wrecked, me, new Random(seed * 7919L + 1L));
                     (easy ? normal : story).add(m);
                     index.put(m, i);
                 } catch (Exception ex) {
@@ -244,6 +252,20 @@ final class Wreckage {
                     menu();
                 }
             });
+        }
+
+        /**
+         * The game's recovery chance (Misc.isShipRecoverable: base chance, the ship's own modifier, the fleet's
+         * recovery bonus) against our fixed roll, instead of one tied to the ship's id and the last battle, which
+         * changed every time the wreckage was opened.
+         */
+        private static boolean recoverable(FleetMemberAPI m, CampaignFleetAPI me, float mult, Random roll) {
+            if (m.getVariant().hasTag(Tags.VARIANT_ALWAYS_RECOVERABLE)) return true;
+            float chance = Global.getSettings().getFloat("baseShipRecoveryChance");
+            chance = m.getStats().getDynamic().getMod(Stats.INDIVIDUAL_SHIP_RECOVERY_MOD).computeEffective(chance);
+            if (me != null) chance = me.getStats().getDynamic().getMod(Stats.SHIP_RECOVERY_MOD).computeEffective(chance);
+            chance = Math.max(0f, Math.min(1f, chance * mult));
+            return roll.nextFloat() < chance;
         }
 
         private void recover(CampaignFleetAPI me, List<FleetMemberAPI> picked, JSONArray all,
